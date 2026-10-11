@@ -195,6 +195,7 @@ async fn main() {
         .route("/oauth/token", post(oauth::token))
         .route("/oauth/revoke", post(oauth::revoke))
         .route("/agents/install.sh", get(api_tokens::install_script))
+        .route("/agents/install.ps1", get(api_tokens::install_script_ps1))
         .route("/agents/skills/flexma/{*path}", get(api_tokens::skill_file));
 
     let app = if index.exists() {

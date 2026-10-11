@@ -166,6 +166,14 @@ export interface AgentSetup {
   claudeTokenCommand: string;
   codexTokenCommand: string;
   codexTokenConfig: string;
+  /** Windows PowerShell variants. */
+  windows?: {
+    skillInstallCommand: string;
+    claudeCommand: string;
+    codexCommand: string;
+    claudeTokenCommand: string;
+    codexTokenCommand: string;
+  };
 }
 
 export interface FileVersion {

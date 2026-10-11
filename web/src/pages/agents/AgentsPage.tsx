@@ -3,6 +3,8 @@ import { Bot, Infinity as InfinityIcon, MousePointer2, ShieldCheck } from 'lucid
 import { api, type CreatedApiToken } from '../../lib/api';
 import { useAsync } from '../../lib/useAsync';
 import { useDocumentTitle } from '../../lib/useDocumentTitle';
+import { useAgentOS } from '../../lib/platform';
+import { OsSwitch } from '../../components/OsSwitch';
 import { PageHeader } from '../../components/dashboard/PageHeader';
 import { ConnectSection, SkillSection, TokenConnectSection } from './ConnectSection';
 import { TokensSection } from './TokensSection';
@@ -11,6 +13,7 @@ export default function AgentsPage() {
   useDocumentTitle('AI Agents');
   const [fresh, setFresh] = useState<CreatedApiToken | null>(null);
   const setup = useAsync(() => api.agentSetup(), 'agent-setup');
+  const [os, setOs] = useAgentOS();
 
   return (
     <div className="page page-narrow">
@@ -40,16 +43,21 @@ export default function AgentsPage() {
         </div>
       </section>
 
+      <div className="os-row agents-os">
+        <span className="text-muted">Setting up on</span>
+        <OsSwitch value={os} onChange={setOs} />
+      </div>
+
       <div className="steps">
         <Step n={1} title="Connect your agent" description="Sign in through your browser. No tokens to copy, just like Figma's MCP.">
-          <ConnectSection setup={setup} />
+          <ConnectSection setup={setup} os={os} />
         </Step>
         <Step
           n={2}
           title="Install the Flexma skill (recommended)"
           description="Teaches your agent Flexma's tools and design conventions, so results look right the first time."
         >
-          <SkillSection setup={setup} />
+          <SkillSection setup={setup} os={os} />
         </Step>
         <Step
           n={3}
@@ -57,7 +65,7 @@ export default function AgentsPage() {
           description="Browser sign-ins show up here as '(OAuth)' tokens. For headless agents or CI, create a token and send it as a bearer header."
         >
           <TokensSection fresh={fresh} onCreated={setFresh} onDismissFresh={() => setFresh(null)} />
-          {fresh && <TokenConnectSection setup={setup} token={fresh.token} />}
+          {fresh && <TokenConnectSection setup={setup} os={os} token={fresh.token} />}
         </Step>
       </div>
     </div>

@@ -96,6 +96,16 @@ pub fn setup_snippets(base: &str) -> Value {
         "codexTokenConfig": format!(
             "[mcp_servers.flexma]\nurl = \"{mcp}\"\nbearer_token_env_var = \"FLEXMA_TOKEN\"\ndefault_tools_approval_mode = \"approve\""
         ),
+        // Windows PowerShell variants (5.1 has no `&&`, and no `sh` to pipe into).
+        "windows": {
+            "skillInstallCommand": format!("irm {base}/agents/install.ps1 | iex"),
+            "claudeCommand": format!("claude mcp add --scope user --transport http flexma {mcp}"),
+            "codexCommand": format!("codex mcp add flexma --url {mcp}; codex mcp login flexma"),
+            "claudeTokenCommand": format!(
+                "claude mcp add --scope user --transport http flexma {mcp} --header \"Authorization: Bearer $env:FLEXMA_TOKEN\""
+            ),
+            "codexTokenCommand": format!("codex mcp add flexma --url {mcp} --bearer-token-env-var FLEXMA_TOKEN"),
+        },
     })
 }
 
@@ -135,7 +145,10 @@ BASE="{base}"
 install_to() {{
   DEST="$1/flexma"
   mkdir -p "$DEST/references"
-  fetch() {{ curl -fsSL "$BASE/agents/skills/flexma/$1" -o "$DEST/$1"; }}
+  fetch() {{
+    if command -v curl >/dev/null 2>&1; then curl -fsSL "$BASE/agents/skills/flexma/$1" -o "$DEST/$1"
+    else wget -q "$BASE/agents/skills/flexma/$1" -O "$DEST/$1"; fi
+  }}
 {files}  echo "  installed skill -> $DEST"
 }}
 echo "Installing the Flexma skill from $BASE"
@@ -155,4 +168,50 @@ echo ""
         codex = snippets["codexCommand"].as_str().unwrap_or_default().replace('\'', "'\\''"),
     );
     ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script).into_response()
+}
+
+/// The same installer for Windows: `irm <base>/agents/install.ps1 | iex`.
+pub async fn install_script_ps1(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let base = st.base_url(&headers);
+    let snippets = setup_snippets(&base);
+    let ps = |s: &str| s.replace('\'', "''");
+    let files: Vec<String> = SKILL_FILES.iter().map(|(p, _)| format!("'{p}'")).collect();
+    let script = format!(
+        r#"# Flexma skill installer for Claude Code and Codex (Windows PowerShell).
+# Installs the "flexma" skill into ~\.claude\skills and ~\.codex\skills.
+# Runs in its own scope so nothing leaks into your session.
+& {{
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$FlexmaBase = '{base}'
+$FlexmaFiles = @({files})
+function Install-FlexmaSkill([string]$Root) {{
+  $Dest = Join-Path $Root 'flexma'
+  New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'references') | Out-Null
+  foreach ($File in $FlexmaFiles) {{
+    $Out = Join-Path $Dest ($File -replace '/', '\')
+    Invoke-WebRequest -UseBasicParsing -Uri "$FlexmaBase/agents/skills/flexma/$File" -OutFile $Out
+  }}
+  Write-Host "  installed skill -> $Dest"
+}}
+Write-Host "Installing the Flexma skill from $FlexmaBase"
+Install-FlexmaSkill (Join-Path $HOME '.claude\skills')
+Install-FlexmaSkill (Join-Path $HOME '.codex\skills')
+Write-Host ''
+Write-Host 'Next, connect the Flexma MCP server (your agent will open a browser to sign in):'
+Write-Host ''
+Write-Host '  Claude Code:'
+Write-Host '    {claude}'
+Write-Host ''
+Write-Host '  Codex:'
+Write-Host '    {codex}'
+Write-Host ''
+}}
+"#,
+        base = ps(&base),
+        files = files.join(", "),
+        claude = ps(snippets["windows"]["claudeCommand"].as_str().unwrap_or_default()),
+        codex = ps(snippets["windows"]["codexCommand"].as_str().unwrap_or_default()),
+    );
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], script).into_response()
 }

@@ -2747,3 +2747,16 @@ kbd {
     display: none;
   }
 }
+
+/* ---------- OS picker for setup commands ---------- */
+.os-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.agents-os {
+  justify-content: flex-start;
+  margin: 8px 0 4px;
+}
