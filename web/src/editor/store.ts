@@ -34,6 +34,8 @@ export class EditorStore {
   readonly shareToken: string | null;
   /** The file's workspace (members only), for its fonts. */
   readonly workspaceId: string | null;
+  /** The signed-in user, whose other tabs are hidden from this one. */
+  readonly userId: string | null;
   readonly fonts: FontManager;
   private listeners = new Set<Listener>();
   private socket: WebSocket | null = null;
@@ -65,6 +67,11 @@ export class EditorStore {
     page: '',
     editingText: null,
   };
+  /** Every other connection in the file, one per tab. */
+  private allPeers: Peer[] = [];
+  /** When each connection last moved its cursor, selected or changed page. */
+  private activeAt = new Map<string, number>();
+  /** The peers shown: each person's last active tab, none of this user's other tabs. */
   peers: Peer[] = [];
   comments: CommentThread[] = [];
   commentMode = false;
@@ -77,12 +84,17 @@ export class EditorStore {
   private notifyQueued = false;
   private flushTimer = 0;
 
-  constructor(engine: FlexmaEditor, fileId: string, opts: { shareToken?: string | null; workspaceId?: string | null } = {}) {
+  constructor(
+    engine: FlexmaEditor,
+    fileId: string,
+    opts: { shareToken?: string | null; workspaceId?: string | null; userId?: string | null } = {},
+  ) {
     const shareToken = opts.shareToken ?? null;
     this.engine = engine;
     this.fileId = fileId;
     this.shareToken = shareToken;
     this.workspaceId = opts.workspaceId ?? null;
+    this.userId = opts.userId ?? null;
     this.fonts = new FontManager(this);
     // Guests have no session cookie, so images load through the link instead.
     if (shareToken) engine.set_asset_base(shareUrls.assetBase(shareToken));
@@ -217,9 +229,8 @@ export class EditorStore {
       if (this.socket !== ws) return;
       this.socket = null;
       this.status = 'offline';
-      this.peers = [];
-      this.engine.set_peers('[]');
-      this.notify();
+      this.activeAt.clear();
+      this.setPeers([]);
       if (!this.closed) {
         const delay = Math.min(10_000, 500 * 2 ** this.retry++);
         window.setTimeout(() => {
@@ -251,8 +262,8 @@ export class EditorStore {
         this.clientId = String(msg.clientId);
         this.role = String(msg.role);
         this.engine.load(JSON.stringify(msg.doc), this.clientId, this.role !== 'viewer');
-        this.peers = ((msg.peers as Peer[]) ?? []).filter((p) => p.clientId !== this.clientId);
-        this.engine.set_peers(JSON.stringify(this.peers));
+        this.activeAt.clear();
+        this.setPeers(((msg.peers as Peer[]) ?? []).filter((p) => p.clientId !== this.clientId));
         this.status = 'online';
         this.presenceDirty = true;
         void this.refreshComments();
@@ -275,16 +286,14 @@ export class EditorStore {
       case 'presence': {
         const peer = msg.peer as Peer;
         if (peer.clientId === this.clientId) return;
-        const i = this.peers.findIndex((p) => p.clientId === peer.clientId);
-        this.peers = i >= 0 ? this.peers.map((p, j) => (j === i ? peer : p)) : [...this.peers, peer];
-        this.engine.set_peers(JSON.stringify(this.peers));
-        this.notify();
+        const i = this.allPeers.findIndex((p) => p.clientId === peer.clientId);
+        if (i >= 0 && isActivity(this.allPeers[i], peer)) this.activeAt.set(peer.clientId, performance.now());
+        this.setPeers(i >= 0 ? this.allPeers.map((p, j) => (j === i ? peer : p)) : [...this.allPeers, peer]);
         break;
       }
       case 'leave': {
-        this.peers = this.peers.filter((p) => p.clientId !== msg.clientId);
-        this.engine.set_peers(JSON.stringify(this.peers));
-        this.notify();
+        this.activeAt.delete(String(msg.clientId));
+        this.setPeers(this.allPeers.filter((p) => p.clientId !== msg.clientId));
         break;
       }
       case 'comments':
@@ -309,6 +318,26 @@ export class EditorStore {
         }
         break;
     }
+  }
+
+  /** Show one cursor, selection and avatar per person: the tab they used last. */
+  private setPeers(all: Peer[]) {
+    this.allPeers = all;
+    const rank = (p: Peer) => this.activeAt.get(p.clientId) ?? (p.cursor ? 0 : -1);
+    const shown = new Map<string, Peer>();
+    for (const p of all) {
+      // Agents carry their owner's user id but are separate collaborators.
+      if (p.isAgent) {
+        shown.set(`agent:${p.clientId}`, p);
+        continue;
+      }
+      if (p.userId === this.userId) continue;
+      const cur = shown.get(p.userId);
+      if (!cur || rank(p) >= rank(cur)) shown.set(p.userId, p);
+    }
+    this.peers = [...shown.values()];
+    this.engine.set_peers(JSON.stringify(this.peers));
+    this.notify();
   }
 
   /** Send queued ops (throttled) and presence. Called every animation frame. */
@@ -341,6 +370,18 @@ export class EditorStore {
     this.cursorWorld = world;
     this.presenceDirty = true;
   }
+}
+
+/**
+ * Whether a peer's new presence means someone is using that tab. The first
+ * update after joining doesn't count (reconnecting background tabs send one),
+ * and neither does the cursor leaving the canvas (switching tabs fires that).
+ */
+function isActivity(prev: Peer, next: Peer) {
+  if (prev.page === null) return false;
+  if (next.page !== prev.page) return true;
+  if (next.selection.length !== prev.selection.length || next.selection.some((id, i) => id !== prev.selection[i])) return true;
+  return next.cursor !== null && (prev.cursor === null || next.cursor[0] !== prev.cursor[0] || next.cursor[1] !== prev.cursor[1]);
 }
 
 // ---------------- hooks ----------------

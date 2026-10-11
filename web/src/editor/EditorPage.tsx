@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast';
 import { useMenu } from '../components/Menu';
 import { FullScreenLoader, FullScreenMessage } from '../components/StatusScreens';
 import { useDocumentTitle } from '../lib/useDocumentTitle';
+import { useAuth } from '../lib/auth';
 import { FlexmaEditor, loadEngine } from '../engine';
 import { EditorStore, useCommentMode, useSelection, useUi } from './store';
 import { CommentsPanel } from './CommentsLayer';
@@ -22,6 +23,7 @@ export default function EditorPage() {
   const { fileId = '' } = useParams();
   const [file, setFile] = useState<FileInfo | null>(null);
   const [store, setStore] = useState<EditorStore | null>(null);
+  const userId = useAuth().user?.id ?? null;
   const [canvas] = useState(() => document.createElement('canvas'));
   const [error, setError] = useState<string | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
@@ -36,7 +38,7 @@ export default function EditorPage() {
         if (cancelled) return;
         setFile(info);
         const engine = new FlexmaEditor(canvas);
-        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId });
+        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId, userId });
         created.onFatal = (m) => setFatal(m);
         created.connect(api.files.socketUrl(fileId));
         // Handy for debugging and profiling from the console.
@@ -51,7 +53,7 @@ export default function EditorPage() {
       created?.close();
       created?.engine.free();
     };
-  }, [fileId, canvas]);
+  }, [fileId, canvas, userId]);
 
   if (error) return <FullScreenMessage title="Can't open file" message={error} homeLink />;
   if (fatal) return <FullScreenMessage title="File unavailable" message={fatal} homeLink />;
