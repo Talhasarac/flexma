@@ -20,11 +20,23 @@ pub struct Icon {
 struct Library {
     version: String,
     icons: HashMap<String, Icon>,
+    /// Old names of renamed icons (home → house).
+    #[serde(default)]
+    aliases: HashMap<String, String>,
+    /// Icon → its old names (built on load).
+    #[serde(skip)]
+    old_names: HashMap<String, Vec<String>>,
 }
 
 fn library() -> &'static Library {
     static LIB: OnceLock<Library> = OnceLock::new();
-    LIB.get_or_init(|| serde_json::from_str(DATA).expect("bundled icon data is valid JSON"))
+    LIB.get_or_init(|| {
+        let mut lib: Library = serde_json::from_str(DATA).expect("bundled icon data is valid JSON");
+        for (old, name) in &lib.aliases {
+            lib.old_names.entry(name.clone()).or_default().push(old.clone());
+        }
+        lib
+    })
 }
 
 pub fn version() -> &'static str {
@@ -43,7 +55,10 @@ fn normalize(name: &str) -> String {
 }
 
 pub fn get(name: &str) -> Option<(&'static str, &'static Icon)> {
-    library().icons.get_key_value(normalize(name).as_str()).map(|(k, v)| (k.as_str(), v))
+    let lib = library();
+    let n = normalize(name);
+    let n = lib.aliases.get(&n).cloned().unwrap_or(n);
+    lib.icons.get_key_value(n.as_str()).map(|(k, v)| (k.as_str(), v))
 }
 
 /// Icons matching every word of the query (in the name or tags), best first.
@@ -57,13 +72,15 @@ pub fn search(query: &str, limit: usize) -> Vec<(&'static str, &'static Icon)> {
         .icons
         .iter()
         .filter_map(|(name, icon)| {
+            let old = library().old_names.get(name).map(Vec::as_slice).unwrap_or(&[]);
+            let names = || std::iter::once(name.as_str()).chain(old.iter().map(String::as_str));
             let mut score = 0;
             for w in &words {
-                let s = if name == w || *name == joined {
+                let s = if names().any(|n| n == w || n == joined) {
                     100
-                } else if name.split('-').any(|p| p == w) {
+                } else if names().any(|n| n.split('-').any(|p| p == w)) {
                     70
-                } else if name.contains(w.as_str()) {
+                } else if names().any(|n| n.contains(w.as_str())) {
                     50
                 } else if icon.tags.iter().any(|t| t == w) {
                     40
@@ -93,9 +110,9 @@ pub fn expand(spec: &Map<String, Value>) -> Result<Value, String> {
     let (name, icon) = get(wanted).ok_or_else(|| {
         let close: Vec<&str> = search(wanted, 5).into_iter().map(|(n, _)| n).collect();
         if close.is_empty() {
-            format!("there's no icon named '{wanted}'; find one with search_icons")
+            format!("There's no icon named '{wanted}'. Find one with search_icons.")
         } else {
-            format!("there's no icon named '{wanted}'; close matches: {}", close.join(", "))
+            format!("There's no icon named '{wanted}'. Close matches: {}.", close.join(", "))
         }
     })?;
     let size = spec.get("size").or_else(|| spec.get("width")).and_then(Value::as_f64).unwrap_or(24.0).clamp(4.0, 2048.0);
@@ -117,7 +134,7 @@ pub fn expand(spec: &Map<String, Value>) -> Result<Value, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| format!("icon/{name}"));
-    let imported = svg_import::import(&svg, &ImportOptions { name: layer, width: Some(size), height: None, flatten: true })?;
+    let imported = svg_import::import(&svg, &ImportOptions { name: layer, width: Some(size), height: None, flatten: true, fonts: None })?;
     let mut frame = imported.spec.as_object().cloned().unwrap_or_default();
     for (k, v) in spec {
         if !matches!(k.as_str(), "type" | "icon" | "name" | "size" | "width" | "height" | "color" | "stroke" | "fill" | "strokeWidth" | "strokeWeight") {
@@ -155,6 +172,9 @@ mod tests {
         assert!(search("magnifier", 10).iter().any(|(n, _)| *n == "search"));
         assert!(search("arrow right", 5).iter().any(|(n, _)| *n == "arrow-right"));
         assert_eq!(get("Lucide:Arrow Right").map(|(n, _)| n), Some("arrow-right"));
+        // Renamed icons keep working under their old names.
+        assert_eq!(get("home").map(|(n, _)| n), Some("house"));
+        assert_eq!(search("home", 3)[0].0, "house");
     }
 
     #[test]

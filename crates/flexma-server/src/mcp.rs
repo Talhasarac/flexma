@@ -41,7 +41,7 @@ fn tools() -> Value {
     let file_id = json!({ "type": "string", "description": "File id" });
     let node_spec = json!({
         "type": "object",
-        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|NONE), gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip, children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing. LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT', tint?:'#hex' (multiply), slice?: 9-slice insets in image px}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors).",
+        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|NONE), gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip, children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing. LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT', tint?:'#hex' (multiply), slice?: 9-slice insets in image px}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors). Shorthand types: {type:'image', asset:'<id from upload_image>'} (sized from the image), {type:'icon', icon:'<name from search_icons>', size, color}, {type:'instance', component:'<name>'}. Shared styles: fillStyle / strokeStyle / textStyle: '<style name>' (see list_styles); a style wins over raw values given with it.",
         "properties": { "type": { "type": "string" }, "children": { "type": "array", "items": { "type": "object" } } },
         "required": ["type"],
         "additionalProperties": true
@@ -234,10 +234,10 @@ fn tools() -> Value {
                 "template_id": { "type": "string", "description": "Or: any layer to duplicate per row (used when component is absent)" },
                 "rows": { "type": "array", "items": { "type": "object" }, "description": "e.g. [{\"Name\":\"Ada\",\"Role\":\"Admin\",\"Avatar\":{\"image\":\"<asset>\"}}]" },
                 "parent_id": { "type": "string", "description": "Where the copies go (a frame, ideally with auto layout). Default: a new list frame (component) or next to the template." },
-                "columns": { "type": "integer", "description": "For a new container: lay copies out in a grid with this many columns" },
+                "columns": { "type": "integer", "description": "Only when Flexma creates the container (no parent_id): lay copies out in a grid with this many columns" },
                 "direction": { "type": "string", "enum": ["vertical", "horizontal"], "description": "For a new single-row/column container. Default vertical." },
                 "gap": { "type": "number", "description": "Spacing in a new container (default 16)" },
-                "replace": { "type": "boolean", "description": "Remove parent_id's existing children first (the template is kept). Default false." }
+                "replace": { "type": "boolean", "description": "Remove parent_id's existing children first. The template itself is kept; hide it (visible:false) or delete it afterwards if it shouldn't show. Default false." }
             },
             "required": ["file_id", "rows"]
         })),
@@ -853,6 +853,9 @@ impl Ctx {
             if !unknown.is_empty() {
                 out.push_str(&format!("\nThese keys matched no layer and were ignored: {}.", unknown.into_iter().collect::<Vec<_>>().join(", ")));
             }
+            if columns.is_some() && parent.is_some() {
+                out.push_str("\n'columns' only applies to a container Flexma creates; with parent_id, the parent's own layout arranges the copies.");
+            }
             out.push_str(&note);
             Ok(json!(out))
         })
@@ -1033,11 +1036,14 @@ impl Ctx {
     async fn import_svg(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
         let svg = s(args, "svg")?;
+        let f2 = fid.clone();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let opts = crate::svg_import::ImportOptions {
             name: opt_s(args, "name").unwrap_or("SVG").to_string(),
             width: args.get("width").and_then(Value::as_f64),
             height: args.get("height").and_then(Value::as_f64),
             flatten: args.get("flatten").and_then(Value::as_bool).unwrap_or(false),
+            fonts: Some(crate::fonts::fontdb_for(&self.st, &ws).await),
         };
         let imported = crate::svg_import::import(svg, &opts)?;
         let mut spec = imported.spec;
@@ -1086,6 +1092,27 @@ impl Ctx {
                 let node = tx.doc.get(id).ok_or_else(|| format!("node '{id}' not found"))?;
                 let mut raw = obj.clone();
                 raw.remove("id");
+                // Icons: `color` / `strokeWidth` recolor the icon's stroke, as when creating it.
+                if let Some(vector) = icon_vector(tx.doc, id) {
+                    if raw.contains_key("color") || raw.contains_key("strokeWidth") {
+                        let mut icon = serde_json::Map::new();
+                        if let Some(c) = raw.remove("color") {
+                            icon.insert("strokes".into(), c);
+                        }
+                        if let Some(w) = raw.remove("strokeWidth").and_then(|w| w.as_f64()) {
+                            // Lucide stroke widths are in 24-unit grid terms.
+                            let frame_w = tx.doc.get(id).filter(|n| n.kind != NodeType::Vector).map(|n| n.width).or_else(|| {
+                                tx.doc.get(&vector).and_then(|v| v.parent.as_deref()).and_then(|p| tx.doc.get(p)).map(|p| p.width)
+                            });
+                            icon.insert("strokeWeight".into(), json!(w * frame_w.unwrap_or(24.0) / 24.0));
+                        }
+                        let props = normalize_props(NodeType::Vector, &icon).map_err(|e| format!("{id}: {e}"))?;
+                        ops.push(Op::Update { id: vector.clone(), props });
+                        if raw.is_empty() {
+                            continue;
+                        }
+                    }
+                }
                 flexma_doc::styles::resolve_refs(tx.doc, &mut raw).map_err(|e| format!("{id}: {e}"))?;
                 if raw.contains_key("parent") || raw.contains_key("index") {
                     return Err("use move_nodes to change a node's parent or order".into());
@@ -1674,7 +1701,13 @@ impl Ctx {
 
     async fn undo_agent_changes(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
-        let steps = args.get("steps").and_then(Value::as_u64).unwrap_or(1).clamp(1, 30) as usize;
+        let steps = match args.get("steps") {
+            None | Some(Value::Null) => 1,
+            Some(v) => match v.as_u64() {
+                Some(n @ 1..=30) => n as usize,
+                _ => return Err("'steps' must be a whole number from 1 to 30".into()),
+            },
+        };
         let room = self.room(&fid, Role::Editor).await?;
         room.undo_agent(self.agent(), steps)
             .await
@@ -2008,13 +2041,20 @@ fn node_line(doc: &Document, n: &Node) -> String {
     if n.rotation != 0.0 {
         s.push_str(&format!(" rot {}°", fmt_num(n.rotation)));
     }
+    let style_name = |id: &Option<NodeId>| id.as_deref().and_then(|i| doc.get(i)).map(|st| st.name.clone());
     if let Some(f) = first_fill_hex(n) {
         if n.kind != NodeType::Page {
             s.push_str(&format!(" fill {f}"));
         }
     }
+    if let Some(name) = style_name(&n.fill_style_id) {
+        s.push_str(&format!(" fillStyle \"{name}\""));
+    }
     if n.has_visible_stroke() {
         s.push_str(&format!(" stroke {}px", fmt_num(n.stroke_weight)));
+    }
+    if let Some(name) = style_name(&n.stroke_style_id) {
+        s.push_str(&format!(" strokeStyle \"{name}\""));
     }
     if n.corner_radius > 0.0 || n.corner_radii.is_some() {
         s.push_str(&format!(" r {}", fmt_num(n.corner_radius)));
@@ -2029,7 +2069,13 @@ fn node_line(doc: &Document, n: &Node) -> String {
     }
     if n.kind == NodeType::Text {
         let t: String = n.characters.chars().take(80).collect();
+        if n.font_family != "Inter" {
+            s.push_str(&format!(" font \"{}\"", n.font_family));
+        }
         s.push_str(&format!(" {}px w{} \"{}\"", fmt_num(n.font_size), n.font_weight, t.replace('\n', "\\n")));
+        if let Some(name) = style_name(&n.text_style_id) {
+            s.push_str(&format!(" textStyle \"{name}\""));
+        }
     }
     if !n.visible {
         s.push_str(" (hidden)");
@@ -2198,8 +2244,8 @@ fn template_copy_ops(
                 for (pk, pv) in &props {
                     c2.set_prop(pk, pv)?;
                 }
-                if c2.kind == NodeType::Text && props.contains_key("characters") {
-                    c2.needs_measure = true;
+                if c2.kind == NodeType::Text && props.keys().any(|k| matches!(k.as_str(), "characters" | "fontSize" | "fontFamily" | "fontWeight" | "letterSpacing" | "lineHeight")) {
+                    flexma_doc::text::fit_box(&mut c2);
                 }
             }
         }
@@ -2245,7 +2291,13 @@ fn audit_report(a: &flexma_doc::audit::Audit, title: &str, available: &[String])
             format!("{} {}{lh} w{} ×{}", t.family, num(t.size), t.weight, t.uses)
         })
         .collect();
-    out.push_str(&format!("Type ({} styles): {}{}\n", a.text_styles.len(), styles.join(", "), if a.text_styles.len() > 10 { ", …" } else { "" }));
+    out.push_str(&format!(
+        "Type ({} style{}): {}{}\n",
+        a.text_styles.len(),
+        if a.text_styles.len() == 1 { "" } else { "s" },
+        styles.join(", "),
+        if a.text_styles.len() > 10 { ", …" } else { "" }
+    ));
     if !a.off_scale_sizes.is_empty() {
         problems += a.off_scale_sizes.len();
         let sizes: Vec<String> = a.off_scale_sizes.iter().map(|(s, i)| format!("{}px {}", num(*s), ids(i))).collect();
@@ -2386,4 +2438,19 @@ fn style_value(st: &Node) -> String {
             format!("{} {}{lh} w{}{}{ls}", st.font_family, fmt_num(st.font_size), st.font_weight, if st.italic { " italic" } else { "" })
         }
     }
+}
+
+/// The vector layer of an icon placed with {type:"icon"}, given the icon's
+/// frame or the vector itself.
+fn icon_vector(doc: &flexma_doc::Document, id: &str) -> Option<NodeId> {
+    let is_icon = |n: &Node| n.description.starts_with("Lucide icon");
+    let n = doc.get(id)?;
+    if n.kind == NodeType::Vector {
+        let parent = doc.get(n.parent.as_deref()?)?;
+        return is_icon(parent).then(|| n.id.clone());
+    }
+    if !is_icon(n) {
+        return None;
+    }
+    doc.children(id).iter().find(|c| doc.get(c).map(|c| c.kind == NodeType::Vector).unwrap_or(false)).cloned()
 }

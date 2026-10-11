@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Bundle the Lucide icon set (ISC) into the server for the MCP icon tools:
-// crates/flexma-server/assets/icons/lucide.json = { version, icons: { name: { svg, tags } } }.
+// crates/flexma-server/assets/icons/lucide.json = { version, icons: { name: { svg, tags } }, aliases: { old: name } }.
 // Shapes come from web/node_modules/lucide-react; search tags from the matching
 // lucide-static release. Run after upgrading lucide-react:
 //   node scripts/build-icons.mjs
@@ -20,7 +20,15 @@ const tags = await tagsRes.json();
 
 const attr = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 const icons = {};
+const aliases = {};
 for (const file of readdirSync(iconDir).filter((f) => f.endsWith('.mjs')).sort()) {
+  const fileName = file.replace(/\.mjs$/, '');
+  // Renamed icons keep their old name as a re-export (home.mjs → house.mjs).
+  const reexport = readFileSync(join(iconDir, file), 'utf8').match(/export \{ default \} from '\.\/([a-z0-9-]+)\.mjs'/);
+  if (reexport) {
+    aliases[fileName] = reexport[1];
+    continue;
+  }
   const { __iconData } = await import(pathToFileURL(join(iconDir, file)).href);
   if (!__iconData?.name || icons[__iconData.name]) continue;
   const svg = __iconData.node
@@ -36,6 +44,6 @@ for (const file of readdirSync(iconDir).filter((f) => f.endsWith('.mjs')).sort()
 }
 
 mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, 'lucide.json'), JSON.stringify({ version, icons }));
+writeFileSync(join(outDir, 'lucide.json'), JSON.stringify({ version, icons, aliases }));
 copyFileSync(join(pkgDir, 'LICENSE'), join(outDir, 'LUCIDE-LICENSE'));
-console.log(`Wrote ${Object.keys(icons).length} Lucide ${version} icons to ${outDir}`);
+console.log(`Wrote ${Object.keys(icons).length} Lucide ${version} icons (+${Object.keys(aliases).length} aliases) to ${outDir}`);

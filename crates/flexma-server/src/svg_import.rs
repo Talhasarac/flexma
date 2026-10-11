@@ -4,7 +4,8 @@
 //! usvg does the parsing: it resolves CSS, `<use>`, transforms and basic shapes
 //! (rect, circle, polygon…) into plain paths, and turns text into outlines.
 
-use crate::render::base_fontdb;
+use crate::render::{base_fontdb, FontDb};
+use std::sync::Arc;
 use resvg::usvg::{self, tiny_skia_path::PathSegment, Transform};
 use serde_json::{json, Map, Value};
 
@@ -18,6 +19,8 @@ pub struct ImportOptions {
     pub height: Option<f64>,
     /// Merge every shape into one vector layer (icons). Needs one shared style.
     pub flatten: bool,
+    /// Fonts for outlining SVG text (the workspace's); default: system fonts.
+    pub fonts: Option<Arc<FontDb>>,
 }
 
 pub struct Imported {
@@ -32,7 +35,11 @@ pub fn import(svg: &str, opts: &ImportOptions) -> Result<Imported, String> {
     if svg.len() > MAX_SVG_BYTES {
         return Err(format!("the SVG is larger than {} MB", MAX_SVG_BYTES / 1024 / 1024));
     }
-    let uopt = usvg::Options { fontdb: base_fontdb(), ..Default::default() };
+    let uopt = usvg::Options {
+        fontdb: opts.fonts.clone().unwrap_or_else(base_fontdb),
+        font_family: "Inter".into(),
+        ..Default::default()
+    };
     let tree = usvg::Tree::from_str(svg, &uopt).map_err(|e| format!("couldn't read the SVG: {e}"))?;
     let size = tree.size();
     let (w0, h0) = (size.width() as f64, size.height() as f64);
@@ -309,7 +316,7 @@ mod tests {
     use super::*;
 
     fn opts(flatten: bool) -> ImportOptions {
-        ImportOptions { name: "Logo".into(), width: None, height: None, flatten }
+        ImportOptions { name: "Logo".into(), width: None, height: None, flatten, fonts: None }
     }
 
     #[test]

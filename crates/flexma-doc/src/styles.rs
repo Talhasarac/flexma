@@ -81,16 +81,7 @@ fn resolve(doc: &mut Document, id: &str) -> bool {
             // (browsers then measure exactly, see `needs_measure`).
             let text_changed = TEXT_PROPS.iter().any(|k| node.get_prop(k) != next.get_prop(k));
             if text_changed {
-                next.needs_measure = true;
-                let (_, w, h) = crate::text::estimate_layout(&next);
-                match next.text_auto_resize {
-                    crate::paint::TextAutoResize::WidthAndHeight => {
-                        next.width = w;
-                        next.height = h;
-                    }
-                    crate::paint::TextAutoResize::Height => next.height = h,
-                    crate::paint::TextAutoResize::None => {}
-                }
+                crate::text::fit_box(&mut next);
             }
         }
     }

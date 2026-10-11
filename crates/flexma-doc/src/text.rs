@@ -86,6 +86,21 @@ pub fn estimate_width(s: &str, font_size: f64, letter_spacing: f64, weight: u16)
 }
 
 /// Lines and box size for a text node using estimated metrics.
+/// Resize a text node's box to its estimated content (per its auto-resize
+/// mode) and flag it so a browser measures it exactly.
+pub fn fit_box(n: &mut Node) {
+    let (_, w, h) = estimate_layout(n);
+    match n.text_auto_resize {
+        crate::paint::TextAutoResize::WidthAndHeight => {
+            n.width = w;
+            n.height = h;
+        }
+        crate::paint::TextAutoResize::Height => n.height = h,
+        crate::paint::TextAutoResize::None => {}
+    }
+    n.needs_measure = true;
+}
+
 pub fn estimate_layout(n: &Node) -> (Vec<String>, f64, f64) {
     let mut measure = |s: &str| estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);
     let max_w = match n.text_auto_resize {

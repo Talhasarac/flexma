@@ -8,7 +8,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| `type` | string | required | `FRAME`, `GROUP`, `RECTANGLE`, `ELLIPSE`, `LINE`, `TEXT`, `VECTOR`, `POLYGON`, `STAR`, `IMAGE` (shorthand, see below). Also accepted, case-insensitive: `rect`, `circle`, `box`, `path`, `label`, `container`, `triangle`. |
+| `type` | string | required | `FRAME`, `GROUP`, `RECTANGLE`, `ELLIPSE`, `LINE`, `TEXT`, `VECTOR`, `POLYGON`, `STAR`, `COMPONENT`, `INSTANCE`, plus the shorthands `IMAGE` and `ICON` (see below). Also accepted, case-insensitive: `rect`, `circle`, `box`, `path`, `label`, `container`, `triangle`. |
 | `name` | string | type name (text: its content) | Shown in the layers panel. |
 | `x`, `y` | number | auto | Position relative to the parent. Ignored inside auto layout (unless `absolute: true`). Leave them out on top-level nodes to auto-place beside existing content. |
 | `width` / `w`, `height` / `h` | number \| `"fill"` \| `"hug"` | 100 | `"fill"` stretches inside an auto-layout parent. `"hug"` (auto-layout frames, text) shrinks to fit the content. |
@@ -147,6 +147,8 @@ For paragraphs, give the text a width (a number, or `"fill"` inside auto layout)
 
 - `icon`: a Lucide icon name from `search_icons` (spaces work: "arrow right").
 - Becomes a frame of `size`×`size` holding one vector with round caps and joins. Other props (x, y, name, opacity…) apply to the frame.
+- `strokeWidth` (default 2) is in Lucide's 24-unit grid, so it scales with `size`: 2 at size 48 draws 4 px.
+- Recolor later with `update_nodes {id:"<icon frame>", color, strokeWidth}`.
 
 ## IMAGE
 
@@ -186,10 +188,13 @@ or give `width` (the length) plus `rotation`.
 - `absoluteBounds`: `{x, y, width, height}` in page coordinates
 - `children`: an id list, back to front
 
-`get_file_tree` returns one line per node:
+- Style links as ids: `fillStyleId`, `strokeStyleId`, `textStyleId` (match them with `list_styles`)
+
+`get_file_tree` returns one line per node, with style names and non-Inter fonts:
 
 ```
-FRAME "Card" [a1b2:3] @0,0 360×323 fill #ffffff r 16 layout Vertical gap 12 pad 24
+FRAME "Card" [a1b2:3] @0,0 360×323 fill #ffffff fillStyle "Surface" r 16 layout Vertical gap 12 pad 24
+TEXT "Title" [a1b2:4] @24,24 200×29 font "Exo 2" 24px w700 "Settings" textStyle "Heading/H2"
 ```
 
 The fields after the id are position (relative to the parent), size, then key styles.

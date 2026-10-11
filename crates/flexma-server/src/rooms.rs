@@ -716,28 +716,35 @@ impl Room {
         self.agents.insert(agent.key, (peer, Instant::now()));
     }
 
-    /// Reverse an agent's last `steps` changes in this file.
+    /// Reverse an agent's last `steps` changes in this file, newest first.
+    /// Each change is undone against the state the previous undo left, so a
+    /// create followed by a delete (or an edit) reverses cleanly.
     fn undo_agent(&mut self, agent: AgentInfo, steps: usize) -> Result<Value, String> {
         let history = self.agent_undo.entry(agent.key.clone()).or_default();
         if history.is_empty() {
             return Err("there's nothing to undo: no changes of yours are recorded in this file since the server started".into());
         }
-        let batches: Vec<UndoBatch> = (0..steps.max(1)).filter_map(|_| history.pop_back()).collect();
-        let mut ops = Vec::new();
-        let mut kept = 0usize;
-        let mut restored: std::collections::HashSet<NodeId> = Default::default();
+        let batches: Vec<UndoBatch> = (0..steps).filter_map(|_| history.pop_back()).collect();
+        let (mut applied, mut touched) = (Vec::new(), Vec::new());
+        let (mut kept, mut failed) = (0usize, 0usize);
         for batch in &batches {
+            let mut ops = Vec::new();
+            let mut restored: HashMap<NodeId, flexma_doc::Node> = HashMap::new();
             for step in batch.steps.iter().rev() {
                 match step {
-                    UndoStep::Prop { id, key, old, new } => match self.doc.get(id).and_then(|n| n.get_prop(key)) {
-                        Some(cur) if cur == *new => {
-                            let mut props = serde_json::Map::new();
-                            props.insert(key.clone(), old.clone());
-                            ops.push(Op::Update { id: id.clone(), props });
+                    UndoStep::Prop { id, key, old, new } => {
+                        // A node this batch restores is checked against its snapshot.
+                        let current = restored.get(id).or_else(|| self.doc.get(id)).and_then(|n| n.get_prop(key));
+                        match current {
+                            Some(cur) if cur == *new => {
+                                let mut props = serde_json::Map::new();
+                                props.insert(key.clone(), old.clone());
+                                ops.push(Op::Update { id: id.clone(), props });
+                            }
+                            Some(_) => kept += 1,
+                            None => {}
                         }
-                        Some(_) => kept += 1,
-                        None => {}
-                    },
+                    }
                     UndoStep::Remove { id } => {
                         if self.doc.contains(id) {
                             ops.push(Op::Delete { id: id.clone() });
@@ -745,20 +752,22 @@ impl Room {
                     }
                     UndoStep::Restore { nodes } => {
                         for n in nodes {
-                            let parent_ok = n.parent.as_deref().map(|p| self.doc.contains(p) || restored.contains(p)).unwrap_or(false);
+                            let parent_ok = n.parent.as_deref().map(|p| self.doc.contains(p) || restored.contains_key(p)).unwrap_or(false);
                             if !self.doc.contains(&n.id) && parent_ok {
-                                restored.insert(n.id.clone());
+                                restored.insert(n.id.clone(), n.clone());
                                 ops.push(Op::Create { node: n.clone() });
                             }
                         }
                     }
                 }
             }
+            let mut tx = Tx::new(&mut self.doc);
+            failed += tx.apply_all(ops).len();
+            tx.relayout();
+            let Tx { applied: a, touched: t, .. } = tx;
+            applied.extend(a);
+            touched.extend(t);
         }
-        let mut tx = Tx::new(&mut self.doc);
-        let errs = tx.apply_all(ops);
-        tx.relayout();
-        let Tx { applied, touched, .. } = tx;
         let undone: Vec<String> = batches.iter().map(|b| format!("\"{}\"", b.summary)).collect();
         if !applied.is_empty() {
             self.agent_changed(agent, applied, touched);
@@ -767,8 +776,8 @@ impl Room {
         if kept > 0 {
             out.push_str(&format!(" Kept {kept} propert{} that someone changed after you.", if kept == 1 { "y" } else { "ies" }));
         }
-        if !errs.is_empty() {
-            out.push_str(&format!(" {} step(s) couldn't be applied.", errs.len()));
+        if failed > 0 {
+            out.push_str(&format!(" {failed} step(s) couldn't be applied."));
         }
         Ok(json!(out))
     }

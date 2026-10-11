@@ -480,8 +480,9 @@ impl Writer<'_> {
         };
         let _ = write!(
             self.body,
-            r#"<text font-family="{}, Inter, Helvetica, Arial, sans-serif" font-size="{}" font-weight="{}" text-anchor="{anchor}"{style}{deco}{ls}{fill_attr}>"#,
-            escape(&n.font_family),
+            r#"<text font-family="'{}', Inter, Helvetica, Arial, sans-serif" font-size="{}" font-weight="{}" text-anchor="{anchor}"{style}{deco}{ls}{fill_attr}>"#,
+            // Quoted: names like "Exo 2" aren't valid unquoted CSS identifiers.
+            escape(&n.font_family.replace(['\'', '"', '\\'], "")),
             fmt_num(n.font_size),
             n.font_weight,
         );

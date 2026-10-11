@@ -188,7 +188,9 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - `x`/`y` on children of an auto-layout frame are ignored. To pin a child, set `absolute: true`.
 - Resizing a frame or instance moves children that have `constraints` (like Unity anchors). Children with the default `MIN`/`MIN` stay where they are.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
-- Images: image fills reference uploaded asset ids (`{ "type": "IMAGE", "asset": "<id>" }`). You can't upload binaries through MCP yet. Use a placeholder rectangle with a neutral fill and name it "Image: …".
+- Images and fonts: upload files with `upload_image` / `upload_font` (run the `curl` command they return); don't paste file contents into tool calls. Without a real picture, use a neutral placeholder rectangle named "Image: …".
+- Styles win: if a spec has both `fillStyle` and `fill` (or `textStyle` and `size`), the style's values apply. To use a raw value, leave the style out (or set it to null).
+- Icons: recolor with `update_nodes {id:"<icon frame>", color:"#…", strokeWidth:1.5}`. `strokeWidth` is in Lucide's 24-unit grid and scales with the icon's size. Old icon names still work (`home` → `house`).
 - Large files: outline with `depth: 2` first, then zoom into the frames you need with `node_id`.
 
 ## Setup (if the tools are missing)
