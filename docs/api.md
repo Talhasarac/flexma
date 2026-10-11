@@ -61,7 +61,7 @@ Roles: `owner` > `editor` > `viewer`. Viewers can open files read-only.
 | GET | `/api/files/:id/export.png?node=<id>&page=<id>&scale=2` | – | PNG export |
 | POST | `/api/files/:id/assets` | raw image bytes, `Content-Type: image/*` | `{ id, url, width, height, mime }` |
 | POST | `/api/image-uploads/:token` | raw image bytes, no sign-in | asset + `remainingUploads` + a ready-made `node`: upload through a link from the MCP `upload_image` tool (same rules as font upload links) |
-| POST | `/api/node-uploads/:token` | JSON array of node specs (or `{nodes:[…]}`), no sign-in | `{ created, remainingUploads, result }`: creates a node tree like `create_nodes`, as the agent that asked for the link via MCP `upload_nodes` (up to 50,000 nodes per batch) |
+| POST | `/api/node-uploads/:token` | JSON array of node specs (or `{nodes:[…]}`), no sign-in | `{ created, remainingUploads, nodes: [{id, name, type}], result }` (`nodes` = top-level nodes created, in order): creates a node tree like `create_nodes`, as the agent that asked for the link via MCP `upload_nodes` (up to 50,000 nodes per batch) |
 | GET | `/api/assets/:id` | – | image bytes |
 | GET (WS) | `/api/files/:id/ws` | – | multiplayer socket, see below |
 

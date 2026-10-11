@@ -730,6 +730,12 @@ impl Ctx {
 
     /// Create friendly specs (icons and images expanded) in one undoable step.
     async fn create_specs(&self, fid: &str, parent: Option<String>, index: Option<usize>, specs: Vec<Value>, note: String, depth: usize) -> ToolResult {
+        let v = self.create_specs_raw(fid, parent, index, specs, note, depth).await?;
+        Ok(text_result(v["text"].as_str().unwrap_or_default()))
+    }
+
+    /// `{ text: <outline>, nodes: [{ id, name, type }] }` for the top-level nodes created.
+    async fn create_specs_raw(&self, fid: &str, parent: Option<String>, index: Option<usize>, specs: Vec<Value>, note: String, depth: usize) -> Result<Value, String> {
         if specs.is_empty() {
             return Err("'nodes' is empty".into());
         }
@@ -765,11 +771,15 @@ impl Ctx {
                 out.push_str(&format!("…and {} more top-level nodes\n", top.len() - 200));
             }
             out.push_str(&note);
-            Ok(json!(out))
+            let nodes: Vec<Value> = top
+                .iter()
+                .filter_map(|id| tx.doc.get(id))
+                .map(|n| json!({ "id": n.id, "name": n.name, "type": n.kind.as_str() }))
+                .collect();
+            Ok(json!({ "text": out, "nodes": nodes }))
         })
         .await
         .map_err(err_msg)?
-        .map(|v| text_result(v.as_str().unwrap_or_default()))
     }
 
     async fn fill_with_data(&self, args: &Value) -> ToolResult {
@@ -2564,11 +2574,14 @@ pub async fn upload_nodes_with_link(
         Err(e) => return e.into_response(),
     };
     let ctx = Ctx { base: st.base_url(&headers), st, user };
-    match ctx.create_specs(&file_id, parent_id, index, specs, String::new(), 0).await {
-        Ok(v) => {
-            let text = v["content"][0]["text"].as_str().unwrap_or_default().to_string();
-            axum::Json(json!({ "created": total, "remainingUploads": grant.remaining, "result": text })).into_response()
-        }
+    match ctx.create_specs_raw(&file_id, parent_id, index, specs, String::new(), 0).await {
+        Ok(v) => axum::Json(json!({
+            "created": total,
+            "remainingUploads": grant.remaining,
+            "nodes": v["nodes"],
+            "result": v["text"],
+        }))
+        .into_response(),
         Err(e) => fail(StatusCode::BAD_REQUEST, e),
     }
 }
