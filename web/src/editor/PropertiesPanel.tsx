@@ -186,6 +186,20 @@ export function PropertiesPanel({ store }: Props) {
             </label>
           )}
         </div>
+        {isFrame && common(sel, (n) => n.clipsContent) === true && (
+          <div className="row-actions">
+            <label className="check" title="Clip children to the fill's alpha, so transparent image pixels hide them">
+              <input type="checkbox" checked={common(sel, (n) => n.clipAlpha) === true} onChange={(e) => set({ clipAlpha: e.target.checked })} disabled={readOnly} />
+              Alpha mask
+            </label>
+            {common(sel, (n) => n.clipAlpha) === true && (
+              <label className="check" title="Don't draw the fill; it still masks the children">
+                <input type="checkbox" checked={common(sel, (n) => n.hideFill) === true} onChange={(e) => set({ hideFill: e.target.checked })} disabled={readOnly} />
+                Hide fill
+              </label>
+            )}
+          </div>
+        )}
       </Section>
 
       {isFrame && <AutoLayoutSection sel={sel} set={set} begin={begin} end={end} store={store} />}

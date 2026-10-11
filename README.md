@@ -110,7 +110,7 @@ Agents edit through the same pipeline as people, so collaborators watch the chan
 Design choices follow Figma's published architecture and the research in [`docs/research/performance.md`](docs/research/performance.md):
 
 - **Multiplayer:** server-authoritative, last-writer-wins per property, fractional indexing for child order. Clients apply edits optimistically and ignore stale echoes.
-- **Rendering:** a camera-independent display list of instanced SDF shapes (rounded rects, ellipses, shadows) with analytic anti-aliasing. Path meshes are tessellated by lyon. Frames clip with the stencil buffer. Text is rasterized per node at power-of-two zoom buckets.
+- **Rendering:** a camera-independent display list of instanced SDF shapes (rounded rects, ellipses, shadows) with analytic anti-aliasing. Path meshes are tessellated by lyon. Frames clip with the stencil buffer, by their shape or by their fill's alpha (image masks). Text is rasterized per node at power-of-two zoom buckets.
 - **Frames:** the canvas renders only when something changes. Pan and zoom only change a uniform.
 - **Bridge to React:** React reads JSON snapshots only when engine version counters change, through `useSyncExternalStore`. Pointer input goes straight to wasm.
 - **Network:** ops are coalesced per property and sent about every 33 ms. A drag is a single undo step.

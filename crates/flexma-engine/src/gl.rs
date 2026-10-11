@@ -189,19 +189,31 @@ float slice1(float x, float size, float img, float a, float b, float da, float d
   if (x >= size - db) return 1.0 - (db > 0.0 ? (size - x) / db : 0.0) * b / img;
   return (a + (x - da) / max(size - da - db, 1e-4) * (img - a - b)) / img;
 }
+// d(slice1)/dx, for explicit texture gradients.
+float slice1d(float x, float size, float img, float a, float b, float da, float db) {
+  if (x <= da) return da > 0.0 ? a / da / img : 0.0;
+  if (x >= size - db) return db > 0.0 ? b / db / img : 0.0;
+  return (img - a - b) / max(size - da - db, 1e-4) / img;
+}
 void main() {
+  // Screen derivatives of the layer position, taken in uniform control flow:
+  // image lookups below sit in per-pixel branches, where implicit derivatives
+  // are undefined and pick a blurry mip at the edges (which leaks through alpha masks).
+  vec2 dlx = dFdx(v_local);
+  vec2 dly = dFdy(v_local);
   vec2 hs = max(v_size.xy * 0.5, vec2(1e-4));
   vec2 p = v_local - hs;
   float d = v_size.z > 0.5 ? sdEllipse(p, hs) : sdRoundBox(p, hs, v_radii);
   float aa = 1.0 / u_px;
   float mode = v_size.w;
-  if (mode > 1.5) {
+  bool alphaClip = mode > 2.5;
+  if (mode > 1.5 && !alphaClip) {
     // Stencil clip shape.
     if (d > 0.0) discard;
     o = vec4(0.0);
     return;
   }
-  if (mode > 0.5) {
+  if (mode > 0.5 && !alphaClip) {
     // Drop shadow: blurred SDF.
     float blur = max(v_fx.z, aa);
     float sd = d - v_fx.w;
@@ -229,8 +241,9 @@ void main() {
       db *= k;
       vec2 p = clamp(v_local, vec2(0.0), sz);
       vec2 tuv = vec2(slice1(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
+      vec2 f = vec2(slice1d(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1d(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
       bool center = all(greaterThan(p, da)) && all(lessThan(p, sz - db));
-      if (v_c3.y > 0.5 || !center) fill = texture(u_tex, tuv) * v_c0 * v_c1.w;
+      if (v_c3.y > 0.5 || !center) fill = textureGrad(u_tex, tuv, dlx * f, dly * f) * v_c0 * v_c1.w;
     } else {
       float fit = v_c1.z;
       vec2 scale;
@@ -239,8 +252,15 @@ void main() {
       else { scale = sz; }
       vec2 off = (sz - scale) * 0.5;
       vec2 tuv = (v_local - off) / scale;
-      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = texture(u_tex, tuv) * v_c0 * v_c1.w;
+      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = textureGrad(u_tex, tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
     }
+  }
+  if (alphaClip) {
+    // Stencil alpha mask: keep the pixels where the fill isn't transparent
+    // (above Unity's Mask cutoff of 0.001).
+    if (d > 0.0 || fill.a * v_paint.w <= 0.001) discard;
+    o = vec4(0.0);
+    return;
   }
   float cov = clamp(0.5 - d / aa, 0.0, 1.0);
   vec4 col = fill * cov;

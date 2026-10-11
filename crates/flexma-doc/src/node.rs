@@ -204,6 +204,12 @@ define_node! {
     corner_radii: Option<[f64; 4]> = None => "cornerRadii",
     effects: Vec<Effect> = Vec::new() => "effects",
     clips_content: bool = false => "clipsContent",
+    /// With `clipsContent`: clip children to the alpha of the fills instead of the
+    /// shape, so an image's transparent pixels hide them (Unity's Mask).
+    clip_alpha: bool = false => "clipAlpha",
+    /// Don't draw the fills. They still shape an alpha clip (Unity's Mask with
+    /// Show Mask Graphic off).
+    hide_fill: bool = false => "hideFill",
 
     characters: String = String::new() => "characters",
     font_family: String = String::from("Inter") => "fontFamily",

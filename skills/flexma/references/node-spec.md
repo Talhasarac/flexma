@@ -75,7 +75,9 @@ Type defaults:
 | `padding` | number \| [v, h] \| [t, r, b, l] \| {top,right,bottom,left} | |
 | `justify` / `primaryAxisAlign` | `start`, `center`, `end`, `space-between` | Along the layout direction. |
 | `alignItems` / `counterAxisAlign` | `start`, `center`, `end` | Across the layout direction. |
-| `clip` / `clipsContent` | bool | Clip children to the frame (default true). |
+| `clip` / `clipsContent` | bool, `"alpha"`, `"shape"` | Clip children to the frame (default true). `"alpha"` clips to the alpha of the frame's fills instead: see Alpha masks. |
+| `clipAlpha` | bool | The same as `clip: "alpha"` (turns clipping on). |
+| `hideFill` | bool | Don't draw the fills. They still shape an alpha mask. |
 | `layoutSizingHorizontal` / `layoutSizingVertical` | `FIXED`, `HUG`, `FILL` | Same as `width`/`height: "hug" \| "fill"`. |
 
 Sizing rules:
@@ -165,6 +167,22 @@ For paragraphs, give the text a width (a number, or `"fill"` inside auto layout)
   - `fillCenter: false` keeps only the border.
   - `fit` is ignored while an image is sliced.
 - Both also work on any `IMAGE` paint, e.g. a frame's background.
+
+## Alpha masks
+
+A frame with `clip: "alpha"` shows its children only where its fills aren't transparent, like a Unity `Mask` on an `Image`. The usual mask is an `IMAGE` fill with transparent areas (a star, a rounded sprite, a 9-sliced panel).
+
+```json
+{ "type": "frame", "name": "Avatar mask", "width": 96, "height": 96,
+  "fill": { "type": "IMAGE", "asset": "<circle sprite>", "fit": "STRETCH" },
+  "clip": "alpha", "hideFill": true,
+  "children": [ { "type": "image", "asset": "<photo>", "width": 96, "height": 96 } ] }
+```
+
+- The cutoff is Unity's: any alpha above 0.001 shows the children fully. Soft edges don't fade the children.
+- `hideFill: true` masks without drawing the sprite (Unity's Show Mask Graphic off). Leave it off to draw the sprite under the children.
+- `tint`, `slice`, `fit` and fill `opacity` shape the mask as they shape the drawing. Solid and gradient fills mask by their alpha too.
+- With no visible fill, an alpha mask hides all of its children.
 
 ## LINE
 

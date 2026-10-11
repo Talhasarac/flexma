@@ -263,3 +263,72 @@ mod large_fill_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod alpha_mask_tests {
+    use super::*;
+    use flexma_doc::{Color, ImageFit, Node, NodeType, Op, Paint};
+
+    /// A Unity-style Mask: a frame whose image's alpha clips its children,
+    /// with the mask graphic shown or hidden.
+    #[test]
+    fn clip_alpha_masks_children_by_image_alpha() {
+        // 10×10 blue image: columns 0-2 opaque, 3-6 nearly transparent (above
+        // Unity's 0.001 cutoff), 7-9 fully transparent.
+        let mut img = resvg::tiny_skia::Pixmap::new(10, 10).unwrap();
+        for (i, px) in img.pixels_mut().iter_mut().enumerate() {
+            let a = match i % 10 {
+                0..=2 => 255,
+                3..=6 => 3,
+                _ => 0,
+            };
+            *px = resvg::tiny_skia::ColorU8::from_rgba(0, 0, 255, a).premultiply();
+        }
+        use base64::Engine;
+        let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(img.encode_png().unwrap()));
+        for hide in [false, true] {
+            let mut doc = Document::new_empty();
+            let mut bg = Node::new("f:0", NodeType::Frame);
+            bg.parent = Some("0:1".into());
+            bg.width = 100.0;
+            bg.height = 100.0;
+            bg.fills = vec![Paint::solid(Color::parse("#222222").unwrap())];
+            doc.apply(&Op::Create { node: bg }).unwrap();
+            let mut mask = Node::new("f:1", NodeType::Frame);
+            mask.parent = Some("f:0".into());
+            mask.width = 100.0;
+            mask.height = 100.0;
+            mask.clips_content = true;
+            mask.clip_alpha = true;
+            mask.hide_fill = hide;
+            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, opacity: 1.0, visible: true }];
+            doc.apply(&Op::Create { node: mask }).unwrap();
+            let mut red = Node::new("r:1", NodeType::Rectangle);
+            red.parent = Some("f:1".into());
+            red.width = 100.0;
+            red.height = 50.0;
+            red.fills = vec![Paint::solid(Color::parse("#ff0000").unwrap())];
+            doc.apply(&Op::Create { node: red }).unwrap();
+            let resolve = |_: &str| Some(uri.clone());
+            let size = |_: &str| Some((10.0, 10.0));
+            let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+            let (svg, _) = export(&doc, &["f:0".to_string()], &opts).unwrap();
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let mut pm = resvg::tiny_skia::Pixmap::new(100, 100).unwrap();
+            resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+            let at = |x: u32, y: u32| {
+                let p = pm.pixel(x, y).unwrap().demultiply();
+                (p.red(), p.green(), p.blue())
+            };
+            assert_eq!(at(10, 25), (255, 0, 0), "opaque mask pixels show the child (hide={hide})");
+            assert_eq!(at(50, 25), (255, 0, 0), "faint mask pixels show the child fully (hide={hide})");
+            assert_eq!(at(90, 25), (0x22, 0x22, 0x22), "transparent mask pixels hide the child (hide={hide})");
+            let graphic = at(10, 75);
+            if hide {
+                assert_eq!(graphic, (0x22, 0x22, 0x22), "hideFill doesn't draw the mask image");
+            } else {
+                assert_eq!(graphic, (0, 0, 255), "the mask image is drawn");
+            }
+        }
+    }
+}

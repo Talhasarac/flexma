@@ -41,8 +41,18 @@ enum Cmd {
     Image { inst: u32, asset: String },
     Mesh { id: NodeId, fill: Option<[f32; 4]>, stroke: Option<[f32; 4]> },
     Text { id: NodeId, opacity: f32 },
-    PushClip { inst: u32 },
-    PopClip { inst: u32 },
+    /// Stencil clip drawn from one or more instances, each with its image (alpha masks).
+    PushClip { parts: Vec<(u32, Option<String>)> },
+    PopClip { parts: Vec<(u32, Option<String>)> },
+}
+
+struct FillParams {
+    ptype: f32,
+    angle: f32,
+    nstops: f32,
+    colors: [[f32; 4]; 4],
+    stops: [f32; 4],
+    image: Option<String>,
 }
 
 struct MeshEntry {
@@ -554,16 +564,16 @@ impl Renderer {
         self.upload_loaded_images();
         let mut inst: Vec<f32> = Vec::with_capacity(scene.order.len() * INST_FLOATS * 2);
         let mut cmds: Vec<Cmd> = Vec::new();
-        let mut clips: Vec<(usize, u32)> = Vec::new();
+        let mut clips: Vec<(usize, Vec<(u32, Option<String>)>)> = Vec::new();
         let push_shape = |cmds: &mut Vec<Cmd>, idx: u32| match cmds.last_mut() {
             Some(Cmd::Shapes { start, count }) if *start + *count == idx => *count += 1,
             _ => cmds.push(Cmd::Shapes { start: idx, count: 1 }),
         };
         for (i, item) in scene.order.iter().enumerate() {
-            while let Some(&(end, ci)) = clips.last() {
-                if end < i {
-                    cmds.push(Cmd::PopClip { inst: ci });
-                    clips.pop();
+            while let Some((end, _)) = clips.last() {
+                if *end < i {
+                    let (_, parts) = clips.pop().unwrap();
+                    cmds.push(Cmd::PopClip { parts });
                 } else {
                     break;
                 }
@@ -604,7 +614,33 @@ impl Renderer {
                     _ => {}
                 }
             }
-            if n.kind.is_frame_like() && n.clips_content && item.span > 0 && !content_fits(doc, scene, i, item.span as usize, n, &world) {
+            if n.kind.is_frame_like() && n.clips_content && item.span > 0 && n.clip_alpha {
+                // Alpha mask: every visible fill stencils where it isn't transparent.
+                let ellipse = n.kind == NodeType::Ellipse;
+                let mut parts = Vec::new();
+                for p in n.fills.iter().filter(|p| p.is_visible()) {
+                    let FillParams { ptype, angle, nstops, colors, stops, image } = self.fill_params(Some(p));
+                    let ci = (inst.len() / INST_FLOATS) as u32;
+                    push_instance(
+                        &mut inst,
+                        &world,
+                        n.width,
+                        n.height,
+                        ellipse,
+                        3.0,
+                        n.radii(),
+                        colors,
+                        stops,
+                        [ptype, angle, nstops, 1.0],
+                        [0.0; 4],
+                        [0.0; 4],
+                        [0.0; 4],
+                    );
+                    parts.push((ci, image));
+                }
+                cmds.push(Cmd::PushClip { parts: parts.clone() });
+                clips.push((i + item.span as usize, parts));
+            } else if n.kind.is_frame_like() && n.clips_content && item.span > 0 && !content_fits(doc, scene, i, item.span as usize, n, &world) {
                 let ci = (inst.len() / INST_FLOATS) as u32;
                 push_instance(
                     &mut inst,
@@ -621,12 +657,12 @@ impl Renderer {
                     [0.0; 4],
                     [0.0; 4],
                 );
-                cmds.push(Cmd::PushClip { inst: ci });
-                clips.push((i + item.span as usize, ci));
+                cmds.push(Cmd::PushClip { parts: vec![(ci, None)] });
+                clips.push((i + item.span as usize, vec![(ci, None)]));
             }
         }
-        while let Some((_, ci)) = clips.pop() {
-            cmds.push(Cmd::PopClip { inst: ci });
+        while let Some((_, parts)) = clips.pop() {
+            cmds.push(Cmd::PopClip { parts });
         }
         let gl = &self.gl;
         gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
@@ -663,6 +699,62 @@ impl Renderer {
             });
             self.text_bytes = self.text_bytes.saturating_sub(freed);
         }
+    }
+
+    /// Shader parameters for one fill paint (`None`: no fill).
+    fn fill_params(&mut self, paint: Option<&Paint>) -> FillParams {
+        let mut colors = [[0.0f32; 4]; 4];
+        let mut stops = [0.0f32; 4];
+        let mut ptype = 0.0;
+        let mut angle = 0.0;
+        let mut nstops = 0.0;
+        let mut image: Option<String> = None;
+        match paint {
+            Some(Paint::Solid { color, opacity: po, .. }) => {
+                ptype = 1.0;
+                colors[0] = premul(*color, *po);
+            }
+            Some(Paint::LinearGradient { stops: st, angle: a, opacity: po, .. }) => {
+                ptype = 2.0;
+                angle = a.to_radians();
+                nstops = st.len().min(4) as f32;
+                let mut sorted: Vec<_> = st.iter().collect();
+                sorted.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal));
+                for (k, s) in sorted.iter().take(4).enumerate() {
+                    colors[k] = premul(s.color, *po);
+                    stops[k] = s.position;
+                }
+            }
+            Some(Paint::Image { asset, fit, opacity: po, tint, slice, .. }) => {
+                ptype = 3.0;
+                let fit_v = match fit {
+                    ImageFit::Fill => 0.0,
+                    ImageFit::Fit => 1.0,
+                    ImageFit::Stretch => 2.0,
+                };
+                match self.image(asset).map(|(_, w, h)| (w, h)) {
+                    Some((w, h)) => {
+                        // c0 = tint, c1 = (imgW, imgH, fit, alpha),
+                        // c2 = 9-slice source insets (top, right, bottom, left) in image px,
+                        // c3 = (layer px per image px, fill center, sliced, 0).
+                        colors[0] = premul(tint.unwrap_or(Color::WHITE), 1.0);
+                        colors[1] = [w as f32, h as f32, fit_v, *po];
+                        if let Some(s) = slice {
+                            colors[2] = s.source_insets(w, h).map(|v| v as f32);
+                            colors[3] = [s.scale.max(0.0), if s.fill_center { 1.0 } else { 0.0 }, 1.0, 0.0];
+                        }
+                        image = Some(asset.clone());
+                    }
+                    None => {
+                        // Placeholder while loading.
+                        ptype = 1.0;
+                        colors[0] = premul(Color::rgba(0.9, 0.9, 0.92, 1.0), 1.0);
+                    }
+                }
+            }
+            None => {}
+        }
+        FillParams { ptype, angle, nstops, colors, stops, image }
     }
 
     fn build_box(
@@ -703,7 +795,7 @@ impl Renderer {
                 push_shape(cmds, idx);
             }
         }
-        let fills: Vec<&Paint> = n.fills.iter().filter(|p| p.is_visible()).collect();
+        let fills: Vec<&Paint> = n.fills.iter().filter(|p| p.is_visible() && !n.hide_fill).collect();
         let strokes: Vec<&Paint> = if n.stroke_weight > 0.0 { n.strokes.iter().filter(|p| p.is_visible()).collect() } else { vec![] };
         let align = match n.stroke_align {
             StrokeAlign::Center => 0.0,
@@ -729,57 +821,7 @@ impl Renderer {
             } else {
                 ([0.0; 4], [0.0; 4])
             };
-            let mut colors = [[0.0f32; 4]; 4];
-            let mut stops = [0.0f32; 4];
-            let mut ptype = 0.0;
-            let mut angle = 0.0;
-            let mut nstops = 0.0;
-            let mut image: Option<String> = None;
-            match paint {
-                Some(Paint::Solid { color, opacity: po, .. }) => {
-                    ptype = 1.0;
-                    colors[0] = premul(*color, *po);
-                }
-                Some(Paint::LinearGradient { stops: st, angle: a, opacity: po, .. }) => {
-                    ptype = 2.0;
-                    angle = a.to_radians();
-                    nstops = st.len().min(4) as f32;
-                    let mut sorted: Vec<_> = st.iter().collect();
-                    sorted.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal));
-                    for (k, s) in sorted.iter().take(4).enumerate() {
-                        colors[k] = premul(s.color, *po);
-                        stops[k] = s.position;
-                    }
-                }
-                Some(Paint::Image { asset, fit, opacity: po, tint, slice, .. }) => {
-                    ptype = 3.0;
-                    let fit_v = match fit {
-                        ImageFit::Fill => 0.0,
-                        ImageFit::Fit => 1.0,
-                        ImageFit::Stretch => 2.0,
-                    };
-                    match self.image(asset).map(|(_, w, h)| (w, h)) {
-                        Some((w, h)) => {
-                            // c0 = tint, c1 = (imgW, imgH, fit, alpha),
-                            // c2 = 9-slice source insets (top, right, bottom, left) in image px,
-                            // c3 = (layer px per image px, fill center, sliced, 0).
-                            colors[0] = premul(tint.unwrap_or(Color::WHITE), 1.0);
-                            colors[1] = [w as f32, h as f32, fit_v, *po];
-                            if let Some(s) = slice {
-                                colors[2] = s.source_insets(w, h).map(|v| v as f32);
-                                colors[3] = [s.scale.max(0.0), if s.fill_center { 1.0 } else { 0.0 }, 1.0, 0.0];
-                            }
-                            image = Some(asset.clone());
-                        }
-                        None => {
-                            // Placeholder while loading.
-                            ptype = 1.0;
-                            colors[0] = premul(Color::rgba(0.9, 0.9, 0.92, 1.0), 1.0);
-                        }
-                    }
-                }
-                None => {}
-            }
+            let FillParams { ptype, angle, nstops, colors, stops, image } = self.fill_params(paint);
             if ptype == 0.0 && stroke[3] == 0.0 {
                 continue;
             }
@@ -827,6 +869,18 @@ impl Renderer {
     }
 
     // ---------------- drawing ----------------
+
+    fn draw_clip_parts(&mut self, parts: &[(u32, Option<String>)]) {
+        let gl = self.gl.clone();
+        for (inst, asset) in parts {
+            let tex = asset.as_deref().and_then(|a| self.image(a).map(|(t, _, _)| t.clone()));
+            gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
+            self.bind_shape_attribs(*inst);
+            gl.bind_texture(GL::TEXTURE_2D, Some(tex.as_ref().unwrap_or(&self.white)));
+            gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, 1);
+            self.draw_calls += 1;
+        }
+    }
 
     fn bind_shape_attribs(&self, start: u32) {
         let gl = &self.gl;
@@ -1067,7 +1121,7 @@ impl Renderer {
                     gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, 1);
                     self.draw_calls += 1;
                 }
-                Cmd::PushClip { inst } => {
+                Cmd::PushClip { parts } => {
                     flush_shapes!();
                     if current != 1 {
                         self.use_shape(&view, px);
@@ -1076,16 +1130,14 @@ impl Renderer {
                     gl.color_mask(false, false, false, false);
                     gl.stencil_func(GL::EQUAL, depth, 0xff);
                     gl.stencil_op(GL::KEEP, GL::KEEP, GL::INCR);
-                    gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
-                    self.bind_shape_attribs(*inst);
-                    gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, 1);
+                    // Overlapping parts only count once: a pixel already raised fails EQUAL.
+                    self.draw_clip_parts(parts);
                     depth += 1;
-                    self.draw_calls += 1;
                     gl.color_mask(true, true, true, true);
                     gl.stencil_op(GL::KEEP, GL::KEEP, GL::KEEP);
                     gl.stencil_func(GL::EQUAL, depth, 0xff);
                 }
-                Cmd::PopClip { inst } => {
+                Cmd::PopClip { parts } => {
                     flush_shapes!();
                     if current != 1 {
                         self.use_shape(&view, px);
@@ -1094,11 +1146,8 @@ impl Renderer {
                     gl.color_mask(false, false, false, false);
                     gl.stencil_func(GL::EQUAL, depth, 0xff);
                     gl.stencil_op(GL::KEEP, GL::KEEP, GL::DECR);
-                    gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
-                    self.bind_shape_attribs(*inst);
-                    gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, 1);
+                    self.draw_clip_parts(parts);
                     depth = (depth - 1).max(0);
-                    self.draw_calls += 1;
                     gl.color_mask(true, true, true, true);
                     gl.stencil_op(GL::KEEP, GL::KEEP, GL::KEEP);
                     gl.stencil_func(GL::EQUAL, depth, 0xff);

@@ -354,6 +354,39 @@ impl Writer<'_> {
         out
     }
 
+    /// The fills of a closed shape, in its local coordinates.
+    fn fills_markup(&mut self, n: &Node, shape: &str) -> String {
+        let mut out = String::new();
+        let fills: Vec<Paint> = n.fills.clone();
+        for p in fills.iter().filter(|p| p.is_visible()) {
+            let rule = if n.fill_rule == FillRule::Evenodd { r#" fill-rule="evenodd""# } else { "" };
+            if matches!(p, Paint::Image { .. }) {
+                if let Some(content) = self.image_content(p, n.width, n.height) {
+                    // 9-slice, stretch and fit never leave the box, so a plain
+                    // rectangle needs no clip. (resvg cuts off very large content
+                    // under several nested clips, e.g. a full-screen sliced overlay
+                    // inside a clipped frame.)
+                    let spills = match p {
+                        Paint::Image { asset, fit: ImageFit::Fill, slice: None, .. } => (self.opts.image_size)(asset).is_none(),
+                        _ => false,
+                    };
+                    let plain = shape.starts_with("<rect") && !shape.contains("rx=");
+                    if plain && !spills {
+                        out.push_str(&content);
+                    } else {
+                        let clip = self.id("c");
+                        let clip_rule = if rule.is_empty() { "" } else { r#" clip-rule="evenodd""# };
+                        let _ = write!(self.defs, r#"<clipPath id="{clip}">{shape}{clip_rule}/></clipPath>"#);
+                        let _ = write!(out, r#"<g clip-path="url(#{clip})">{content}</g>"#);
+                    }
+                }
+            } else if let Some(attr) = self.paint_attr(p, n.width, n.height, "fill") {
+                let _ = write!(out, "{shape}{attr}{rule}/>");
+            }
+        }
+        out
+    }
+
     fn effects_filter(&mut self, n: &Node) -> Option<String> {
         let effects: Vec<&Effect> = n
             .effects
@@ -409,35 +442,10 @@ impl Writer<'_> {
             NodeType::Text => self.text(n),
             _ => {
                 if let Some(shape) = self.shape(n) {
-                    let fills: Vec<Paint> = n.fills.clone();
                     let closed = n.kind != NodeType::Line;
-                    if closed {
-                        for p in fills.iter() {
-                            let rule = if n.fill_rule == FillRule::Evenodd { r#" fill-rule="evenodd""# } else { "" };
-                            if matches!(p, Paint::Image { .. }) {
-                                if let Some(content) = self.image_content(p, n.width, n.height) {
-                                    // 9-slice, stretch and fit never leave the box, so a plain
-                                    // rectangle needs no clip. (resvg cuts off very large content
-                                    // under several nested clips, e.g. a full-screen sliced overlay
-                                    // inside a clipped frame.)
-                                    let spills = match p {
-                                        Paint::Image { asset, fit: ImageFit::Fill, slice: None, .. } => (self.opts.image_size)(asset).is_none(),
-                                        _ => false,
-                                    };
-                                    let plain = shape.starts_with("<rect") && !shape.contains("rx=");
-                                    if plain && !spills {
-                                        self.body.push_str(&content);
-                                    } else {
-                                        let clip = self.id("c");
-                                        let clip_rule = if rule.is_empty() { "" } else { r#" clip-rule="evenodd""# };
-                                        let _ = write!(self.defs, r#"<clipPath id="{clip}">{shape}{clip_rule}/></clipPath>"#);
-                                        let _ = write!(self.body, r#"<g clip-path="url(#{clip})">{content}</g>"#);
-                                    }
-                                }
-                            } else if let Some(attr) = self.paint_attr(p, n.width, n.height, "fill") {
-                                let _ = write!(self.body, "{shape}{attr}{rule}/>");
-                            }
-                        }
+                    if closed && !n.hide_fill {
+                        let fills = self.fills_markup(n, &shape);
+                        self.body.push_str(&fills);
                     }
                     if n.has_visible_stroke() {
                         let strokes = n.strokes.clone();
@@ -477,7 +485,21 @@ impl Writer<'_> {
         let kids: Vec<NodeId> = self.doc.children(&n.id).to_vec();
         if !kids.is_empty() {
             let clip = n.kind.is_frame_like() && n.clips_content;
-            if clip {
+            if clip && n.clip_alpha {
+                // Alpha mask from the fills. Any alpha above Unity's cutoff
+                // (0.001) shows the children fully, like the editor's stencil.
+                // Nearest sampling: resvg's smooth filters ring to zero next to
+                // hard alpha edges, which would cut holes into the mask.
+                let shape = self.shape(n).unwrap_or_default();
+                let fills = self.fills_markup(n, &shape);
+                let (id, fid) = (self.id("m"), self.id("f"));
+                let (w, h) = (fmt_num(n.width), fmt_num(n.height));
+                let _ = write!(
+                    self.defs,
+                    r#"<filter id="{fid}" filterUnits="userSpaceOnUse" x="0" y="0" width="{w}" height="{h}"><feComponentTransfer><feFuncA type="linear" slope="1000" intercept="0"/></feComponentTransfer></filter><mask id="{id}" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="{w}" height="{h}"><g filter="url(#{fid})" image-rendering="optimizeSpeed">{fills}</g></mask>"#
+                );
+                let _ = write!(self.body, r#"<g mask="url(#{id})">"#);
+            } else if clip {
                 let id = self.id("c");
                 let shape = self.shape(n).unwrap_or_default();
                 let _ = write!(self.defs, r#"<clipPath id="{id}">{shape}/></clipPath>"#);

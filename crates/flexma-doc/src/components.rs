@@ -26,6 +26,8 @@ pub const INHERITED: &[&str] = &[
     "cornerRadii",
     "effects",
     "clipsContent",
+    "clipAlpha",
+    "hideFill",
     "blendMode",
     "layoutMode",
     "itemSpacing",

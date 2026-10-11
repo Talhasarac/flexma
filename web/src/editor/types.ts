@@ -139,6 +139,8 @@ export interface NodeData {
   cornerRadii: [number, number, number, number] | null;
   effects: EffectValue[];
   clipsContent: boolean;
+  clipAlpha: boolean;
+  hideFill: boolean;
   characters: string;
   fontFamily: string;
   fontSize: number;

@@ -204,8 +204,29 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
             "align" => {
                 out.insert("counterAxisAlign".into(), align(v));
             }
-            "clip" | "clipsContent" | "overflowHidden" => {
-                out.insert("clipsContent".into(), v.clone());
+            "clip" | "clipsContent" | "overflowHidden" => match v.as_str().map(|s| s.to_ascii_lowercase()) {
+                // "alpha": clip to the fills' alpha (an image mask, like Unity's Mask).
+                Some(s) if s == "alpha" => {
+                    out.insert("clipsContent".into(), Value::Bool(true));
+                    out.insert("clipAlpha".into(), Value::Bool(true));
+                }
+                Some(s) if s == "shape" || s == "rect" => {
+                    out.insert("clipsContent".into(), Value::Bool(true));
+                    out.insert("clipAlpha".into(), Value::Bool(false));
+                }
+                Some(s) if s == "none" => {
+                    out.insert("clipsContent".into(), Value::Bool(false));
+                }
+                Some(_) => return Err(format!("'{k}' must be true, false, \"alpha\" or \"shape\"")),
+                None => {
+                    out.insert("clipsContent".into(), v.clone());
+                }
+            },
+            "clipAlpha" | "alphaMask" => {
+                if v.as_bool() == Some(true) && !input.contains_key("clip") && !input.contains_key("clipsContent") {
+                    out.insert("clipsContent".into(), Value::Bool(true));
+                }
+                out.insert("clipAlpha".into(), v.clone());
             }
             "shadow" | "dropShadow" => {
                 let mut effects = Vec::new();
@@ -628,6 +649,18 @@ mod tests {
             other => panic!("expected one image fill, got {other:?}"),
         }
         assert!(expand_image(&json!({ "type": "image" })).is_err(), "asset is required");
+    }
+
+    #[test]
+    fn clip_alpha_shorthands() {
+        let norm = |v: Value| normalize_props(NodeType::Frame, v.as_object().unwrap()).unwrap();
+        let m = norm(json!({ "clip": "alpha", "hideFill": true }));
+        assert_eq!((m["clipsContent"].clone(), m["clipAlpha"].clone(), m["hideFill"].clone()), (json!(true), json!(true), json!(true)));
+        let m = norm(json!({ "clipAlpha": true }));
+        assert_eq!(m["clipsContent"], json!(true));
+        let m = norm(json!({ "clip": "shape" }));
+        assert_eq!((m["clipsContent"].clone(), m["clipAlpha"].clone()), (json!(true), json!(false)));
+        assert!(normalize_props(NodeType::Frame, json!({ "clip": "sprite" }).as_object().unwrap()).is_err());
     }
 
     #[test]
