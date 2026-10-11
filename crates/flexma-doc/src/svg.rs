@@ -61,7 +61,16 @@ pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(Stri
     let mut w = Writer { doc, opts, defs: String::new(), body: String::new(), next_id: 0 };
     for n in roots {
         let parent_world = n.parent.as_deref().map(|p| doc.world_transform(p)).unwrap_or(Affine::IDENTITY);
+        // Nodes write their local transform; a nested root also needs its
+        // parent's, to land in page space like the bounds.
+        let nested = parent_world != Affine::IDENTITY;
+        if nested {
+            let _ = write!(w.body, r#"<g transform="{}">"#, parent_world.to_svg());
+        }
         w.node(n, &parent_world);
+        if nested {
+            w.body.push_str("</g>");
+        }
     }
     let mut out = String::new();
     let _ = write!(

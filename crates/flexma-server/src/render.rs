@@ -179,6 +179,85 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Re
     Ok((png, w, h))
 }
 
+/// One image of several renders in a labelled grid (a contact sheet), so an
+/// agent can compare screens at a glance. `tiles` are (label, svg). Returns
+/// the PNG, its size and each tile's rect in it.
+pub fn contact_sheet(tiles: &[(String, String)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
+    const PAD: f32 = 16.0;
+    const LABEL: f32 = 22.0;
+    let mut opt = resvg::usvg::Options::default();
+    opt.fontdb = fonts;
+    opt.font_family = "Inter".into();
+    let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+    if trees.is_empty() {
+        return Err("nothing to render".into());
+    }
+    // Shelf packing: tiles keep their own sizes, left to right in rows about
+    // as wide as a square sheet would be, all shrunk together to fit max_dim.
+    let place = |s: f32| -> (Vec<(f32, f32)>, f32, f32) {
+        // A slot is at least as wide as its label (13 px text ≈ 7.2 px a character).
+        let sizes: Vec<(f32, f32)> = trees
+            .iter()
+            .zip(tiles)
+            .map(|(t, (label, _))| ((t.size().width() * s).max(label.chars().take(80).count() as f32 * 7.2 + 8.0), t.size().height() * s))
+            .collect();
+        let area: f32 = sizes.iter().map(|(w, h)| (w + PAD) * (h + LABEL + PAD)).sum();
+        let widest = sizes.iter().map(|z| z.0).fold(0.0, f32::max);
+        let row_w = widest.max(area.sqrt() * 1.2);
+        let (mut x, mut y, mut row_h, mut sheet_w) = (PAD, PAD, 0.0f32, 0.0f32);
+        let mut pos = Vec::new();
+        for (w, h) in &sizes {
+            if x > PAD && x + w > row_w + PAD {
+                x = PAD;
+                y += row_h + LABEL + PAD;
+                row_h = 0.0;
+            }
+            pos.push((x, y));
+            x += w + PAD;
+            sheet_w = sheet_w.max(x);
+            row_h = row_h.max(*h);
+        }
+        (pos, sheet_w, y + row_h + LABEL + PAD)
+    };
+    let mut s = scale.clamp(0.01, 8.0);
+    for _ in 0..4 {
+        let (_, sw, sh) = place(s);
+        let longest = sw.max(sh);
+        if longest <= max_dim as f32 {
+            break;
+        }
+        s *= (max_dim as f32 / longest) * 0.98;
+    }
+    let (pos, sw, sh) = place(s);
+    let (w, h) = ((sw.ceil() as u32).min(max_dim.max(1) * 2), (sh.ceil() as u32).min(max_dim.max(1) * 2));
+    let mut pm = resvg::tiny_skia::Pixmap::new(w, h).ok_or("image too large")?;
+    pm.fill(resvg::tiny_skia::Color::from_rgba8(232, 233, 237, 255));
+    let mut rects = Vec::new();
+    let mut labels = String::new();
+    for ((tree, (label, _)), (x, y)) in trees.iter().zip(tiles).zip(pos) {
+        let tw = ((tree.size().width() * s).ceil() as u32).max(1);
+        let th = ((tree.size().height() * s).ceil() as u32).max(1);
+        let mut tile = resvg::tiny_skia::Pixmap::new(tw, th).ok_or("image too large")?;
+        resvg::render(tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut tile.as_mut());
+        let ty = (y + LABEL).round() as i32;
+        pm.draw_pixmap(x.round() as i32, ty, tile.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), resvg::tiny_skia::Transform::identity(), None);
+        rects.push([x.round() as u32, ty as u32, tw, th]);
+        let text: String = label.chars().take(80).collect();
+        labels.push_str(&format!(
+            r##"<text x="{}" y="{}" font-size="13" font-family="Inter, Helvetica, Arial, sans-serif" fill="#3a3d46">{}</text>"##,
+            x,
+            y + 15.0,
+            flexma_doc::svg::escape(&text)
+        ));
+    }
+    let overlay = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{labels}</svg>"#);
+    if let Ok(t) = resvg::usvg::Tree::from_str(&overlay, &opt) {
+        resvg::render(&t, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+    }
+    let png = pm.encode_png().map_err(|e| e.to_string())?;
+    Ok((png, w, h, rects))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +652,33 @@ mod tile_tests {
         // Uncropped at 1×: red, blue, red, blue, red every 10 px.
         let pm = render(&atlas, (50.0, 10.0), None, 1.0);
         assert!(red(&pm, 5, 5) && !red(&pm, 15, 5) && red(&pm, 25, 5) && !red(&pm, 35, 5) && red(&pm, 45, 5));
+    }
+}
+
+#[cfg(test)]
+mod nested_export_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType, Op, Paint};
+
+    /// Exporting a layer inside a moved frame used to come out blank: the
+    /// viewBox was in page space but the layer kept only its local offset.
+    #[test]
+    fn nested_layers_export_in_place() {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.x, f.y, f.width, f.height) = (300.0, 200.0, 100.0, 100.0);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut r = Node::new("r:1", NodeType::Rectangle);
+        r.parent = Some("f:1".into());
+        (r.x, r.y, r.width, r.height) = (10.0, 20.0, 40.0, 30.0);
+        r.fills = vec![Paint::solid(flexma_doc::Color::parse("#ff0000").unwrap())];
+        doc.apply(&Op::Create { node: r }).unwrap();
+        let (svg, bounds) = export(&doc, &["r:1".to_string()], &SvgOptions::default()).unwrap();
+        assert_eq!((bounds.x, bounds.y), (310.0, 220.0));
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(40, 30).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+        assert_eq!(pm.pixel(20, 15).unwrap().red(), 255, "the layer fills its own export");
     }
 }

@@ -138,11 +138,12 @@ fn tools() -> Value {
             "properties": { "file_id": file_id, "name": { "type": "string" } },
             "required": ["file_id", "name"]
         })),
-        tool("get_screenshot", "Render a node or page to PNG so you can see the design. Use it to verify your work.", json!({
+        tool("get_screenshot", "Render a node or page to PNG so you can see the design. Use it to verify your work. Pass node_ids to see several frames side by side in one labelled image.", json!({
             "type": "object",
             "properties": {
                 "file_id": file_id,
                 "node_id": { "type": "string" },
+                "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Up to 24 nodes, rendered into one contact sheet (a labelled grid, 2400px max)" },
                 "page_id": { "type": "string" },
                 "scale": { "type": "number", "description": "Default 1; output is capped at 1600px on the long side" }
             },
@@ -1390,6 +1391,9 @@ impl Ctx {
     }
 
     async fn get_screenshot(&self, args: &Value) -> ToolResult {
+        if args.get("node_ids").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
+            return self.contact_sheet(args).await;
+        }
         let fid = s(args, "file_id")?.to_string();
         let node = opt_s(args, "node_id").map(str::to_string);
         let page = opt_s(args, "page_id").map(str::to_string);
@@ -1421,6 +1425,45 @@ impl Ctx {
                 ) }
             ]
         }))
+    }
+
+    /// get_screenshot with `node_ids`: one labelled image of several nodes.
+    async fn contact_sheet(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let ids: Vec<String> = args["node_ids"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_string).collect();
+        if ids.len() > 24 {
+            return Err("node_ids takes up to 24 nodes per image".into());
+        }
+        let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+        let room = self.room(&fid, Role::Viewer).await?;
+        let data_dir = self.st.cfg.data_dir.clone();
+        let tiles: Vec<(String, String, String)> = room
+            .read(move |doc, _| {
+                let mut out = Vec::new();
+                for id in &ids {
+                    let n = doc.get(id).ok_or_else(|| format!("node '{id}' not found"))?;
+                    let (svg, _) = render::export_svg(doc, std::slice::from_ref(id), Some(flexma_doc::Color::WHITE), render::AssetMode::Inline(&data_dir))
+                        .ok_or_else(|| format!("nothing to render for '{id}'"))?;
+                    out.push((id.clone(), n.name.clone(), svg));
+                }
+                Ok::<_, String>(out)
+            })
+            .await
+            .map_err(err_msg)??;
+        let f2 = fid.clone();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
+        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
+        let labelled: Vec<(String, String)> = tiles.iter().map(|(id, name, svg)| (format!("{name} [{id}]"), svg.clone())).collect();
+        let (png, w, h, rects) = tokio::task::spawn_blocking(move || render::contact_sheet(&labelled, scale, 2400, fonts))
+            .await
+            .map_err(|e| e.to_string())??;
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(png);
+        let mut text = format!("Contact sheet {w}×{h} px, {} node(s), each under its name:\n", tiles.len());
+        for ((id, name, _), r) in tiles.iter().zip(&rects) {
+            text.push_str(&format!("\"{name}\" [{id}] at x={} y={} ({}×{} px)\n", r[0], r[1], r[2], r[3]));
+        }
+        Ok(json!({ "content": [{ "type": "image", "data": data, "mimeType": "image/png" }, { "type": "text", "text": text }] }))
     }
 
     async fn export_svg(&self, args: &Value) -> ToolResult {

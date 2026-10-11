@@ -154,7 +154,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `move_nodes` | Re-parent and/or reorder (keeps the canvas position by default) |
 | `duplicate_nodes` | Copy nodes next to the originals |
 | `delete_nodes` | Delete nodes and their children |
-| `get_screenshot` | Render a node or page to PNG so you can see it |
+| `get_screenshot` | Render a node or page to PNG so you can see it. `node_ids` (up to 24) puts several frames side by side in one labelled image |
 | `export_svg` | Get SVG markup, e.g. for icons or handoff |
 
 See `references/node-spec.md` for every property and shorthand, and `references/recipes.md` for ready-made patterns: screens, buttons, inputs, cards, nav bars, pricing tables, and design-to-code mapping.
