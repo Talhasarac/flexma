@@ -357,17 +357,18 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
     let scale = q.scale.unwrap_or(2.0);
     let with_bg = q.background.unwrap_or(true);
     let measure_fonts = fonts.clone();
-    let svg = room
+    let (svg, linear) = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
+            let linear = render::linear_for(doc, &ids);
             render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
-                .map(|(s, _)| s)
+                .map(|(s, _)| (s, linear))
                 .ok_or_else(|| "nothing to export".to_string())
         })
         .await?
         .map_err(AppError::bad_request)?;
     let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
-    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, max_dim, fonts))
+    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, max_dim, fonts, linear))
         .await
         .map_err(AppError::internal)?
         .map_err(AppError::bad_request)?;

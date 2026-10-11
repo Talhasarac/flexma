@@ -27,11 +27,15 @@ pub struct SvgOptions<'a> {
     /// the pixels next to the region) and tints are color-matrix filters
     /// (which resvg can drop on large or sliced layers).
     pub resolve_variant: &'a dyn Fn(&str, Option<&ImageCrop>, Option<Color>) -> Option<String>,
+    /// Write colors in linear light, for a rasterizer that blends what it is
+    /// given and whose output is then encoded back to sRGB (pages with
+    /// `linearBlending`). Images then come through `resolve_variant` linearized.
+    pub linear: bool,
 }
 
 impl Default for SvgOptions<'_> {
     fn default() -> Self {
-        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None, resolve_variant: &|_, _, _| None }
+        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None, resolve_variant: &|_, _, _| None, linear: false }
     }
 }
 
@@ -96,7 +100,7 @@ pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(Stri
             fmt_num(b.y),
             fmt_num(b.width),
             fmt_num(b.height),
-            bg.to_hex()
+            if opts.linear { bg.to_linear() } else { bg }.to_hex()
         );
     }
     out.push_str(&w.body);
@@ -257,7 +261,7 @@ impl Writer<'_> {
             Paint::Solid { color, opacity, .. } => {
                 let a = color.a * opacity;
                 let op = if a < 1.0 { format!(r#" {attr}-opacity="{}""#, fmt_num(a as f64)) } else { String::new() };
-                Some(format!(r#" {attr}="{}"{op}"#, color.to_hex_rgb()))
+                Some(format!(r#" {attr}="{}"{op}"#, self.col(*color).to_hex_rgb()))
             }
             Paint::LinearGradient { stops, angle, opacity, .. } => {
                 let id = self.id("g");
@@ -276,7 +280,7 @@ impl Writer<'_> {
                         self.defs,
                         r#"<stop offset="{}" stop-color="{}" stop-opacity="{}"/>"#,
                         fmt_num(st.position as f64),
-                        st.color.to_hex_rgb(),
+                        self.col(st.color).to_hex_rgb(),
                         fmt_num((st.color.a * opacity) as f64)
                     );
                 }
@@ -314,7 +318,7 @@ impl Writer<'_> {
                 let mut tint = tint.filter(|t| *t != Color::WHITE);
                 // Better: the region cut out and the tint multiplied in, as an
                 // image of its own.
-                if region.is_some() || tint.is_some() {
+                if region.is_some() || tint.is_some() || self.opts.linear {
                     if let Some(variant) = (self.opts.resolve_variant)(asset, region.as_ref(), tint) {
                         href = escape(&variant);
                         if let Some(c) = region.take() {
@@ -339,9 +343,9 @@ impl Writer<'_> {
                             r#"<filter id="{fid}" filterUnits="userSpaceOnUse" x="0" y="0" width="{}" height="{}" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="{} 0 0 0 0 0 {} 0 0 0 0 0 {} 0 0 0 0 0 {} 0"/></filter>"#,
                             fmt_num(w.max(1.0)),
                             fmt_num(h.max(1.0)),
-                            fmt_num(t.r as f64),
-                            fmt_num(t.g as f64),
-                            fmt_num(t.b as f64),
+                            fmt_num(self.col(t).r as f64),
+                            fmt_num(self.col(t).g as f64),
+                            fmt_num(self.col(t).b as f64),
                             fmt_num(t.a as f64)
                         );
                         format!(r#" filter="url(#{fid})""#)
@@ -528,6 +532,15 @@ impl Writer<'_> {
         out
     }
 
+    /// A color as written: in linear light for linear blending.
+    fn col(&self, c: Color) -> Color {
+        if self.opts.linear {
+            c.to_linear()
+        } else {
+            c
+        }
+    }
+
     fn effects_filter(&mut self, n: &Node) -> Option<String> {
         let effects: Vec<&Effect> = n
             .effects
@@ -584,7 +597,7 @@ impl Writer<'_> {
                         r#"<feOffset in="{input}" dx="{}" dy="{}" result="s{i}o"/><feFlood flood-color="{}" flood-opacity="{}"/><feComposite in2="s{i}o" operator="in" result="s{i}"/>"#,
                         fmt_num(*x as f64),
                         fmt_num(*y as f64),
-                        color.to_hex_rgb(),
+                        self.col(*color).to_hex_rgb(),
                         fmt_num(color.a as f64)
                     );
                     layers.push(format!("s{i}"));

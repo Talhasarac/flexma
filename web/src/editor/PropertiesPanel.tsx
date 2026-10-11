@@ -1235,11 +1235,11 @@ function PagePanel({ store }: { store: EditorStore }) {
   const pages = usePages(store);
   const ui = useUi(store);
   const page = pages.pages.find((p) => p.id === pages.current);
-  const bg = useMemo(() => {
+  const { bg, linear } = useMemo(() => {
     const raw = page ? store.engine.node(page.id) : undefined;
-    if (!raw) return '#f5f5f5';
-    const n = JSON.parse(raw) as { background: string | null };
-    return n.background ?? '#f5f5f5';
+    if (!raw) return { bg: '#f5f5f5', linear: false };
+    const n = JSON.parse(raw) as { background: string | null; linearBlending?: boolean };
+    return { bg: n.background ?? '#f5f5f5', linear: n.linearBlending === true };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, store, ui]);
   return (
@@ -1253,6 +1253,19 @@ function PagePanel({ store }: { store: EditorStore }) {
             store.poll();
           }}
         />
+        <label className="check" title="Blend semi-transparent layers in linear light, like a Unity project in Linear color space">
+          <input
+            type="checkbox"
+            checked={linear}
+            disabled={!ui.canEdit}
+            onChange={(e) => {
+              if (!page || !ui.canEdit) return;
+              store.engine.update_nodes(JSON.stringify([{ id: page.id, props: { linearBlending: e.target.checked } }]));
+              store.poll();
+            }}
+          />
+          Linear blending (Unity)
+        </label>
       </Section>
       <Section title="Tips">
         <ul className="tips">

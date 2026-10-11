@@ -192,6 +192,7 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
 - Images and fonts: upload files with `upload_image` / `upload_font` (run the `curl` command they return); don't paste file contents into tool calls.
 - Big trees (an exported game UI, hundreds of frames): write the specs to a JSON file and send it with `upload_nodes` instead of pasting huge `create_nodes` payloads. Each batch is one undoable step; split very large exports by screen.
+- Unity projects in Linear color space: create their pages with `linearBlending: true` so translucent overlays and text edges match Unity.
 - Keep source data with the design in `meta` (any JSON object), e.g. the Unity component or a button's action. `find_nodes` can search it by `meta` entries or by `key`.
 - Re-exports: give every node a stable `key` (e.g. its Unity object path). Uploading again then updates the same nodes in place (ids, comments and people's additions survive) instead of adding copies. Don't delete and recreate screens.
 - Fixed text boxes (TextMeshPro rects): give `width` and `height` with `overflow` (`CLIP`, `ELLIPSIS` or `TRUNCATE`) or `autoSize: [min, max]` (shrinks the font to fit); `wrap: false` keeps each paragraph on one line.

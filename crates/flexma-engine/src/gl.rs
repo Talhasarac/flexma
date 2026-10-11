@@ -154,6 +154,13 @@ flat in vec4 v_fx;
 uniform float u_px;
 uniform sampler2D u_tex;
 out vec4 o;
+// Linear blending (u_linear): outputs go to an sRGB target in linear light.
+uniform float u_linear;
+vec3 srgbToLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec4 toOutput(vec4 c) {
+  if (u_linear < 0.5 || c.a <= 0.0) return c;
+  return vec4(srgbToLinear(clamp(c.rgb / c.a, 0.0, 1.0)) * c.a, c.a);
+}
 
 float sdRoundBox(vec2 p, vec2 b, vec4 rad) {
   float r = p.x > 0.0 ? (p.y > 0.0 ? rad.z : rad.y) : (p.y > 0.0 ? rad.w : rad.x);
@@ -296,7 +303,12 @@ vec4 imageFill(vec2 local, vec2 gx, vec2 gy, float aa) {
   fill *= filledCoverage(local, sz, aa);
   return fill;
 }
+void shade();
 void main() {
+  shade();
+  o = toOutput(o);
+}
+void shade() {
   // Screen derivatives of the layer position, taken in uniform control flow:
   // image lookups below sit in per-pixel branches, where implicit derivatives
   // are undefined and pick a blurry mip at the edges (which leaks through alpha masks).
@@ -398,7 +410,14 @@ pub const MESH_FS: &str = r#"#version 300 es
 precision highp float;
 uniform vec4 u_color;
 out vec4 o;
-void main() { o = u_color; }
+// Linear blending (u_linear): outputs go to an sRGB target in linear light.
+uniform float u_linear;
+vec3 srgbToLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec4 toOutput(vec4 c) {
+  if (u_linear < 0.5 || c.a <= 0.0) return c;
+  return vec4(srgbToLinear(clamp(c.rgb / c.a, 0.0, 1.0)) * c.a, c.a);
+}
+void main() { o = toOutput(u_color); }
 "#;
 
 pub const TEX_VS: &str = r#"#version 300 es
@@ -424,7 +443,37 @@ in vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_alpha;
 out vec4 o;
-void main() { o = texture(u_tex, v_uv) * u_alpha; }
+// Linear blending (u_linear): outputs go to an sRGB target in linear light.
+uniform float u_linear;
+vec3 srgbToLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec4 toOutput(vec4 c) {
+  if (u_linear < 0.5 || c.a <= 0.0) return c;
+  return vec4(srgbToLinear(clamp(c.rgb / c.a, 0.0, 1.0)) * c.a, c.a);
+}
+void main() { o = toOutput(texture(u_tex, v_uv) * u_alpha); }
+"#;
+
+/// Full-screen pass that encodes a linear-light sRGB target for the canvas.
+pub const COMPOSITE_VS: &str = r#"#version 300 es
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  v_uv = p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+pub const COMPOSITE_FS: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 o;
+vec3 linearToSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+void main() {
+  // The sRGB texture samples as linear light; the canvas wants sRGB.
+  vec4 c = texture(u_tex, v_uv);
+  o = vec4(linearToSrgb(clamp(c.rgb, 0.0, 1.0)), 1.0);
+}
 "#;
 
 #[cfg(test)]
@@ -442,7 +491,7 @@ mod tests {
             "long", "short", "double", "half", "fixed", "unsigned", "superp", "input", "output", "filter", "sizeof", "cast",
             "namespace", "using",
         ];
-        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS)] {
+        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS)] {
             for line in src.lines() {
                 let code = line.split("//").next().unwrap_or("");
                 for word in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {

@@ -173,9 +173,13 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
-        tool("create_page", "Add a page to a file.", json!({
+        tool("create_page", "Add a page to a file. linearBlending: true blends semi-transparent layers in linear light like a Unity project in Linear color space (also settable later with update_nodes on the page id).", json!({
             "type": "object",
-            "properties": { "file_id": file_id, "name": { "type": "string" } },
+            "properties": {
+                "file_id": file_id,
+                "name": { "type": "string" },
+                "linearBlending": { "type": "boolean", "description": "Blend in linear light (Unity Linear color space). Default false (sRGB, like browsers)" }
+            },
             "required": ["file_id", "name"]
         })),
         tool("get_screenshot", "Render a node or page to PNG so you can see the design. Use it to verify your work. Pass node_ids to see several frames side by side in one labelled image.", json!({
@@ -1426,11 +1430,13 @@ impl Ctx {
     async fn create_page(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
         let name = s(args, "name")?.to_string();
+        let linear = args.get("linearBlending").and_then(Value::as_bool).unwrap_or(false);
         let room = self.room(&fid, Role::Editor).await?;
         let id = format!("a{}:1", random_string(6));
         room.mutate(self.agent(), move |tx| {
             let mut page = Node::new(id.clone(), NodeType::Page);
             page.name = name;
+            page.linear_blending = linear;
             page.parent = Some(ROOT_ID.into());
             page.index = tx.doc.index_at_end(ROOT_ID);
             tx.apply(Op::Create { node: page })?;
@@ -1456,15 +1462,18 @@ impl Ctx {
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
-        let (svg, bounds) = room
+        let (svg, bounds, linear) = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
                 let bg = bg.or(Some(flexma_doc::Color::WHITE));
-                render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts)).ok_or_else(|| "nothing to render".to_string())
+                let linear = render::linear_for(doc, &ids);
+                render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
+                    .map(|(s, b)| (s, b, linear))
+                    .ok_or_else(|| "nothing to render".to_string())
             })
             .await
             .map_err(err_msg)??;
-        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 1600, fonts))
+        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 1600, fonts, linear))
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;
@@ -1494,27 +1503,27 @@ impl Ctx {
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
-        let tiles: Vec<(String, String, String)> = room
+        let tiles: Vec<(String, String, String, bool)> = room
             .read(move |doc, _| {
                 let mut out = Vec::new();
                 for id in &ids {
                     let n = doc.get(id).ok_or_else(|| format!("node '{id}' not found"))?;
                     let (svg, _) = render::export_svg(doc, std::slice::from_ref(id), Some(flexma_doc::Color::WHITE), render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
                         .ok_or_else(|| format!("nothing to render for '{id}'"))?;
-                    out.push((id.clone(), n.name.clone(), svg));
+                    out.push((id.clone(), n.name.clone(), svg, render::linear_for(doc, std::slice::from_ref(id))));
                 }
                 Ok::<_, String>(out)
             })
             .await
             .map_err(err_msg)??;
-        let labelled: Vec<(String, String)> = tiles.iter().map(|(id, name, svg)| (format!("{name} [{id}]"), svg.clone())).collect();
+        let labelled: Vec<(String, String, bool)> = tiles.iter().map(|(id, name, svg, linear)| (format!("{name} [{id}]"), svg.clone(), *linear)).collect();
         let (png, w, h, rects) = tokio::task::spawn_blocking(move || render::contact_sheet(&labelled, scale, 2400, fonts))
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         let mut text = format!("Contact sheet {w}×{h} px, {} node(s), each under its name:\n", tiles.len());
-        for ((id, name, _), r) in tiles.iter().zip(&rects) {
+        for ((id, name, _, _), r) in tiles.iter().zip(&rects) {
             text.push_str(&format!("\"{name}\" [{id}] at x={} y={} ({}×{} px)\n", r[0], r[1], r[2], r[3]));
         }
         Ok(json!({ "content": [{ "type": "image", "data": data, "mimeType": "image/png" }, { "type": "text", "text": text }] }))

@@ -702,7 +702,8 @@ impl Editor {
         if r.built_version != version || wake {
             r.build(&self.doc, &self.scene, &hidden, version);
         }
-        r.draw(&self.doc, &self.scene, text, &self.cam, self.css_w, self.css_h, self.dpr, bg, &overlay, &labels, interacting);
+        let linear = self.doc.get(&self.scene.page).is_some_and(|p| p.linear_blending);
+        r.draw(&self.doc, &self.scene, text, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting);
         self.last_frame_ms = self.now_ms;
         self.dirty = r.wants_more;
         true

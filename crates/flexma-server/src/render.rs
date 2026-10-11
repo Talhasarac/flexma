@@ -38,13 +38,14 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>) -> Opt
     }
     let bg = page_background(doc, &page);
     let mode = AssetMode::Inline(data_dir);
+    let linear = linear_for(doc, std::slice::from_ref(&page));
     let resolve = |id: &str| resolve_asset(&mode, id);
-    let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t);
+    let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t, linear);
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &variant };
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &variant, linear };
     let (svg, _) = export(doc, &[page], &opts)?;
-    svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts).ok().map(|(png, _, _)| png)
+    svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear).ok().map(|(png, _, _)| png)
 }
 
 pub enum AssetMode<'a> {
@@ -59,8 +60,11 @@ pub enum AssetMode<'a> {
 /// Export nodes (or a whole page) to SVG. With `fonts`, text breaks into
 /// lines by the real font metrics instead of estimates.
 pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>) -> Option<(String, Rect)> {
+    // Linear blending only applies when the server rasterizes (inlined
+    // images); browsers viewing an SVG blend in sRGB.
+    let linear = matches!(assets, AssetMode::Inline(_)) && linear_for(doc, ids);
     let resolve = |id: &str| resolve_asset(&assets, id);
-    let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&assets, id, c, t);
+    let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&assets, id, c, t, linear);
     let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
     let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
     let opts = SvgOptions {
@@ -70,8 +74,37 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         image_size: &image_size,
         measure_text: if measurer.is_some() { Some(&measure) } else { None },
         resolve_variant: &variant,
+        linear,
     };
     export(doc, ids, &opts)
+}
+
+/// Whether the page holding these nodes blends in linear light.
+pub fn linear_for(doc: &Document, ids: &[NodeId]) -> bool {
+    let Some(mut id) = ids.first().cloned() else { return false };
+    loop {
+        let Some(n) = doc.get(&id) else { return false };
+        if n.kind == flexma_doc::NodeType::Page {
+            return n.linear_blending;
+        }
+        match &n.parent {
+            Some(p) => id = p.clone(),
+            None => return false,
+        }
+    }
+}
+
+/// Encode a pixmap rendered in linear light back to sRGB.
+pub fn encode_linear(pm: &mut resvg::tiny_skia::Pixmap) {
+    for px in pm.pixels_mut() {
+        let a = px.alpha();
+        if a == 0 {
+            continue;
+        }
+        let af = a as f32 / 255.0;
+        let e = |v: u8| ((Color::linear_to_srgb((v as f32 / 255.0 / af).min(1.0)) * af * 255.0).round() as u8).min(a);
+        *px = resvg::tiny_skia::PremultipliedColorU8::from_rgba(e(px.red()), e(px.green()), e(px.blue()), a).unwrap_or(*px);
+    }
 }
 
 /// Text widths from the fonts the renderer will draw with: the node's family
@@ -150,14 +183,14 @@ impl TextMeasurer {
 /// multiplied in, as a cached PNG data URI. Server renders use these instead
 /// of viewports and filters: smoothing never reaches past a sprite, and
 /// resvg can't drop a tint on a large or sliced layer.
-fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: Option<Color>) -> Option<String> {
+fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: Option<Color>, linear: bool) -> Option<String> {
     let AssetMode::Inline(_) = assets else { return None };
     let (fw, fh) = image_size(id)?;
     let (x, y, w, h) = match crop {
         Some(c) => (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0)),
         None => (0.0, 0.0, fw, fh),
     };
-    let key = format!("{id}/{x}/{y}/{w}/{h}/{}", tint.map(|t| t.to_hex()).unwrap_or_default());
+    let key = format!("{id}/{x}/{y}/{w}/{h}/{}/{linear}", tint.map(|t| t.to_hex()).unwrap_or_default());
     static CACHE: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(hit) = cache.lock().ok()?.get(&key) {
@@ -171,8 +204,21 @@ fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: O
     let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok()?;
     let mut pm = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
     resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+    if linear {
+        // Linear light, for a page that blends that way.
+        for px in pm.pixels_mut() {
+            let a = px.alpha();
+            if a == 0 {
+                continue;
+            }
+            let af = a as f32 / 255.0;
+            let l = |v: u8| ((Color::srgb_to_linear((v as f32 / 255.0 / af).min(1.0)) * af * 255.0).round() as u8).min(a);
+            *px = resvg::tiny_skia::PremultipliedColorU8::from_rgba(l(px.red()), l(px.green()), l(px.blue()), a).unwrap_or(*px);
+        }
+    }
     if let Some(t) = tint {
         // Premultiplied: color × tint color × tint alpha, alpha × tint alpha.
+        let t = if linear { t.to_linear() } else { t };
         let (r, g, b, a) = (t.r * t.a, t.g * t.a, t.b * t.a, t.a);
         for px in pm.pixels_mut() {
             let c = |v: u8, k: f32| (v as f32 * k).round().clamp(0.0, 255.0) as u8;
@@ -259,7 +305,7 @@ pub fn base_fontdb() -> Arc<FontDb> {
 }
 
 /// Rasterize SVG to PNG at `scale`, clamped so the longest side is ≤ `max_dim`.
-pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32), String> {
+pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool) -> Result<(Vec<u8>, u32, u32), String> {
     let mut opt = resvg::usvg::Options::default();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
@@ -274,6 +320,9 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Re
     let h = ((size.height() * s).ceil() as u32).max(1);
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or("image too large")?;
     resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut pixmap.as_mut());
+    if linear {
+        encode_linear(&mut pixmap);
+    }
     let png = pixmap.encode_png().map_err(|e| e.to_string())?;
     Ok((png, w, h))
 }
@@ -281,13 +330,13 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Re
 /// One image of several renders in a labelled grid (a contact sheet), so an
 /// agent can compare screens at a glance. `tiles` are (label, svg). Returns
 /// the PNG, its size and each tile's rect in it.
-pub fn contact_sheet(tiles: &[(String, String)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
+pub fn contact_sheet(tiles: &[(String, String, bool)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
     const PAD: f32 = 16.0;
     const LABEL: f32 = 22.0;
     let mut opt = resvg::usvg::Options::default();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
-    let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+    let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg, _)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
     if trees.is_empty() {
         return Err("nothing to render".into());
     }
@@ -298,7 +347,7 @@ pub fn contact_sheet(tiles: &[(String, String)], scale: f32, max_dim: u32, fonts
         let sizes: Vec<(f32, f32)> = trees
             .iter()
             .zip(tiles)
-            .map(|(t, (label, _))| ((t.size().width() * s).max(label.chars().take(80).count() as f32 * 7.2 + 8.0), t.size().height() * s))
+            .map(|(t, (label, _, _))| ((t.size().width() * s).max(label.chars().take(80).count() as f32 * 7.2 + 8.0), t.size().height() * s))
             .collect();
         let area: f32 = sizes.iter().map(|(w, h)| (w + PAD) * (h + LABEL + PAD)).sum();
         let widest = sizes.iter().map(|z| z.0).fold(0.0, f32::max);
@@ -333,11 +382,14 @@ pub fn contact_sheet(tiles: &[(String, String)], scale: f32, max_dim: u32, fonts
     pm.fill(resvg::tiny_skia::Color::from_rgba8(232, 233, 237, 255));
     let mut rects = Vec::new();
     let mut labels = String::new();
-    for ((tree, (label, _)), (x, y)) in trees.iter().zip(tiles).zip(pos) {
+    for ((tree, (label, _, linear)), (x, y)) in trees.iter().zip(tiles).zip(pos) {
         let tw = ((tree.size().width() * s).ceil() as u32).max(1);
         let th = ((tree.size().height() * s).ceil() as u32).max(1);
         let mut tile = resvg::tiny_skia::Pixmap::new(tw, th).ok_or("image too large")?;
         resvg::render(tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut tile.as_mut());
+        if *linear {
+            encode_linear(&mut tile);
+        }
         let ty = (y + LABEL).round() as i32;
         pm.draw_pixmap(x.round() as i32, ty, tile.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), resvg::tiny_skia::Transform::identity(), None);
         rects.push([x.round() as u32, ty as u32, tw, th]);
@@ -863,5 +915,37 @@ mod seam_tests {
         resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
         let p = pm.pixel(100, 10).unwrap();
         assert_eq!((p.red(), p.green(), p.blue()), (20, 30, 40), "the middle is the stretched seam, not the white frame");
+    }
+}
+
+#[cfg(test)]
+mod linear_blend_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType, Op, Paint};
+
+    /// Unity projects in Linear color space blend in linear light: a black
+    /// panel at 85% over white is 107 there, 38 in sRGB (measured in the game).
+    #[test]
+    fn pages_with_linear_blending_match_unity() {
+        for (linear, want) in [(true, 107u8), (false, 38u8)] {
+            let mut doc = Document::new_empty();
+            doc.apply(&Op::update1("0:1", "linearBlending", serde_json::json!(linear))).unwrap();
+            let mut f = Node::new("f:1", NodeType::Frame);
+            f.parent = Some("0:1".into());
+            (f.width, f.height) = (20.0, 20.0);
+            doc.apply(&Op::Create { node: f }).unwrap();
+            let mut r = Node::new("r:1", NodeType::Rectangle);
+            r.parent = Some("f:1".into());
+            (r.width, r.height) = (20.0, 20.0);
+            r.fills = vec![Paint::solid(flexma_doc::Color::parse("#000000d9").unwrap())];
+            doc.apply(&Op::Create { node: r }).unwrap();
+            assert_eq!(linear_for(&doc, &["f:1".to_string()]), linear);
+            let dir = std::env::temp_dir();
+            let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir), None).unwrap();
+            let (png, _, _) = svg_to_png(&svg, 1.0, 100, base_fontdb(), linear).unwrap();
+            let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            let v = pm.pixel(10, 10).unwrap().red();
+            assert!(v.abs_diff(want) <= 2, "linear={linear}: got {v}, Unity/sRGB math says {want}");
+        }
     }
 }

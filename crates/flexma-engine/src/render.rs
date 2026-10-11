@@ -133,6 +133,24 @@ pub struct Renderer {
     pub wants_more: bool,
     /// Draw calls issued by the last frame (diagnostics).
     pub draw_calls: u32,
+    composite_prog: WebGlProgram,
+    composite_u: Uniforms,
+    /// Offscreen sRGB target for pages with linear blending.
+    linear_target: Option<LinearTarget>,
+    /// Shaders currently write linear light (into `linear_target`).
+    linear_out: bool,
+}
+
+/// A multisampled sRGB color + depth/stencil target and the texture it
+/// resolves into. Blending into an sRGB attachment happens in linear light.
+struct LinearTarget {
+    w: i32,
+    h: i32,
+    msaa_fbo: web_sys::WebGlFramebuffer,
+    msaa_color: web_sys::WebGlRenderbuffer,
+    msaa_depth: web_sys::WebGlRenderbuffer,
+    resolve_fbo: web_sys::WebGlFramebuffer,
+    resolve_tex: WebGlTexture,
 }
 
 fn premul(c: Color, alpha: f32) -> [f32; 4] {
@@ -353,9 +371,11 @@ impl Renderer {
         let shape_prog = gl::program(&gl, gl::SHAPE_VS, gl::SHAPE_FS)?;
         let mesh_prog = gl::program(&gl, gl::MESH_VS, gl::MESH_FS)?;
         let tex_prog = gl::program(&gl, gl::TEX_VS, gl::TEX_FS)?;
-        let shape_u = Uniforms::new(&gl, &shape_prog, &["u_view", "u_px", "u_tex"]);
-        let mesh_u = Uniforms::new(&gl, &mesh_prog, &["u_view", "u_m0", "u_m1", "u_color"]);
-        let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha"]);
+        let shape_u = Uniforms::new(&gl, &shape_prog, &["u_view", "u_px", "u_tex", "u_linear"]);
+        let mesh_u = Uniforms::new(&gl, &mesh_prog, &["u_view", "u_m0", "u_m1", "u_color", "u_linear"]);
+        let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha", "u_linear"]);
+        let composite_prog = gl::program(&gl, gl::COMPOSITE_VS, gl::COMPOSITE_FS)?;
+        let composite_u = Uniforms::new(&gl, &composite_prog, &["u_tex"]);
         let shape_vao = gl.create_vertex_array().ok_or("vao")?;
         let mesh_vao = gl.create_vertex_array().ok_or("vao")?;
         let empty_vao = gl.create_vertex_array().ok_or("vao")?;
@@ -394,6 +414,10 @@ impl Renderer {
         gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA);
         gl.pixel_storei(GL::UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
         Ok(Renderer {
+            composite_prog,
+            composite_u,
+            linear_target: None,
+            linear_out: false,
             gl,
             shape_prog,
             shape_u,
@@ -1102,6 +1126,7 @@ impl Renderer {
         css_h: f64,
         dpr: f64,
         background: Color,
+        linear: bool,
         overlay: &[f32],
         labels: &[Label],
         interacting: bool,
@@ -1113,8 +1138,16 @@ impl Renderer {
         let gl = self.gl.clone();
         let pw = (css_w * dpr).round() as i32;
         let ph = (css_h * dpr).round() as i32;
+        // Linear blending: draw the scene into an sRGB target (blends happen in
+        // linear light), then encode it onto the canvas before the overlays.
+        self.linear_out = linear && pw > 0 && ph > 0 && self.bind_linear_target(pw, ph);
+        if !self.linear_out {
+            gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        }
         gl.viewport(0, 0, pw, ph);
-        gl.clear_color(background.r, background.g, background.b, 1.0);
+        // An sRGB target takes the clear color in linear light.
+        let bg = if self.linear_out { background.to_linear() } else { background };
+        gl.clear_color(bg.r, bg.g, bg.b, 1.0);
         gl.clear_stencil(0);
         gl.clear(GL::COLOR_BUFFER_BIT | GL::STENCIL_BUFFER_BIT);
         let view = view_matrix(cam, css_w, css_h);
@@ -1223,6 +1256,7 @@ impl Renderer {
                         gl.use_program(Some(&self.mesh_prog));
                         gl.bind_vertex_array(Some(&self.mesh_vao));
                         gl.uniform_matrix3fv_with_f32_array(self.mesh_u.get(0), false, &view);
+                        gl.uniform1f(self.mesh_u.get(4), if self.linear_out { 1.0 } else { 0.0 });
                         current = 2;
                     }
                     gl.uniform3f(self.mesh_u.get(1), world.a as f32, world.c as f32, world.e as f32);
@@ -1258,6 +1292,7 @@ impl Renderer {
                         gl.use_program(Some(&self.tex_prog));
                         gl.bind_vertex_array(Some(&self.empty_vao));
                         gl.uniform_matrix3fv_with_f32_array(self.tex_u.get(0), false, &view);
+                        gl.uniform1f(self.tex_u.get(6), if self.linear_out { 1.0 } else { 0.0 });
                         current = 3;
                     }
                     gl.uniform3f(self.tex_u.get(1), world.a as f32, world.c as f32, world.e as f32);
@@ -1275,6 +1310,10 @@ impl Renderer {
         self.cmds = cmds;
         self.evict_text();
         gl.disable(GL::STENCIL_TEST);
+        if self.linear_out {
+            self.composite_linear_target();
+            self.linear_out = false;
+        }
 
         // Overlay (world space instances).
         if !overlay.is_empty() {
@@ -1295,6 +1334,7 @@ impl Renderer {
             gl.uniform3f(self.tex_u.get(1), 1.0, 0.0, 0.0);
             gl.uniform3f(self.tex_u.get(2), 0.0, 1.0, 0.0);
             gl.uniform1f(self.tex_u.get(5), 1.0);
+            gl.uniform1f(self.tex_u.get(6), 0.0);
             for l in labels {
                 let key = format!("{}|{}|{}|{}|{:?}|{}", l.text, l.size, l.weight, l.fg, l.bg, dpr);
                 if !self.labels.contains_key(&key) {
@@ -1347,7 +1387,78 @@ impl Renderer {
         gl.uniform_matrix3fv_with_f32_array(self.shape_u.get(0), false, view);
         gl.uniform1f(self.shape_u.get(1), px);
         gl.uniform1i(self.shape_u.get(2), 0);
+        gl.uniform1f(self.shape_u.get(3), if self.linear_out { 1.0 } else { 0.0 });
         gl.active_texture(GL::TEXTURE0);
+    }
+
+    /// Bind (creating or resizing) the linear-blending target.
+    fn bind_linear_target(&mut self, w: i32, h: i32) -> bool {
+        let gl = self.gl.clone();
+        if self.linear_target.as_ref().is_some_and(|t| t.w != w || t.h != h) {
+            if let Some(t) = self.linear_target.take() {
+                gl.delete_framebuffer(Some(&t.msaa_fbo));
+                gl.delete_renderbuffer(Some(&t.msaa_color));
+                gl.delete_renderbuffer(Some(&t.msaa_depth));
+                gl.delete_framebuffer(Some(&t.resolve_fbo));
+                gl.delete_texture(Some(&t.resolve_tex));
+            }
+        }
+        if self.linear_target.is_none() {
+            let samples = gl.get_parameter(GL::MAX_SAMPLES).ok().and_then(|v| v.as_f64()).unwrap_or(0.0).min(4.0) as i32;
+            let (Some(msaa_fbo), Some(msaa_color), Some(msaa_depth), Some(resolve_fbo), Some(resolve_tex)) =
+                (gl.create_framebuffer(), gl.create_renderbuffer(), gl.create_renderbuffer(), gl.create_framebuffer(), gl.create_texture())
+            else {
+                return false;
+            };
+            gl.bind_renderbuffer(GL::RENDERBUFFER, Some(&msaa_color));
+            gl.renderbuffer_storage_multisample(GL::RENDERBUFFER, samples, GL::SRGB8_ALPHA8, w, h);
+            gl.bind_renderbuffer(GL::RENDERBUFFER, Some(&msaa_depth));
+            gl.renderbuffer_storage_multisample(GL::RENDERBUFFER, samples, GL::DEPTH24_STENCIL8, w, h);
+            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&msaa_fbo));
+            gl.framebuffer_renderbuffer(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::RENDERBUFFER, Some(&msaa_color));
+            gl.framebuffer_renderbuffer(GL::FRAMEBUFFER, GL::DEPTH_STENCIL_ATTACHMENT, GL::RENDERBUFFER, Some(&msaa_depth));
+            let ok_msaa = gl.check_framebuffer_status(GL::FRAMEBUFFER) == GL::FRAMEBUFFER_COMPLETE;
+            gl.bind_texture(GL::TEXTURE_2D, Some(&resolve_tex));
+            gl.tex_storage_2d(GL::TEXTURE_2D, 1, GL::SRGB8_ALPHA8, w, h);
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::NEAREST as i32);
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MAG_FILTER, GL::NEAREST as i32);
+            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&resolve_fbo));
+            gl.framebuffer_texture_2d(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::TEXTURE_2D, Some(&resolve_tex), 0);
+            let ok_resolve = gl.check_framebuffer_status(GL::FRAMEBUFFER) == GL::FRAMEBUFFER_COMPLETE;
+            gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+            let t = LinearTarget { w, h, msaa_fbo, msaa_color, msaa_depth, resolve_fbo, resolve_tex };
+            if !(ok_msaa && ok_resolve) {
+                gl.delete_framebuffer(Some(&t.msaa_fbo));
+                gl.delete_renderbuffer(Some(&t.msaa_color));
+                gl.delete_renderbuffer(Some(&t.msaa_depth));
+                gl.delete_framebuffer(Some(&t.resolve_fbo));
+                gl.delete_texture(Some(&t.resolve_tex));
+                return false;
+            }
+            self.linear_target = Some(t);
+        }
+        let t = self.linear_target.as_ref().unwrap();
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&t.msaa_fbo));
+        true
+    }
+
+    /// Resolve the linear target and encode it onto the canvas.
+    fn composite_linear_target(&mut self) {
+        let gl = self.gl.clone();
+        let Some(t) = self.linear_target.as_ref() else { return };
+        gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&t.msaa_fbo));
+        gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&t.resolve_fbo));
+        gl.blit_framebuffer(0, 0, t.w, t.h, 0, 0, t.w, t.h, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        gl.disable(GL::BLEND);
+        gl.use_program(Some(&self.composite_prog));
+        gl.bind_vertex_array(Some(&self.empty_vao));
+        gl.active_texture(GL::TEXTURE0);
+        gl.bind_texture(GL::TEXTURE_2D, Some(&t.resolve_tex));
+        gl.uniform1i(self.composite_u.get(0), 0);
+        gl.draw_arrays(GL::TRIANGLES, 0, 3);
+        gl.enable(GL::BLEND);
+        self.draw_calls += 1;
     }
 
     pub fn image_cache_len(&self) -> usize {

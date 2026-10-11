@@ -202,6 +202,14 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
 - `crop`: use only a region of the image, in image pixels from the top-left: `[x, y, width, height]` or `{x, y, width, height}`. Upload a sprite atlas once and point each sprite at its region. Fit, slice and filled then treat the region as the whole image, and an image node without a size takes the region's size. Note that Unity sprite rects count y from the bottom: y = atlasHeight − rect.y − rect.height.
 - All of these also work on any `IMAGE` paint, e.g. a frame's background.
 
+## Pages: linear blending
+
+A page with `linearBlending: true` blends semi-transparent layers in linear light, like a Unity project in Linear color space. Overlays come out lighter, and light-on-dark text and thin outlines come out bolder. For example, black at 85% over white is 107 instead of 38. Set it with `create_page {linearBlending: true}` or `update_nodes` on the page id, for pages exported from a Linear-space Unity project. People can toggle it in the Page panel.
+
+- The editor matches Unity closely.
+- Screenshots and PNG exports render through an 8-bit linear pass, so very dark colors can be off by a couple of levels.
+- SVG exports opened in a browser still blend in sRGB.
+
 ## Re-uploads (`key`)
 
 Give every node of an export a `key` that stays the same between exports, such as a Unity object path or id. When a top-level spec's `key` matches a node already in the file, `create_nodes` and `upload_nodes` update that node instead of adding a copy:

@@ -13,6 +13,21 @@ pub struct Color {
 }
 
 impl Color {
+    /// sRGB-encoded channel to linear light.
+    pub fn srgb_to_linear(c: f32) -> f32 {
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    }
+
+    /// Linear-light channel to sRGB encoding.
+    pub fn linear_to_srgb(c: f32) -> f32 {
+        if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.max(0.0).powf(1.0 / 2.4) - 0.055 }
+    }
+
+    /// The same color with its channels in linear light (alpha unchanged).
+    pub fn to_linear(self) -> Color {
+        Color { r: Self::srgb_to_linear(self.r), g: Self::srgb_to_linear(self.g), b: Self::srgb_to_linear(self.b), a: self.a }
+    }
+
     pub const BLACK: Color = Color::rgba(0.0, 0.0, 0.0, 1.0);
     pub const WHITE: Color = Color::rgba(1.0, 1.0, 1.0, 1.0);
     pub const TRANSPARENT: Color = Color::rgba(0.0, 0.0, 0.0, 0.0);

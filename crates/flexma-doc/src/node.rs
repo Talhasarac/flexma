@@ -287,6 +287,10 @@ define_node! {
     text_style_id: Option<NodeId> = None => "textStyleId",
     /// Canvas background color (PAGE nodes).
     background: Option<Color> = None => "background",
+    /// PAGE: blend semi-transparent content in linear light, like a Unity
+    /// project in Linear color space (overlays come out lighter, light-on-dark
+    /// edges bolder). Off: sRGB blending, like browsers and Figma.
+    linear_blending: bool = false => "linearBlending",
 }
 
 static DEFAULT_NODE: OnceLock<Node> = OnceLock::new();
