@@ -316,6 +316,9 @@ impl Writer<'_> {
                 let mut full = (self.opts.image_size)(asset);
                 let mut region = full.and_then(|(fw, fh)| crop.and_then(|c| c.within(fw, fh)));
                 let mut tint = tint.filter(|t| *t != Color::WHITE);
+                // Where the image's region starts in the asset, and the tint, for
+                // cutting 9-slice patches out of the asset itself.
+                let (crop_origin, patch_tint) = (region.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)), tint);
                 // Better: the region cut out and the tint multiplied in, as an
                 // image of its own.
                 if region.is_some() || tint.is_some() || self.opts.linear {
@@ -353,8 +356,17 @@ impl Writer<'_> {
                     _ => String::new(),
                 };
                 let sliced = slice.and_then(|s| size.zip(full).map(|(size, full)| (s, size, full)));
+                // Hosts that make image variants get each 9-slice patch cut out as
+                // a plain image: resvg drops whole groups of strongly stretched
+                // viewports (a 1 px seam across a bar) under nested clips.
+                let opts = self.opts;
+                let baked_tint = if tint.is_none() { patch_tint } else { None };
+                let cut = |x: f64, y: f64, w: f64, h: f64| {
+                    let c = ImageCrop { x: crop_origin.0 + x, y: crop_origin.1 + y, width: w, height: h };
+                    (opts.resolve_variant)(asset, Some(&c), baked_tint)
+                };
                 let content = match sliced {
-                    Some((s, (iw, ih), full)) => self.nine_slice(&href, &s, origin, full, iw, ih, w, h),
+                    Some((s, (iw, ih), full)) => self.nine_slice(&href, &s, origin, full, iw, ih, w, h, &cut),
                     None => match (fit, slice, size) {
                         // Tiles from the bottom-left corner, like Unity.
                         (ImageFit::Tile, None, Some((iw, ih))) if iw > 0.0 && ih > 0.0 => {
@@ -432,11 +444,22 @@ impl Writer<'_> {
     /// A 9-slice image as nine cells, each a viewport onto one part of the image.
     /// Slices an `iw`×`ih` image, or region of one at `origin` in a `full`-sized image.
     #[allow(clippy::too_many_arguments)]
-    fn nine_slice(&mut self, href: &str, s: &NineSlice, origin: (f64, f64), full: (f64, f64), iw: f64, ih: f64, w: f64, h: f64) -> String {
+    fn nine_slice(
+        &mut self,
+        href: &str,
+        s: &NineSlice,
+        origin: (f64, f64),
+        full: (f64, f64),
+        iw: f64,
+        ih: f64,
+        w: f64,
+        h: f64,
+        cut: &dyn Fn(f64, f64, f64, f64) -> Option<String>,
+    ) -> String {
         let src = s.source_insets(iw, ih);
         let dst = s.dest_insets(src, w, h);
-        let img = self.id("i");
-        let _ = write!(self.defs, r#"<image id="{img}" href="{href}" width="{}" height="{}"/>"#, fmt_num(full.0), fmt_num(full.1));
+        // The whole image as a def, written once a patch needs it.
+        let mut img: Option<String> = None;
         let sx = [0.0, src[3], iw - src[1], iw];
         let sy = [0.0, src[0], ih - src[2], ih];
         let dx = [0.0, dst[3], w - dst[1], w];
@@ -467,6 +490,27 @@ impl Writer<'_> {
                     }
                     (y0, sh) = ((y0 - 0.5).clamp(0.0, ih - 1.0), 1.0);
                 }
+                if let Some(patch) = cut(x0, y0, sw, sh) {
+                    let _ = write!(
+                        out,
+                        r#"<image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none" href="{}"/>"#,
+                        fmt_num(dx[col]),
+                        fmt_num(dy[row]),
+                        fmt_num(dw),
+                        fmt_num(dh),
+                        escape(&patch)
+                    );
+                    continue;
+                }
+                let img = match &img {
+                    Some(id) => id.clone(),
+                    None => {
+                        let id = self.id("i");
+                        let _ = write!(self.defs, r#"<image id="{id}" href="{href}" width="{}" height="{}"/>"#, fmt_num(full.0), fmt_num(full.1));
+                        img = Some(id.clone());
+                        id
+                    }
+                };
                 let _ = write!(
                     out,
                     r##"<svg x="{}" y="{}" width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none"><use href="#{img}"/></svg>"##,

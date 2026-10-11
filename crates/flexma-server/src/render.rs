@@ -949,3 +949,67 @@ mod linear_blend_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod nested_clip_tests {
+    use super::*;
+    use flexma_doc::{ImageFit, NineSlice, Node, NodeType, Op, Paint};
+
+    /// Canvas_map / MaxMap: a clipped screen holding a clipped frame with a
+    /// 2048 px map, a sliced bar whose middle is the stretched seam, then more
+    /// layers. Rendering the outer frame lost every layer after the bar.
+    #[test]
+    fn layers_after_a_stretched_seam_still_draw_in_nested_clips() {
+        let png = |w: u32, h: u32, c: (u8, u8, u8)| {
+            let mut p = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+            p.fill(resvg::tiny_skia::Color::from_rgba8(c.0, c.1, c.2, 255));
+            use base64::Engine;
+            format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(p.encode_png().unwrap()))
+        };
+        let (map, bar) = (png(64, 64, (0, 120, 0)), png(128, 128, (200, 0, 0)));
+        let mut doc = Document::new_empty();
+        let frame = |id: &str, parent: &str, x: f64, y: f64, w: f64, h: f64, clip: bool| {
+            let mut f = Node::new(id, NodeType::Frame);
+            f.parent = Some(parent.into());
+            (f.x, f.y, f.width, f.height, f.clips_content) = (x, y, w, h, clip);
+            f
+        };
+        doc.apply(&Op::Create { node: frame("outer", "0:1", 0.0, 0.0, 1920.0, 1080.0, true) }).unwrap();
+        doc.apply(&Op::Create { node: frame("inner", "outer", 0.0, 0.0, 1920.0, 1080.0, true) }).unwrap();
+        let mut big = frame("map", "inner", -64.0, -484.0, 2048.0, 2048.0, false);
+        big.fills = vec![Paint::Image { asset: "map".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: big }).unwrap();
+        let mut bottom = frame("bar", "inner", 48.0, 992.0, 1824.0, 88.0, false);
+        bottom.index = "b".into();
+        let slice = NineSlice { top: 64.0, right: 64.0, bottom: 8.0, left: 64.0, scale: 1.0, fill_center: true };
+        bottom.fills = vec![Paint::Image { asset: "bar".into(), fit: ImageFit::Stretch, tint: None, slice: Some(slice), filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: bottom }).unwrap();
+        let mut panel = Node::new("panel", NodeType::Rectangle);
+        panel.parent = Some("inner".into());
+        panel.index = "c".into();
+        (panel.x, panel.y, panel.width, panel.height) = (1556.0, 110.0, 328.0, 772.0);
+        panel.fills = vec![Paint::solid(flexma_doc::Color::parse("#ffffff").unwrap())];
+        doc.apply(&Op::Create { node: panel }).unwrap();
+        let resolve = |id: &str| Some(if id == "map" { map.clone() } else { bar.clone() });
+        let size = |id: &str| Some(if id == "map" { (64.0, 64.0) } else { (128.0, 128.0) });
+        // Like the server's image_variant: a region cut out (here, solid colors).
+        let variant = |id: &str, c: Option<&flexma_doc::ImageCrop>, _: Option<flexma_doc::Color>| {
+            let c = c?;
+            Some(png(c.width.max(1.0) as u32, c.height.max(1.0) as u32, if id == "map" { (0, 120, 0) } else { (200, 0, 0) }))
+        };
+        let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, resolve_variant: &variant, ..SvgOptions::default() };
+        for root in ["outer", "inner"] {
+            let (svg, _) = export(&doc, &[root.to_string()], &opts).unwrap();
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let mut pm = resvg::tiny_skia::Pixmap::new(480, 270).unwrap();
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(0.25, 0.25), &mut pm.as_mut());
+            let at = |x: f32, y: f32| {
+                let p = pm.pixel((x * 0.25) as u32, (y * 0.25) as u32).unwrap();
+                (p.red(), p.green(), p.blue())
+            };
+            assert_eq!(at(1700.0, 500.0), (255, 255, 255), "{root}: the panel after the bar draws");
+            assert_eq!(at(80.0, 1010.0), (200, 0, 0), "{root}: the bar's caps draw");
+            assert_eq!(at(960.0, 1010.0), (200, 0, 0), "{root}: the bar's stretched middle draws");
+        }
+    }
+}
