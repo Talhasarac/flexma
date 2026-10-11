@@ -50,7 +50,7 @@ docker compose up -d --build
 The first build takes a while (Rust plus the web app). When it finishes:
 
 - Caddy gets a Let's Encrypt certificate automatically, and HTTP redirects to HTTPS.
-- Get the setup link from the log: `docker compose logs flexma | grep setup`. It looks like `https://design.yourdomain.com/setup?token=…`. Open it to create the admin account and your first workspace. The token stops strangers from claiming a fresh instance; it's only needed until the first account exists, and a new one is printed on every restart until then. To choose it yourself, set `FLEXMA_SETUP_TOKEN`.
+- Open the setup link to create the admin account and your first workspace. It's in the log (`docker compose logs flexma | grep setup`) and looks like `https://design.yourdomain.com/setup?token=…`. The token is also saved in the data directory: `docker compose exec flexma cat /data/setup-token`. It stops strangers from claiming a fresh instance, survives restarts, and is deleted once the first account exists. To choose it yourself, set `FLEXMA_SETUP_TOKEN`.
 - Invite teammates from **Workspace settings → Invite people**. The invite link is the only way in unless you set `FLEXMA_ALLOW_SIGNUP=true`.
 
 ## 6. Connect Claude Code and Codex (remote MCP)
@@ -147,5 +147,5 @@ cargo zigbuild --release -p flexma-server --target x86_64-unknown-linux-gnu.2.31
 ```
 
 Then copy `target/x86_64-unknown-linux-gnu/release/flexma` to `/opt/flexma/flexma` and `web/dist/` to `/opt/flexma/web/`, and run
-`systemctl enable --now flexma`. The setup link is in `journalctl -u flexma | grep setup`.
+`systemctl enable --now flexma`. The setup token is in `/var/lib/flexma/setup-token`, so open `https://<your url>/setup?token=<that token>`.
 

@@ -42,6 +42,19 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
+/// File in the data directory holding the first-run setup token.
+pub const SETUP_TOKEN_FILE: &str = "setup-token";
+
+/// Write a file only the server's user can read.
+fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(path)?.write_all(format!("{contents}\n").as_bytes())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -49,6 +62,8 @@ async fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "flexma=info,tower_http=warn".into()),
         )
+        // No color codes when logging to journald or a file.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let cfg = config::Config::from_env();
@@ -72,9 +87,17 @@ async fn main() {
         .await
         .expect("cannot read users");
     if users == 0 {
-        let token = cfg.setup_token.clone().unwrap_or_else(|| db::random_string(24));
+        // Logs can rotate away quickly on small servers, so the token is also
+        // kept in a file in the data directory (stable across restarts, and
+        // deleted once the first account exists).
+        let path = cfg.data_dir.join(SETUP_TOKEN_FILE);
+        let saved = std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| s.len() >= 16);
+        let token = cfg.setup_token.clone().or(saved).unwrap_or_else(|| db::random_string(24));
+        if let Err(e) = write_private(&path, &token) {
+            tracing::warn!("could not save the setup token to {}: {e}", path.display());
+        }
         let base = cfg.public_url.clone().unwrap_or_else(|| format!("http://{}", cfg.addr.replace("0.0.0.0", "localhost")));
-        tracing::warn!("no accounts yet; create the admin account at {base}/setup?token={token}");
+        tracing::warn!("no accounts yet; create the admin account at {base}/setup?token={token} (token also saved in {})", path.display());
         cfg.setup_token = Some(token);
     }
 

@@ -130,6 +130,10 @@ pub async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> A
             Ok(AuthUser { id, email, name, is_admin: first, color, via_token: false, token_name: None })
         })
         .await?;
+    if user.is_admin {
+        // The first account exists; the setup token has done its job.
+        let _ = std::fs::remove_file(st.cfg.data_dir.join(crate::SETUP_TOKEN_FILE));
+    }
     let token = auth::create_session(&st.db, &user.id).await?;
     Ok((
         AppendHeaders([(header::SET_COOKIE, auth::session_cookie(&token, st.cfg.secure_cookies))]),

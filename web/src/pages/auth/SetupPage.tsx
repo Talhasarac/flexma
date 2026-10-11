@@ -67,7 +67,7 @@ export default function SetupPage() {
         {!linkToken && (
           <Field
             label="Setup token"
-            hint="Only the person running the server can set it up. Open the setup link from the server log (journalctl -u flexma, or docker compose logs flexma), or paste its token here."
+            hint="Only the person running the server can set it up. The token is in the setup-token file in the data directory (e.g. /var/lib/flexma/setup-token) and in the setup link in the server log."
           >
             <input
               className="input input-lg"
