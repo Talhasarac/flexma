@@ -61,6 +61,26 @@ pub struct AgentInfo {
     pub color: String,
 }
 
+/// One step to reverse an agent's change. Undo only reverts what nobody has
+/// touched since, so people's later edits win.
+enum UndoStep {
+    /// Set `key` back to `old` if it still has the value the agent left.
+    Prop { id: NodeId, key: String, old: Value, new: Value },
+    /// Remove a node the agent created (if it still exists).
+    Remove { id: NodeId },
+    /// Re-create nodes the agent deleted, parents first.
+    Restore { nodes: Vec<flexma_doc::Node> },
+}
+
+/// One agent tool call's worth of changes.
+struct UndoBatch {
+    summary: String,
+    steps: Vec<UndoStep>,
+}
+
+/// Agent changes kept for undo, per agent per file (memory only).
+const UNDO_KEEP: usize = 30;
+
 /// A transaction handed to agent mutations: apply ops against the live doc.
 pub struct Tx<'a> {
     pub doc: &'a mut Document,
@@ -68,10 +88,50 @@ pub struct Tx<'a> {
     changed: Vec<NodeId>,
     removed: Vec<NodeId>,
     touched: Vec<NodeId>,
+    undo: Vec<UndoStep>,
 }
 
-impl Tx<'_> {
+impl<'a> Tx<'a> {
+    fn new(doc: &'a mut Document) -> Self {
+        Tx { doc, applied: vec![], changed: vec![], removed: vec![], touched: vec![], undo: vec![] }
+    }
+
+    /// Remember how to reverse `op` (call before applying it).
+    fn record_undo(&mut self, op: &Op) {
+        match op {
+            Op::Create { node } => self.undo.push(UndoStep::Remove { id: node.id.clone() }),
+            Op::Delete { id } => {
+                let mut nodes = Vec::new();
+                self.doc.walk(id, &mut |n| nodes.push(n.clone()));
+                if !nodes.is_empty() {
+                    self.undo.push(UndoStep::Restore { nodes });
+                }
+            }
+            Op::Update { id, props } => {
+                let Some(node) = self.doc.get(id) else { return };
+                for key in props.keys() {
+                    // Several edits to one prop in a batch undo to the first value.
+                    let seen = self.undo.iter().any(|s| matches!(s, UndoStep::Prop { id: i, key: k, .. } if i == id && k == key));
+                    if !seen {
+                        let old = node.get_prop(key).unwrap_or(Value::Null);
+                        self.undo.push(UndoStep::Prop { id: id.clone(), key: key.clone(), old, new: Value::Null });
+                    }
+                }
+            }
+        }
+    }
+
+    /// After layout: note the values the agent's changes ended up with.
+    fn settle_undo(&mut self) {
+        for step in &mut self.undo {
+            if let UndoStep::Prop { id, key, new, .. } = step {
+                *new = self.doc.get(id).and_then(|n| n.get_prop(key)).unwrap_or(Value::Null);
+            }
+        }
+    }
+
     fn apply_routed(&mut self, op: Op) -> Result<(), String> {
+        self.record_undo(&op);
         let eff = self.doc.apply(&op)?;
         match &op {
             Op::Delete { .. } => {}
@@ -122,6 +182,7 @@ enum Cmd {
     ClientOps { client_id: String, batch: u64, ops: Vec<Op> },
     Presence { client_id: String, cursor: Option<[f64; 2]>, selection: Vec<String>, page: Option<String> },
     Mutate { agent: AgentInfo, f: MutateFn, reply: oneshot::Sender<Result<Value, String>> },
+    UndoAgent { agent: AgentInfo, steps: usize, reply: oneshot::Sender<Result<Value, String>> },
     Read { f: ReadFn },
     Flush { reply: oneshot::Sender<()> },
     /// Send a message to every connected client (e.g. "comments changed").
@@ -202,6 +263,13 @@ impl RoomHandle {
     }
 
     /// Run an agent mutation transactionally on the actor; ops are broadcast live.
+    /// Undo the agent's last `steps` changes in this file.
+    pub async fn undo_agent(&self, agent: AgentInfo, steps: usize) -> AppResult<Result<Value, String>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Cmd::UndoAgent { agent, steps, reply }).await.map_err(|_| closed())?;
+        rx.await.map_err(|_| closed())
+    }
+
     pub async fn mutate<F>(&self, agent: AgentInfo, f: F) -> AppResult<Result<Value, String>>
     where
         F: FnOnce(&mut Tx) -> Result<Value, String> + Send + 'static,
@@ -357,6 +425,7 @@ impl Rooms {
             dirty: false,
             clients: HashMap::new(),
             agents: HashMap::new(),
+            agent_undo: HashMap::new(),
             db: self.db.clone(),
             stats: stats.clone(),
         };
@@ -381,6 +450,8 @@ struct Room {
     dirty: bool,
     clients: HashMap<String, Client>,
     agents: HashMap<String, (Peer, Instant)>,
+    /// Recent agent changes, newest last, by agent key.
+    agent_undo: HashMap<String, std::collections::VecDeque<UndoBatch>>,
     db: Db,
     stats: Arc<Stats>,
 }
@@ -498,40 +569,27 @@ impl Room {
                 self.broadcast(m, Some(&client_id));
             }
             Cmd::Mutate { agent, f, reply } => {
-                let mut tx = Tx { doc: &mut self.doc, applied: vec![], changed: vec![], removed: vec![], touched: vec![] };
+                let mut tx = Tx::new(&mut self.doc);
                 let result = f(&mut tx);
                 tx.relayout();
-                let Tx { applied, touched, .. } = tx;
+                tx.settle_undo();
+                let Tx { applied, touched, undo, .. } = tx;
                 if !applied.is_empty() {
-                    self.version += 1;
-                    self.dirty = true;
-                    let from = format!("agent-{}", agent.key);
-                    self.broadcast(msg(json!({ "t": "ops", "from": from, "batch": 0, "ops": applied })), None);
-                    let mut sel: Vec<String> = touched.into_iter().filter(|id| self.doc.contains(id)).collect();
-                    sel.dedup();
-                    // Highlight only the outermost touched nodes.
-                    let set: std::collections::HashSet<String> = sel.iter().cloned().collect();
-                    sel.retain(|id| !self.doc.ancestors(id).iter().any(|a| set.contains(a)));
-                    sel.truncate(200);
-                    let page = sel.first().and_then(|id| self.doc.page_of(id));
-                    let cursor = sel.first().map(|id| {
-                        let b = self.doc.world_bounds(id);
-                        [b.right(), b.bottom()]
-                    });
-                    let peer = Peer {
-                        client_id: from,
-                        user_id: agent.user_id,
-                        name: agent.name,
-                        color: agent.color,
-                        cursor,
-                        selection: sel,
-                        page,
-                        is_agent: true,
-                        is_guest: false,
+                    let summary = match &result {
+                        Ok(v) => v.as_str().unwrap_or("change").lines().next().unwrap_or("change").trim().trim_end_matches(':').to_string(),
+                        Err(_) => "partial change".to_string(),
                     };
-                    self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
-                    self.agents.insert(agent.key, (peer, Instant::now()));
+                    let history = self.agent_undo.entry(agent.key.clone()).or_default();
+                    history.push_back(UndoBatch { summary, steps: undo });
+                    while history.len() > UNDO_KEEP {
+                        history.pop_front();
+                    }
+                    self.agent_changed(agent, applied, touched);
                 }
+                let _ = reply.send(result);
+            }
+            Cmd::UndoAgent { agent, steps, reply } => {
+                let result = self.undo_agent(agent, steps);
                 let _ = reply.send(result);
             }
             Cmd::Read { f } => {
@@ -619,6 +677,95 @@ impl Room {
                 let _ = c.out.try_send(leave.clone());
             }
         }
+    }
+
+    /// Broadcast an agent's applied ops and show where it worked.
+    fn agent_changed(&mut self, agent: AgentInfo, applied: Vec<Op>, touched: Vec<NodeId>) {
+        self.version += 1;
+        self.dirty = true;
+        let from = format!("agent-{}", agent.key);
+        self.broadcast(msg(json!({ "t": "ops", "from": from, "batch": 0, "ops": applied })), None);
+        let mut sel: Vec<String> = touched.into_iter().filter(|id| self.doc.contains(id)).collect();
+        sel.dedup();
+        // Highlight only the outermost touched nodes.
+        let set: std::collections::HashSet<String> = sel.iter().cloned().collect();
+        sel.retain(|id| !self.doc.ancestors(id).iter().any(|a| set.contains(a)));
+        sel.truncate(200);
+        let page = sel.first().and_then(|id| self.doc.page_of(id));
+        let cursor = sel.first().map(|id| {
+            let b = self.doc.world_bounds(id);
+            [b.right(), b.bottom()]
+        });
+        let peer = Peer {
+            client_id: from,
+            user_id: agent.user_id,
+            name: agent.name,
+            color: agent.color,
+            cursor,
+            selection: sel,
+            page,
+            is_agent: true,
+            is_guest: false,
+        };
+        self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
+        self.agents.insert(agent.key, (peer, Instant::now()));
+    }
+
+    /// Reverse an agent's last `steps` changes in this file.
+    fn undo_agent(&mut self, agent: AgentInfo, steps: usize) -> Result<Value, String> {
+        let history = self.agent_undo.entry(agent.key.clone()).or_default();
+        if history.is_empty() {
+            return Err("there's nothing to undo: no changes of yours are recorded in this file since the server started".into());
+        }
+        let batches: Vec<UndoBatch> = (0..steps.max(1)).filter_map(|_| history.pop_back()).collect();
+        let mut ops = Vec::new();
+        let mut kept = 0usize;
+        let mut restored: std::collections::HashSet<NodeId> = Default::default();
+        for batch in &batches {
+            for step in batch.steps.iter().rev() {
+                match step {
+                    UndoStep::Prop { id, key, old, new } => match self.doc.get(id).and_then(|n| n.get_prop(key)) {
+                        Some(cur) if cur == *new => {
+                            let mut props = serde_json::Map::new();
+                            props.insert(key.clone(), old.clone());
+                            ops.push(Op::Update { id: id.clone(), props });
+                        }
+                        Some(_) => kept += 1,
+                        None => {}
+                    },
+                    UndoStep::Remove { id } => {
+                        if self.doc.contains(id) {
+                            ops.push(Op::Delete { id: id.clone() });
+                        }
+                    }
+                    UndoStep::Restore { nodes } => {
+                        for n in nodes {
+                            let parent_ok = n.parent.as_deref().map(|p| self.doc.contains(p) || restored.contains(p)).unwrap_or(false);
+                            if !self.doc.contains(&n.id) && parent_ok {
+                                restored.insert(n.id.clone());
+                                ops.push(Op::Create { node: n.clone() });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut tx = Tx::new(&mut self.doc);
+        let errs = tx.apply_all(ops);
+        tx.relayout();
+        let Tx { applied, touched, .. } = tx;
+        let undone: Vec<String> = batches.iter().map(|b| format!("\"{}\"", b.summary)).collect();
+        if !applied.is_empty() {
+            self.agent_changed(agent, applied, touched);
+        }
+        let mut out = format!("Undid {} change{}: {}.", batches.len(), if batches.len() == 1 { "" } else { "s" }, undone.join(", "));
+        if kept > 0 {
+            out.push_str(&format!(" Kept {kept} propert{} that someone changed after you.", if kept == 1 { "y" } else { "ies" }));
+        }
+        if !errs.is_empty() {
+            out.push_str(&format!(" {} step(s) couldn't be applied.", errs.len()));
+        }
+        Ok(json!(out))
     }
 
     fn expire_agents(&mut self) {

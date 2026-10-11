@@ -194,6 +194,14 @@ fn tools() -> Value {
             "properties": { "file_id": file_id },
             "required": ["file_id"]
         })),
+        tool("undo_agent_changes", "Undo your own recent changes in a file, newest first: layers you created are removed, layers you deleted come back and properties you edited return to their earlier values. Anything a person changed after you is kept. Your last 30 changes per file are remembered while the server runs.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "steps": { "type": "integer", "description": "How many of your tool calls to undo (default 1, max 30)" }
+            },
+            "required": ["file_id"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -412,6 +420,7 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "undo_agent_changes" => self.undo_agent_changes(args).await,
             "upload_image" => self.upload_image(args).await,
             "list_images" => self.list_images(args).await,
             "create_component" => self.create_component(args).await,
@@ -1251,6 +1260,16 @@ impl Ctx {
         }
         out.push_str("Place one with create_nodes {type:'image', asset:'<id>'}.");
         Ok(text_result(out))
+    }
+
+    async fn undo_agent_changes(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let steps = args.get("steps").and_then(Value::as_u64).unwrap_or(1).clamp(1, 30) as usize;
+        let room = self.room(&fid, Role::Editor).await?;
+        room.undo_agent(self.agent(), steps)
+            .await
+            .map_err(err_msg)?
+            .map(|v| text_result(v.as_str().unwrap_or_default()))
     }
 
     async fn list_components(&self, args: &Value) -> ToolResult {
