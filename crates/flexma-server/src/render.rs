@@ -17,6 +17,7 @@ const THUMBNAIL_PX: u32 = 640;
 pub fn load_document(json: &str) -> Option<Document> {
     let mut doc = Document::from_json(json).ok()?;
     flexma_doc::components::sync_all(&mut doc);
+    flexma_doc::styles::sync_all(&mut doc);
     flexma_doc::layout::relayout_all(&mut doc);
     Some(doc)
 }

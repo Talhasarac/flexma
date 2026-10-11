@@ -4,7 +4,7 @@
 import { useSyncExternalStore } from 'react';
 import type { FlexmaEditor } from '../engine';
 import { api, exportPngUrl, exportSvgUrl, shareUrls, type CommentThread, type ExportOptions, type PngExportOptions } from '../lib/api';
-import type { ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, Tool } from './types';
+import type { ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, StyleInfo, Tool } from './types';
 import { FontManager } from './fonts';
 
 type Listener = () => void;
@@ -53,6 +53,7 @@ export class EditorStore {
   private v = { structure: -1, selection: -1, ui: -1, zoom: -1, pages: -1 };
   private layers: LayerNode[] = [];
   private components: ComponentInfo[] = [];
+  private styles: StyleInfo[] = [];
   private selection: NodeData[] = [];
   private pages: { pages: PageInfo[]; current: string } = { pages: [], current: '' };
   private ui: UiState = {
@@ -117,6 +118,7 @@ export class EditorStore {
       this.v.structure = sv;
       this.layers = JSON.parse(e.layers()) as LayerNode[];
       this.components = JSON.parse(e.components()) as ComponentInfo[];
+      this.styles = JSON.parse(e.styles()) as StyleInfo[];
       this.pages = JSON.parse(e.pages()) as { pages: PageInfo[]; current: string };
       this.fonts.schedule();
       changed = true;
@@ -166,6 +168,7 @@ export class EditorStore {
 
   getLayers = () => this.layers;
   getComponents = () => this.components;
+  getStyles = () => this.styles;
   getSelection = () => this.selection;
   getPages = () => this.pages;
   getUi = () => this.ui;
@@ -347,6 +350,9 @@ export function useLayers(s: EditorStore) {
 }
 export function useComponents(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getComponents);
+}
+export function useStyles(s: EditorStore) {
+  return useSyncExternalStore(s.subscribe, s.getStyles);
 }
 export function useSelection(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getSelection);

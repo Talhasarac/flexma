@@ -335,6 +335,31 @@ impl FlexmaEditor {
     pub fn create_component(&mut self) -> Option<String> {
         self.ed.create_component()
     }
+
+    // ---------- shared styles ----------
+
+    pub fn styles(&self) -> String {
+        self.ed.styles_json().to_string()
+    }
+    /// kind: "fill" | "stroke" | "text". Returns the new style's id.
+    pub fn create_style(&mut self, kind: &str, name: &str) -> Option<String> {
+        self.ed.create_style(kind, name)
+    }
+    pub fn apply_style(&mut self, kind: &str, style_id: &str) {
+        self.ed.set_style(kind, Some(style_id));
+    }
+    pub fn detach_style(&mut self, kind: &str) {
+        self.ed.set_style(kind, None);
+    }
+    /// props: JSON object of canonical props (name, fills, fontSize…).
+    pub fn update_style(&mut self, style_id: &str, props_json: &str) {
+        if let Ok(Value::Object(props)) = serde_json::from_str::<Value>(props_json) {
+            self.ed.update_style(style_id, props);
+        }
+    }
+    pub fn delete_style(&mut self, style_id: &str) {
+        self.ed.delete_style(style_id);
+    }
     pub fn detach_instances(&mut self) {
         self.ed.detach_instances();
     }

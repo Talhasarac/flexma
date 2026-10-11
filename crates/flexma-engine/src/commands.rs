@@ -707,6 +707,130 @@ impl Editor {
         Some(id)
     }
 
+    // ---------------- shared styles ----------------
+
+    /// The file's styles for the UI: `[{ id, name, type, fills, font props, uses }]`.
+    pub fn styles_json(&self) -> Value {
+        Value::Array(
+            self.doc
+                .styles()
+                .iter()
+                .filter_map(|id| self.doc.get(id))
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "type": s.style_type,
+                        "description": s.description,
+                        "fills": s.fills,
+                        "fontFamily": s.font_family,
+                        "fontSize": s.font_size,
+                        "fontWeight": s.font_weight,
+                        "italic": s.italic,
+                        "lineHeight": s.line_height,
+                        "letterSpacing": s.letter_spacing,
+                        "textDecoration": s.text_decoration,
+                        "uses": flexma_doc::styles::uses_of(&self.doc, &s.id),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn style_ref_key(kind: &str) -> Option<&'static str> {
+        match kind {
+            "fill" => Some("fillStyleId"),
+            "stroke" => Some("strokeStyleId"),
+            "text" => Some("textStyleId"),
+            _ => None,
+        }
+    }
+
+    /// Selected layers a style of `kind` can apply to.
+    fn style_targets(&self, kind: &str) -> Vec<NodeId> {
+        self.selection
+            .iter()
+            .filter(|id| self.doc.get(id).map(|n| n.kind.is_scene() && (kind != "text" || n.kind == NodeType::Text)).unwrap_or(false))
+            .cloned()
+            .collect()
+    }
+
+    /// Make a style from the first selected layer's fill, stroke or text and
+    /// link the selection to it (one undo step). Returns the style id.
+    pub fn create_style(&mut self, kind: &str, name: &str) -> Option<NodeId> {
+        let key = Self::style_ref_key(kind)?;
+        let targets = self.style_targets(kind);
+        let src = self.doc.get(targets.first()?)?.clone();
+        if !self.can_edit || name.trim().is_empty() {
+            return None;
+        }
+        let id = self.new_id();
+        let mut style = Node::new(id.clone(), NodeType::Style);
+        style.parent = Some(flexma_doc::ROOT_ID.to_string());
+        let last = self.doc.children(flexma_doc::ROOT_ID).last().and_then(|c| self.doc.get(c)).map(|c| c.index.clone());
+        style.index = fractional::key_between(last.as_deref(), None);
+        style.name = name.trim().to_string();
+        match kind {
+            "fill" => style.fills = src.fills.clone(),
+            "stroke" => style.fills = src.strokes.clone(),
+            _ => {
+                style.style_type = flexma_doc::StyleType::Text;
+                for k in flexma_doc::styles::TEXT_PROPS {
+                    if let Some(v) = src.get_prop(k) {
+                        let _ = style.set_prop(k, &v);
+                    }
+                }
+            }
+        }
+        let mut ops = vec![Op::Create { node: style }];
+        ops.extend(targets.into_iter().map(|t| Op::update1(t, key, json!(id))));
+        self.begin("create style");
+        self.apply_local(ops);
+        self.end();
+        Some(id)
+    }
+
+    /// Link (or with `None`, unlink) the selection to a style.
+    pub fn set_style(&mut self, kind: &str, style_id: Option<&str>) {
+        let Some(key) = Self::style_ref_key(kind) else { return };
+        if !self.can_edit {
+            return;
+        }
+        let ops: Vec<Op> = self.style_targets(kind).into_iter().map(|t| Op::update1(t, key, json!(style_id))).collect();
+        if !ops.is_empty() {
+            self.begin(if style_id.is_some() { "apply style" } else { "detach style" });
+            self.apply_local(ops);
+            self.end();
+        }
+    }
+
+    /// Change a style's values (canonical props); every user updates.
+    pub fn update_style(&mut self, style_id: &str, props: Map<String, Value>) {
+        if !self.can_edit || self.doc.get(style_id).map(|n| n.kind != NodeType::Style).unwrap_or(true) || props.is_empty() {
+            return;
+        }
+        self.apply_local(vec![Op::Update { id: style_id.to_string(), props }]);
+    }
+
+    /// Delete a style; layers using it keep their look but are unlinked.
+    pub fn delete_style(&mut self, style_id: &str) {
+        if !self.can_edit || self.doc.get(style_id).map(|n| n.kind != NodeType::Style).unwrap_or(true) {
+            return;
+        }
+        let mut ops = Vec::new();
+        for n in self.doc.nodes().filter(|n| !flexma_doc::node::is_derived_id(&n.id)) {
+            for (key, r) in [("fillStyleId", &n.fill_style_id), ("strokeStyleId", &n.stroke_style_id), ("textStyleId", &n.text_style_id)] {
+                if r.as_deref() == Some(style_id) {
+                    ops.push(Op::update1(n.id.clone(), key, Value::Null));
+                }
+            }
+        }
+        ops.push(Op::Delete { id: style_id.to_string() });
+        self.begin("delete style");
+        self.apply_local(ops);
+        self.end();
+    }
+
     /// Cmd+Alt+B: detach selected instances into plain frames.
     pub fn detach_instances(&mut self) {
         let ids: Vec<NodeId> = self

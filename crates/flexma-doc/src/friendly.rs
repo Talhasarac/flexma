@@ -426,7 +426,13 @@ fn build_one(
     ops: &mut Vec<Op>,
     new_id: &mut dyn FnMut() -> NodeId,
 ) -> Result<NodeId, String> {
-    let expanded = expand_image(spec)?;
+    let mut expanded = expand_image(spec)?;
+    // Style refs by name: {fillStyle:"Brand/Primary", textStyle:"Heading/H1"}.
+    if let Some(o) = spec.as_object().filter(|o| o.contains_key("fillStyle") || o.contains_key("strokeStyle") || o.contains_key("textStyle")) {
+        let mut o = expanded.as_ref().and_then(Value::as_object).cloned().unwrap_or_else(|| o.clone());
+        crate::styles::resolve_refs(doc, &mut o)?;
+        expanded = Some(Value::Object(o));
+    }
     let spec = expanded.as_ref().unwrap_or(spec);
     let obj = spec.as_object().ok_or("each node spec must be an object")?;
     let ty = obj.get("type").and_then(|v| v.as_str()).ok_or("node spec needs a \"type\" (FRAME, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR, POLYGON, STAR, GROUP, COMPONENT, INSTANCE, IMAGE)")?;

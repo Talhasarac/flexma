@@ -68,6 +68,13 @@ fn check_parent(doc: &Document, node: &Node) -> Result<(), String> {
                 Err("pages must be children of the document root".into())
             }
         }
+        NodeType::Style => {
+            if parent_id == ROOT_ID {
+                Ok(())
+            } else {
+                Err("styles must be children of the document root".into())
+            }
+        }
         _ => {
             if parent.kind == NodeType::Document {
                 Err("canvas nodes must live inside a page, frame or group".into())

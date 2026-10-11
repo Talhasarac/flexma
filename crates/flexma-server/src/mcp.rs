@@ -250,6 +250,35 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
+        tool("list_styles", "List the file's shared color and text styles (id, name, value, how many layers use them). Apply them with fillStyle / strokeStyle / textStyle (name or id) in create_nodes or update_nodes; changing a style updates every layer using it.", json!({
+            "type": "object",
+            "properties": { "file_id": file_id },
+            "required": ["file_id"]
+        })),
+        tool("create_styles", "Create shared styles, or update ones with the same name. Color styles: {type:'color', name:'Brand/Primary', color:'#6d5dfc'} (or fill/fills for gradients). Text styles: {type:'text', name:'Heading/H1', font:'Inter', size:40, weight:800, lineHeight:48, letterSpacing:-0.5}. Use '/' in names to group them.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "styles": { "type": "array", "items": { "type": "object" } }
+            },
+            "required": ["file_id", "styles"]
+        })),
+        tool("update_styles", "Change existing styles; every layer using them updates. Each update is {style:'<name or id>', ...props}, with rename:'New/Name' to rename.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "updates": { "type": "array", "items": { "type": "object" } }
+            },
+            "required": ["file_id", "updates"]
+        })),
+        tool("delete_styles", "Delete styles by name or id. Layers using them keep their current look but are no longer linked.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "styles": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["file_id", "styles"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -468,6 +497,10 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "list_styles" => self.list_styles(args).await,
+            "create_styles" => self.write_styles(args, true).await,
+            "update_styles" => self.write_styles(args, false).await,
+            "delete_styles" => self.delete_styles(args).await,
             "audit_design" => self.audit_design(args).await,
             "fill_with_data" => self.fill_with_data(args).await,
             "import_svg" => self.import_svg(args).await,
@@ -855,6 +888,148 @@ impl Ctx {
         Ok(text_result(audit_report(&audit, &title, &available)))
     }
 
+    async fn list_styles(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let room = self.room(&fid, Role::Viewer).await?;
+        let out = room
+            .read(|doc, _| {
+                let ids = doc.styles();
+                if ids.is_empty() {
+                    return "No shared styles in this file yet. Create some with create_styles.".to_string();
+                }
+                let mut out = String::from("Styles:\n");
+                for id in ids {
+                    let Some(st) = doc.get(&id) else { continue };
+                    out.push_str(&format!(
+                        "- [{id}] {} ({}) {} · used by {} layer(s)\n",
+                        st.name,
+                        flexma_doc::styles::kind_name(st.style_type),
+                        style_value(st),
+                        flexma_doc::styles::uses_of(doc, &id)
+                    ));
+                }
+                out.push_str("Apply with fillStyle / strokeStyle / textStyle: \"<name>\" in create_nodes or update_nodes (null detaches).");
+                out
+            })
+            .await
+            .map_err(err_msg)?;
+        Ok(text_result(out))
+    }
+
+    /// create_styles (create, or update by name) and update_styles.
+    async fn write_styles(&self, args: &Value, create: bool) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let key = if create { "styles" } else { "updates" };
+        let specs = args.get(key).and_then(Value::as_array).cloned().ok_or(format!("missing required array '{key}'"))?;
+        if specs.is_empty() || specs.len() > 200 {
+            return Err(format!("'{key}' needs 1 to 200 entries"));
+        }
+        let room = self.room(&fid, Role::Editor).await?;
+        let prefix = format!("a{}", random_string(5));
+        room.mutate(self.agent(), move |tx| {
+            let mut out = Vec::new();
+            let mut ops = Vec::new();
+            let mut n = 0u32;
+            let mut last = tx.doc.children(ROOT_ID).last().and_then(|c| tx.doc.get(c)).map(|c| c.index.clone());
+            for (i, spec) in specs.iter().enumerate() {
+                let o = spec.as_object().ok_or(format!("{key}[{i}] must be an object"))?;
+                let existing = if create {
+                    opt_str(o, "name").and_then(|nm| flexma_doc::styles::find(tx.doc, nm))
+                } else {
+                    let k = opt_str(o, "style").or_else(|| opt_str(o, "id")).ok_or(format!("updates[{i}] needs 'style' (a name or id)"))?;
+                    Some(flexma_doc::styles::find(tx.doc, k).ok_or(format!("no style '{k}' in this file"))?)
+                };
+                let ty = match (&existing, opt_str(o, "type")) {
+                    (Some(id), _) => tx.doc.get(id).map(|n| n.style_type).unwrap_or_default(),
+                    (None, Some(t)) => parse_style_type(t)?,
+                    (None, None) => {
+                        if o.contains_key("color") || o.contains_key("fill") || o.contains_key("fills") {
+                            flexma_doc::StyleType::Fill
+                        } else {
+                            flexma_doc::StyleType::Text
+                        }
+                    }
+                };
+                let mut props = style_props(o, ty, existing.is_none())?;
+                if let Some(new_name) = opt_str(o, "rename") {
+                    props.insert("name".into(), json!(new_name));
+                }
+                match existing {
+                    Some(id) => {
+                        let name = props.get("name").and_then(Value::as_str).map(str::to_string).or_else(|| tx.doc.get(&id).map(|s| s.name.clone())).unwrap_or_default();
+                        out.push(format!("updated [{id}] {name}"));
+                        if !props.is_empty() {
+                            ops.push(Op::Update { id, props });
+                        }
+                    }
+                    None => {
+                        let name = props.get("name").and_then(Value::as_str).ok_or(format!("{key}[{i}] needs a 'name'"))?.to_string();
+                        n += 1;
+                        let id = format!("{prefix}:{n}");
+                        let mut node = Node::new(id.clone(), NodeType::Style);
+                        node.parent = Some(ROOT_ID.to_string());
+                        let index = flexma_doc::fractional::key_between(last.as_deref(), None);
+                        last = Some(index.clone());
+                        node.index = index;
+                        node.style_type = ty;
+                        for (k, v) in &props {
+                            node.set_prop(k, v)?;
+                        }
+                        out.push(format!("created [{id}] {name}"));
+                        ops.push(Op::Create { node });
+                    }
+                }
+            }
+            let errs = tx.apply_all(ops);
+            if !errs.is_empty() {
+                return Err(format!("some styles could not be saved: {errs:?}"));
+            }
+            tx.relayout();
+            Ok(json!(format!("Styles: {}.\nApply with fillStyle / strokeStyle / textStyle: \"<name>\".", out.join(", "))))
+        })
+        .await
+        .map_err(err_msg)?
+        .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
+    async fn delete_styles(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let keys = ids(args, "styles")?;
+        let room = self.room(&fid, Role::Editor).await?;
+        room.mutate(self.agent(), move |tx| {
+            let mut ops = Vec::new();
+            let mut names = Vec::new();
+            let mut detached = 0;
+            for k in &keys {
+                let id = flexma_doc::styles::find(tx.doc, k).ok_or(format!("no style '{k}' in this file"))?;
+                names.push(tx.doc.get(&id).map(|s| s.name.clone()).unwrap_or_default());
+                // Unlink users first; they keep the values they show now.
+                for n in tx.doc.nodes().filter(|n| !flexma_doc::node::is_derived_id(&n.id)) {
+                    let mut props = serde_json::Map::new();
+                    for (r, v) in [("fillStyleId", &n.fill_style_id), ("strokeStyleId", &n.stroke_style_id), ("textStyleId", &n.text_style_id)] {
+                        if v.as_deref() == Some(id.as_str()) {
+                            props.insert(r.into(), Value::Null);
+                        }
+                    }
+                    if !props.is_empty() {
+                        detached += 1;
+                        ops.push(Op::Update { id: n.id.clone(), props });
+                    }
+                }
+                ops.push(Op::Delete { id });
+            }
+            let errs = tx.apply_all(ops);
+            tx.relayout();
+            if !errs.is_empty() {
+                return Err(format!("some styles could not be deleted: {errs:?}"));
+            }
+            Ok(json!(format!("Deleted {} style(s): {}. {detached} layer(s) were unlinked and keep their current look.", names.len(), names.join(", "))))
+        })
+        .await
+        .map_err(err_msg)?
+        .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
     async fn import_svg(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
         let svg = s(args, "svg")?;
@@ -909,6 +1084,7 @@ impl Ctx {
                 let node = tx.doc.get(id).ok_or_else(|| format!("node '{id}' not found"))?;
                 let mut raw = obj.clone();
                 raw.remove("id");
+                flexma_doc::styles::resolve_refs(tx.doc, &mut raw).map_err(|e| format!("{id}: {e}"))?;
                 if raw.contains_key("parent") || raw.contains_key("index") {
                     return Err("use move_nodes to change a node's parent or order".into());
                 }
@@ -2119,4 +2295,90 @@ fn audit_report(a: &flexma_doc::audit::Audit, title: &str, available: &[String])
         format!("\n{problems} thing(s) to look at. Reuse the most-used values above for new work and fix the ⚠ items with update_nodes.")
     });
     out
+}
+
+// ---------------------------------------------------------------------------
+// styles helpers
+// ---------------------------------------------------------------------------
+
+fn opt_str<'a>(o: &'a serde_json::Map<String, Value>, k: &str) -> Option<&'a str> {
+    o.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn parse_style_type(t: &str) -> Result<flexma_doc::StyleType, String> {
+    match t.to_ascii_lowercase().as_str() {
+        "color" | "colour" | "fill" | "paint" => Ok(flexma_doc::StyleType::Fill),
+        "text" | "typography" | "font" | "type" => Ok(flexma_doc::StyleType::Text),
+        other => Err(format!("unknown style type '{other}' (use color or text)")),
+    }
+}
+
+/// Canonical props for a style from a friendly spec.
+fn style_props(o: &serde_json::Map<String, Value>, ty: flexma_doc::StyleType, new: bool) -> Result<serde_json::Map<String, Value>, String> {
+    let mut props = serde_json::Map::new();
+    if let Some(name) = opt_str(o, "name") {
+        props.insert("name".into(), json!(name));
+    }
+    if let Some(d) = o.get("description").and_then(Value::as_str) {
+        props.insert("description".into(), json!(d));
+    }
+    match ty {
+        flexma_doc::StyleType::Fill => {
+            let paint = o.get("fills").or_else(|| o.get("fill")).or_else(|| o.get("color"));
+            match paint {
+                Some(p) => {
+                    let mut src = serde_json::Map::new();
+                    src.insert("fills".into(), p.clone());
+                    let norm = normalize_props(NodeType::Rectangle, &src)?;
+                    props.insert("fills".into(), norm.get("fills").cloned().unwrap_or(json!([])));
+                }
+                None if new => return Err("a color style needs 'color' (hex) or 'fill'/'fills'".into()),
+                None => {}
+            }
+        }
+        flexma_doc::StyleType::Text => {
+            let mut src = serde_json::Map::new();
+            for (k, v) in o {
+                if matches!(k.as_str(), "font" | "fontFamily" | "size" | "fontSize" | "weight" | "fontWeight" | "lineHeight" | "letterSpacing" | "italic" | "textDecoration") {
+                    src.insert(k.clone(), v.clone());
+                }
+            }
+            let norm = normalize_props(NodeType::Text, &src)?;
+            for (k, v) in norm {
+                if flexma_doc::styles::TEXT_PROPS.contains(&k.as_str()) {
+                    props.insert(k, v);
+                }
+            }
+            if new && !props.keys().any(|k| flexma_doc::styles::TEXT_PROPS.contains(&k.as_str())) {
+                return Err("a text style needs at least one of font, size, weight, lineHeight, letterSpacing".into());
+            }
+        }
+    }
+    Ok(props)
+}
+
+/// A one-line summary of a style's value.
+fn style_value(st: &Node) -> String {
+    match st.style_type {
+        flexma_doc::StyleType::Fill => match st.fills.first() {
+            Some(flexma_doc::Paint::Solid { color, opacity, .. }) => {
+                if *opacity < 0.999 {
+                    format!("{} at {}%", color.to_hex(), (opacity * 100.0).round())
+                } else {
+                    color.to_hex()
+                }
+            }
+            Some(flexma_doc::Paint::LinearGradient { stops, angle, .. }) => {
+                let cs: Vec<String> = stops.iter().map(|s| s.color.to_hex()).collect();
+                format!("gradient {}° {}", fmt_num(*angle as f64), cs.join(" → "))
+            }
+            Some(flexma_doc::Paint::Image { asset, .. }) => format!("image {asset}"),
+            None => "no fill".into(),
+        },
+        flexma_doc::StyleType::Text => {
+            let lh = st.line_height.map(|l| format!("/{}", fmt_num(l))).unwrap_or_default();
+            let ls = if st.letter_spacing != 0.0 { format!(" ls {}", fmt_num(st.letter_spacing)) } else { String::new() };
+            format!("{} {}{lh} w{}{}{ls}", st.font_family, fmt_num(st.font_size), st.font_weight, if st.italic { " italic" } else { "" })
+        }
+    }
 }

@@ -137,8 +137,14 @@ impl Document {
         self.children.get(id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    pub fn pages(&self) -> &[NodeId] {
-        self.children(ROOT_ID)
+    /// Pages, in order (the root also holds shared styles).
+    pub fn pages(&self) -> Vec<NodeId> {
+        self.children(ROOT_ID).iter().filter(|id| self.get(id).map(|n| n.kind == NodeType::Page).unwrap_or(false)).cloned().collect()
+    }
+
+    /// Shared color and text styles, in order.
+    pub fn styles(&self) -> Vec<NodeId> {
+        self.children(ROOT_ID).iter().filter(|id| self.get(id).map(|n| n.kind == NodeType::Style).unwrap_or(false)).cloned().collect()
     }
 
     pub fn parent_of(&self, id: &str) -> Option<&str> {

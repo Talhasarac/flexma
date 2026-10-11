@@ -27,6 +27,7 @@ import {
 import { api, type GoogleFontFamily } from '../lib/api';
 import { familyWeights, findGoogleFamily, googleCatalogue, WEIGHTS, weightName } from '../lib/fonts';
 import { FontPicker } from './FontPicker';
+import { StyleChip, StylePickerButton } from './Styles';
 import { useToast } from '../components/Toast';
 import { useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
 import type { EffectValue, NodeData, Paint } from './types';
@@ -426,8 +427,10 @@ function TextSection({ sel, set, begin, end, store, readOnly }: SectionProps & {
     set(props);
   };
 
+  const textStyleId = common(sel, (n) => n.textStyleId ?? null);
   return (
-    <Section title="Text">
+    <Section title="Text" actions={<StylePickerButton store={store} kind="text" />}>
+      {typeof textStyleId === 'string' && textStyleId !== 'mixed' && <StyleChip store={store} styleId={textStyleId} kind="text" />}
       <FontPicker store={store} value={family === 'mixed' ? '' : family} styles={styles} disabled={readOnly} onPick={(f) => set({ fontFamily: f })} />
       {missing && <MissingFontNote store={store} family={family} />}
       <div className="grid2">
@@ -501,6 +504,8 @@ function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProp
   const paints = common(sel, (n) => n[kind]);
   const update = (next: Paint[]) => set({ [kind]: next });
   const stroke = kind === 'strokes';
+  const styleKind = stroke ? 'stroke' : 'fill';
+  const styleId = common(sel, (n) => (stroke ? n.strokeStyleId : n.fillStyleId) ?? null);
   const isTextOnly = sel.every((n) => n.type === 'TEXT');
 
   const upload = async (file: File, i: number, list: Paint[]) => {
@@ -518,12 +523,17 @@ function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProp
     <Section
       title={title}
       actions={
-        <IconButton active={false} title={`Add ${title.toLowerCase()}`} onClick={() => update([...(paints === 'mixed' ? [] : paints), defaultPaint(kind)])}>
-          <Plus size={14} />
-        </IconButton>
+        <>
+          <StylePickerButton store={store} kind={styleKind} />
+          <IconButton active={false} title={`Add ${title.toLowerCase()}`} onClick={() => update([...(paints === 'mixed' ? [] : paints), defaultPaint(kind)])}>
+            <Plus size={14} />
+          </IconButton>
+        </>
       }
     >
-      {paints === 'mixed' ? (
+      {typeof styleId === 'string' && styleId !== 'mixed' ? (
+        <StyleChip store={store} styleId={styleId} kind={styleKind} />
+      ) : paints === 'mixed' ? (
         <div className="muted-row">Mixed — click + to replace</div>
       ) : (
         paints.map((p, i) => (

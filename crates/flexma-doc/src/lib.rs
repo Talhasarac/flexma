@@ -23,6 +23,7 @@ pub mod node;
 pub mod ops;
 pub mod paint;
 pub mod path;
+pub mod styles;
 pub mod svg;
 pub mod text;
 

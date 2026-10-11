@@ -145,7 +145,7 @@ impl<'a> Tx<'a> {
 
     /// Apply one op (edits aimed inside instances become instance overrides).
     pub fn apply(&mut self, op: Op) -> Result<(), String> {
-        for op in components::route_ops(self.doc, vec![op]) {
+        for op in components::route_ops(self.doc, flexma_doc::styles::route_ops(self.doc, vec![op])) {
             self.apply_routed(op)?;
         }
         Ok(())
@@ -154,7 +154,7 @@ impl<'a> Tx<'a> {
     /// Apply many ops; returns per-op errors (index, message) without stopping.
     pub fn apply_all(&mut self, ops: Vec<Op>) -> Vec<(usize, String)> {
         let mut errs = Vec::new();
-        for (i, op) in components::route_ops(self.doc, ops).into_iter().enumerate() {
+        for (i, op) in components::route_ops(self.doc, flexma_doc::styles::route_ops(self.doc, ops)).into_iter().enumerate() {
             if let Err(e) = self.apply_routed(op) {
                 errs.push((i, e));
             }
@@ -167,6 +167,8 @@ impl<'a> Tx<'a> {
         let synced = components::sync_instances(self.doc, &self.changed, &self.removed);
         let mut changed = std::mem::take(&mut self.changed);
         changed.extend(synced);
+        let styled = flexma_doc::styles::sync_styles(self.doc, &changed);
+        changed.extend(styled);
         self.removed.clear();
         layout::relayout(self.doc, &changed);
         self.changed = changed;
@@ -408,6 +410,7 @@ impl Rooms {
         let (json, version) = loaded.ok_or_else(|| AppError::not_found("file"))?;
         let mut doc = Document::from_json(&json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
         components::sync_all(&mut doc);
+        flexma_doc::styles::sync_all(&mut doc);
         layout::relayout_all(&mut doc);
 
         let mut map = self.rooms.lock().unwrap();
@@ -627,7 +630,7 @@ impl Room {
         let mut rejected = Vec::new();
         let mut changed = Vec::new();
         let mut removed = Vec::new();
-        for op in components::route_ops(&self.doc, ops) {
+        for op in components::route_ops(&self.doc, flexma_doc::styles::route_ops(&self.doc, ops)) {
             match self.doc.apply(&op) {
                 Ok(eff) => {
                     changed.extend(eff.changed);
@@ -639,6 +642,8 @@ impl Room {
         }
         let synced = components::sync_instances(&mut self.doc, &changed, &removed);
         changed.extend(synced);
+        let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
+        changed.extend(styled);
         layout::relayout(&mut self.doc, &changed);
         if !accepted.is_empty() {
             self.version += 1;

@@ -152,6 +152,15 @@ pub enum TextAutoResize {
     None,
 }
 
+/// What a STYLE node holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StyleType {
+    #[default]
+    Fill,
+    Text,
+}
+
 /// How overlapping sub-paths fill: EVENODD punches holes (icons, glyphs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

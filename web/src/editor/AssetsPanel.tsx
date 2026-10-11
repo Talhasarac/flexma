@@ -1,8 +1,10 @@
-// Assets: the file's main components. Click to place an instance; instances
-// follow the component and keep their own overrides.
+// Assets: the file's shared styles and main components. Click a style to
+// apply it to the selection; click a component to place an instance.
 import { useMemo, useState } from 'react';
-import { Component as ComponentIcon, Crosshair, Plus } from 'lucide-react';
-import { useComponents, useUi, type EditorStore } from './store';
+import { Component as ComponentIcon, Crosshair, Pencil, Plus } from 'lucide-react';
+import { useComponents, useSelection, useStyles, useUi, type EditorStore } from './store';
+import { StyleEditor, StyleSwatch, textStyleSummary } from './Styles';
+import type { StyleInfo } from './types';
 
 export function AssetsPanel({ store }: { store: EditorStore }) {
   const components = useComponents(store);
@@ -25,7 +27,8 @@ export function AssetsPanel({ store }: { store: EditorStore }) {
 
   return (
     <div className="assets">
-      <input className="prop-text assets-search" placeholder="Search components" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input className="prop-text assets-search" placeholder="Search styles and components" value={q} onChange={(e) => setQ(e.target.value)} />
+      <StylesList store={store} query={q} />
       {components.length === 0 ? (
         <div className="assets-empty">
           <ComponentIcon size={22} />
@@ -93,5 +96,68 @@ export function AssetsPanel({ store }: { store: EditorStore }) {
         ))
       )}
     </div>
+  );
+}
+
+function StylesList({ store, query }: { store: EditorStore; query: string }) {
+  const styles = useStyles(store);
+  const selection = useSelection(store);
+  const ui = useUi(store);
+  const [editing, setEditing] = useState<StyleInfo | null>(null);
+  const q = query.trim().toLowerCase();
+  const shown = styles.filter((s) => !q || s.name.toLowerCase().includes(q));
+  if (styles.length === 0) {
+    return (
+      <p className="assets-hint">
+        No styles yet. Use the swatch button in the Fill or Text section to turn a color or text look into a shared style.
+      </p>
+    );
+  }
+  const apply = (s: StyleInfo) => {
+    if (!ui.canEdit || selection.length === 0) {
+      setEditing(s);
+      return;
+    }
+    store.engine.apply_style(s.type === 'TEXT' ? 'text' : 'fill', s.id);
+    store.poll();
+  };
+  const groups: [string, StyleInfo[]][] = [
+    ['Color styles', shown.filter((s) => s.type === 'FILL')],
+    ['Text styles', shown.filter((s) => s.type === 'TEXT')],
+  ];
+  return (
+    <>
+      {groups
+        .filter(([, list]) => list.length > 0)
+        .map(([label, list]) => (
+          <section key={label} className="assets-group">
+            <h4>{label}</h4>
+            <ul className="style-list">
+              {list.map((s) => (
+                <li key={s.id} className="style-row">
+                  <button
+                    type="button"
+                    className="style-row-main"
+                    onClick={() => apply(s)}
+                    title={selection.length && ui.canEdit ? `Apply “${s.name}” to the selection` : s.description || s.name}
+                  >
+                    <StyleSwatch store={store} style={s} />
+                    <span className="style-row-name">
+                      {s.name}
+                      <small>{s.type === 'TEXT' ? textStyleSummary(s) : `${s.uses} layer${s.uses === 1 ? '' : 's'}`}</small>
+                    </span>
+                  </button>
+                  {ui.canEdit && (
+                    <button type="button" className="icon-btn" title="Edit style" onClick={() => setEditing(s)}>
+                      <Pencil size={13} />
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      {editing && <StyleEditor store={store} style={editing} onClose={() => setEditing(null)} />}
+    </>
   );
 }

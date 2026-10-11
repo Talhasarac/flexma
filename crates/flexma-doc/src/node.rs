@@ -32,6 +32,8 @@ pub enum NodeType {
     Component,
     /// An instance of a component. Its children are derived (never stored).
     Instance,
+    /// A shared color or text style (lives at the document root, never drawn).
+    Style,
 }
 
 /// Derived nodes (the expanded children of instances) have ids containing `~`:
@@ -53,9 +55,9 @@ impl NodeType {
         matches!(self, NodeType::Frame | NodeType::Component | NodeType::Instance)
     }
 
-    /// Nodes that can be placed on a canvas (everything but the document and pages).
+    /// Nodes that can be placed on a canvas (everything but the document, pages and styles).
     pub fn is_scene(self) -> bool {
-        !matches!(self, NodeType::Document | NodeType::Page)
+        !matches!(self, NodeType::Document | NodeType::Page | NodeType::Style)
     }
 
     pub fn parse(s: &str) -> Option<NodeType> {
@@ -77,6 +79,7 @@ impl NodeType {
             NodeType::Star => "STAR",
             NodeType::Component => "COMPONENT",
             NodeType::Instance => "INSTANCE",
+            NodeType::Style => "STYLE",
         }
     }
 
@@ -95,6 +98,7 @@ impl NodeType {
             NodeType::Star => "Star",
             NodeType::Component => "Component",
             NodeType::Instance => "Instance",
+            NodeType::Style => "Style",
         }
     }
 }
@@ -243,6 +247,12 @@ define_node! {
     overrides: serde_json::Map<String, serde_json::Value> = serde_json::Map::new() => "overrides",
     /// Free-form notes, handy for agents to leave intent or component docs.
     description: String = String::new() => "description",
+    /// For STYLE nodes: FILL (uses `fills`) or TEXT (uses the font props).
+    style_type: StyleType = StyleType::Fill => "styleType",
+    /// Shared styles this node uses; their values are applied on every replica.
+    fill_style_id: Option<NodeId> = None => "fillStyleId",
+    stroke_style_id: Option<NodeId> = None => "strokeStyleId",
+    text_style_id: Option<NodeId> = None => "textStyleId",
     /// Canvas background color (PAGE nodes).
     background: Option<Color> = None => "background",
 }

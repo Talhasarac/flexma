@@ -133,6 +133,7 @@ impl Editor {
         let unacked = if self.loaded { self.sync.take_unacked() } else { vec![] };
         let mut doc = Document::from_json(doc_json)?;
         components::sync_all(&mut doc);
+        flexma_doc::styles::sync_all(&mut doc);
         layout::relayout_all(&mut doc);
         self.doc = doc;
         self.sync.reset(client_id);
@@ -153,6 +154,8 @@ impl Editor {
             }
             let synced = components::sync_instances(&mut self.doc, &changed, &[]);
             changed.extend(synced);
+            let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
+            changed.extend(styled);
             layout::relayout(&mut self.doc, &changed);
         }
         self.doc.walk(flexma_doc::ROOT_ID, &mut |n| {
@@ -227,6 +230,17 @@ impl Editor {
         }
         let mut changed = eff.changed.clone();
         changed.extend(synced.iter().cloned());
+        // Shared styles: a changed style updates every layer using it.
+        if changed.iter().any(|id| self.doc.get(id).map(|n| n.kind == NodeType::Style).unwrap_or(false)) {
+            eff.structure = true;
+        }
+        let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
+        for id in &styled {
+            if self.doc.get(id).map(|n| n.kind == NodeType::Text && n.needs_measure).unwrap_or(false) {
+                self.needs_measure.insert(id.clone());
+            }
+        }
+        changed.extend(styled);
         let mut laid = layout::relayout(&mut self.doc, &changed);
         laid.extend(synced);
         laid
@@ -280,7 +294,7 @@ impl Editor {
             return vec![];
         }
         // Edits aimed inside instances become overrides on the instance.
-        let ops = components::route_ops(&self.doc, ops);
+        let ops = components::route_ops(&self.doc, flexma_doc::styles::route_ops(&self.doc, ops));
         let auto_txn = !self.history.is_open();
         if auto_txn {
             let sel = self.selection.clone();
@@ -312,7 +326,7 @@ impl Editor {
         if !self.can_edit {
             return;
         }
-        let ops = components::route_ops(&self.doc, ops);
+        let ops = components::route_ops(&self.doc, flexma_doc::styles::route_ops(&self.doc, ops));
         let mut eff = OpEffect::default();
         for op in ops {
             if let Ok(e) = self.doc.apply(&op) {

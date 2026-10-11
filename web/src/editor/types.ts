@@ -40,6 +40,26 @@ export interface ComponentInfo {
   instances: number;
 }
 
+/** A shared color (FILL) or text style. */
+export interface StyleInfo {
+  id: string;
+  name: string;
+  type: 'FILL' | 'TEXT';
+  description: string;
+  fills: Paint[];
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: number;
+  italic: boolean;
+  lineHeight: number | null;
+  letterSpacing: number;
+  textDecoration: string | null;
+  /** Layers linked to it. */
+  uses: number;
+}
+
+export type StyleKind = 'fill' | 'stroke' | 'text';
+
 export interface PageInfo {
   id: string;
   name: string;
@@ -114,6 +134,9 @@ export interface NodeData {
   layoutAbsolute: boolean;
   description: string;
   componentId: string | null;
+  fillStyleId: string | null;
+  strokeStyleId: string | null;
+  textStyleId: string | null;
   overrides: Record<string, Record<string, unknown>>;
   derived: boolean;
   componentName?: string | null;

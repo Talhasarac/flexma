@@ -1,4 +1,5 @@
 // Compact property inputs: scrubbable numbers, colors, selects, toggles.
+import type React from 'react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 const fmt = (v: number, precision = 2) => {
@@ -236,7 +237,7 @@ export function Select<T extends string>({ value, options, onChange, title, clas
 
 interface IconToggleProps {
   active: boolean;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   title: string;
   children: ReactNode;
   disabled?: boolean;
