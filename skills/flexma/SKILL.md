@@ -103,6 +103,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `create_component` | Turn a frame or group into a reusable component |
 | `detach_instance` | Turn an instance into a plain, independent frame |
 | `save_version` | Checkpoint the file in its version history before risky edits |
+| `share_file` | Get a public view-only link (no account needed) to hand to someone, or turn it off |
 | `list_comments` | Read open feedback threads (who, where, which node, replies) |
 | `add_comment` | Pin a note on a node or point, or reply to a thread (`reply_to`) |
 | `resolve_comment` | Resolve a thread you addressed (or reopen it) |

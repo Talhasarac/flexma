@@ -132,6 +132,8 @@ export interface Peer {
   selection: string[];
   page: string | null;
   isAgent: boolean;
+  /** Viewing through a public share link (not signed in). */
+  isGuest?: boolean;
 }
 
 export interface EditingText {

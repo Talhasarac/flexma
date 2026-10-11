@@ -164,6 +164,16 @@ const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     );
     "#,
+    // 6: public view-only share links (one per file)
+    r#"
+    CREATE TABLE file_shares (
+        file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        token TEXT NOT NULL UNIQUE,
+        created_by TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER
+    );
+    "#,
 ];
 
 impl Db {

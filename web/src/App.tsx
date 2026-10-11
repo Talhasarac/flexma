@@ -21,6 +21,7 @@ import RecentPage from './pages/RecentPage';
 import WorkspaceSettingsPage from './pages/workspaceSettings/WorkspaceSettingsPage';
 
 const EditorPage = lazy(loadEditor);
+const SharePage = lazy(() => import('./editor/SharePage'));
 
 export default function App() {
   return (
@@ -51,6 +52,14 @@ function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route path="/invite/:token" element={<InvitePage />} />
+      <Route
+        path="/s/:token"
+        element={
+          <Suspense fallback={<FullScreenLoader label="Opening shared file" />}>
+            <SharePage />
+          </Suspense>
+        }
+      />
 
       {/* Signed in */}
       <Route

@@ -44,12 +44,33 @@ pub async fn handler(
     let (_, _, role) = st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer)).await?;
     let room = st.rooms.get(&file_id).await?;
     Ok(ws.max_message_size(64 * 1024 * 1024).on_upgrade(move |socket| async move {
-        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role };
+        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, share_token: None };
         run(socket, room, info).await;
     }))
 }
 
-async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info: JoinInfo) {
+/// Anonymous, view-only socket for a public share link.
+pub async fn share_handler(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    ws: WebSocketUpgrade,
+) -> AppResult<Response> {
+    let t = token.clone();
+    let (file_id, _) = st.db.call(move |c| crate::api_share::resolve(c, &t)).await?;
+    let room = st.rooms.get(&file_id).await?;
+    Ok(ws.max_message_size(1024 * 1024).on_upgrade(move |socket| async move {
+        let info = JoinInfo {
+            user_id: format!("guest:{}", crate::db::random_string(6)),
+            name: "Guest".into(),
+            color: "#8a8a8f".into(),
+            role: Role::Viewer,
+            share_token: Some(token),
+        };
+        run(socket, room, info).await;
+    }))
+}
+
+pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info: JoinInfo) {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Msg>(crate::rooms::CLIENT_QUEUE);
     let client_id = match room.join(info, out_tx).await {

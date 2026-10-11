@@ -1,5 +1,5 @@
 // The design editor route (/file/:fileId).
-import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, errorMessage, type FileInfo } from '../lib/api';
 import { useToast } from '../components/Toast';
@@ -56,10 +56,11 @@ export default function EditorPage() {
   if (error) return <FullScreenMessage title="Can't open file" message={error} homeLink />;
   if (fatal) return <FullScreenMessage title="File unavailable" message={fatal} homeLink />;
   if (!file || !store) return <FullScreenLoader label="Opening file" />;
-  return <Editor store={store} file={file} canvas={canvas} onFileChange={setFile} />;
+  return <Editor store={store} canvas={canvas} header={<TopBar store={store} file={file} onRenamed={setFile} />} />;
 }
 
-function Editor({ store, file, canvas, onFileChange }: { store: EditorStore; file: FileInfo; canvas: HTMLCanvasElement; onFileChange: (f: FileInfo) => void }) {
+/** The editor shell (panels, canvas, toolbar). Also used by the public share viewer. */
+export function Editor({ store, canvas, header, footer }: { store: EditorStore; canvas: HTMLCanvasElement; header: ReactNode; footer?: ReactNode }) {
   const toast = useToast();
   const menu = useMenu();
   const ui = useUi(store);
@@ -177,7 +178,7 @@ function Editor({ store, file, canvas, onFileChange }: { store: EditorStore; fil
 
   return (
     <div className={`editor${panels ? '' : ' no-panels'}`}>
-      <TopBar store={store} file={file} onRenamed={onFileChange} />
+      {header}
       <div className="editor-body">
         {panels && (
           <aside className="editor-left">
@@ -187,19 +188,22 @@ function Editor({ store, file, canvas, onFileChange }: { store: EditorStore; fil
         <main className="editor-center">
           <Canvas store={store} canvas={canvas} onContextMenu={onContextMenu} onDropFiles={onDropFiles} />
           <Toolbar store={store} />
+          {footer}
         </main>
         {panels && (
           <aside className="editor-right" aria-label="Design properties">
             <div className="panel-tabs">
               <button type="button" className={`panel-tab${commentMode ? '' : ' active'}`} onClick={() => store.setCommentMode(false)}>
-                Design
+                {store.shareToken ? 'Inspect' : 'Design'}
               </button>
-              <button type="button" className={`panel-tab${commentMode ? ' active' : ''}`} onClick={() => store.setCommentMode(true)}>
-                Comments
-              </button>
-              <span className="panel-meta">{commentMode ? '' : selection.length ? `${selection.length} selected` : ui.canEdit ? '' : 'View only'}</span>
+              {!store.shareToken && (
+                <button type="button" className={`panel-tab${commentMode ? ' active' : ''}`} onClick={() => store.setCommentMode(true)}>
+                  Comments
+                </button>
+              )}
+              <span className="panel-meta">{commentMode ? '' : selection.length ? `${selection.length} selected` : ui.canEdit || store.shareToken ? '' : 'View only'}</span>
             </div>
-            {commentMode ? <CommentsPanel store={store} /> : <PropertiesPanel store={store} fileId={file.id} />}
+            {commentMode ? <CommentsPanel store={store} /> : <PropertiesPanel store={store} />}
           </aside>
         )}
       </div>

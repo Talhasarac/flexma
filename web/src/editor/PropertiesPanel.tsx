@@ -22,13 +22,13 @@ import {
   Scan,
   Spline,
 } from 'lucide-react';
-import { api, exportPngUrl } from '../lib/api';
+import { api } from '../lib/api';
 import { useToast } from '../components/Toast';
 import { usePages, useSelection, useUi, type EditorStore } from './store';
 import type { EffectValue, NodeData, Paint } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
 
-type Props = { store: EditorStore; fileId: string };
+type Props = { store: EditorStore };
 
 function common<T>(nodes: NodeData[], get: (n: NodeData) => T): T | 'mixed' {
   if (!nodes.length) return 'mixed';
@@ -64,7 +64,7 @@ const WEIGHTS = [
   { value: '900', label: 'Black' },
 ];
 
-export function PropertiesPanel({ store, fileId }: Props) {
+export function PropertiesPanel({ store }: Props) {
   const sel = useSelection(store);
   const ui = useUi(store);
   const engine = store.engine;
@@ -237,10 +237,10 @@ export function PropertiesPanel({ store, fileId }: Props) {
 
       {isText && <TextSection sel={sel} set={set} begin={begin} end={end} />}
 
-      <PaintsSection title="Fill" kind="fills" sel={sel} set={set} begin={begin} end={end} fileId={fileId} />
-      <PaintsSection title="Stroke" kind="strokes" sel={sel} set={set} begin={begin} end={end} fileId={fileId} />
+      <PaintsSection title="Fill" kind="fills" sel={sel} set={set} begin={begin} end={end} store={store} />
+      <PaintsSection title="Stroke" kind="strokes" sel={sel} set={set} begin={begin} end={end} store={store} />
       <EffectsSection sel={sel} set={set} begin={begin} end={end} />
-      <ExportSection store={store} fileId={fileId} sel={sel} />
+      <ExportSection store={store} sel={sel} />
       {sel.length === 1 && <NotesSection node={n0} set={set} readOnly={readOnly} />}
     </div>
   );
@@ -509,7 +509,7 @@ function defaultPaint(kind: 'fills' | 'strokes'): Paint {
   return { type: 'SOLID', color: kind === 'fills' ? '#d9d9d9' : '#000000' };
 }
 
-function PaintsSection({ title, kind, sel, set, begin, end, fileId }: SectionProps & { title: string; kind: 'fills' | 'strokes'; fileId: string }) {
+function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProps & { title: string; kind: 'fills' | 'strokes'; store: EditorStore }) {
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
   const replaceIndex = useRef(0);
@@ -520,7 +520,7 @@ function PaintsSection({ title, kind, sel, set, begin, end, fileId }: SectionPro
 
   const upload = async (file: File, i: number, list: Paint[]) => {
     try {
-      const a = await api.files.uploadAsset(fileId, file);
+      const a = await api.files.uploadAsset(store.fileId, file);
       const next = [...list];
       next[i] = { type: 'IMAGE', asset: a.id, fit: 'FILL' };
       update(next);
@@ -570,7 +570,7 @@ function PaintsSection({ title, kind, sel, set, begin, end, fileId }: SectionPro
             )}
             {p.type === 'IMAGE' && (
               <div className="image-row">
-                <span className="image-thumb" style={{ backgroundImage: `url(${api.assets.url(p.asset)})` }} />
+                <span className="image-thumb" style={{ backgroundImage: `url(${store.assetUrl(p.asset)})` }} />
                 <Select
                   value={p.fit ?? 'FILL'}
                   options={[
@@ -745,14 +745,15 @@ function safeName(s: string) {
   return s.replace(/[^\w\- ]+/g, '').trim() || 'export';
 }
 
-function ExportSection({ store, fileId, sel }: { store: EditorStore; fileId: string; sel: NodeData[] }) {
+function ExportSection({ store, sel }: { store: EditorStore; sel: NodeData[] }) {
   const toast = useToast();
   const one = sel.length === 1 ? sel[0] : null;
   return (
     <Section title="Export">
-      <div className="row-actions wrap">
+      {/* Exporting is allowed in read-only mode too. */}
+      <div className="row-actions wrap readonly-ok">
         {[1, 2, 3].map((s) => (
-          <a key={s} className="btn btn-xs" href={one ? exportPngUrl(fileId, { node: one.id, scale: s }) : undefined} download={one ? `${safeName(one.name)}@${s}x.png` : undefined} aria-disabled={!one}>
+          <a key={s} className="btn btn-xs" href={one ? store.exportPngUrl({ node: one.id, scale: s }) : undefined} download={one ? `${safeName(one.name)}@${s}x.png` : undefined} aria-disabled={!one}>
             PNG {s}x
           </a>
         ))}
@@ -884,7 +885,7 @@ function PagePanel({ store }: { store: EditorStore }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, store, ui]);
   return (
-    <div className="props">
+    <div className={`props${ui.canEdit ? '' : ' readonly'}`}>
       <Section title="Page">
         <ColorInput
           value={bg}
@@ -897,12 +898,21 @@ function PagePanel({ store }: { store: EditorStore }) {
       </Section>
       <Section title="Tips">
         <ul className="tips">
-          <Tip k="F">Frame</Tip>
-          <Tip k="R / O / L">Rectangle, ellipse, line</Tip>
-          <Tip k="T">Text</Tip>
-          <Tip k="P">Pen</Tip>
-          <Tip k="Shift A">Auto layout</Tip>
-          <Tip k="⌘ G">Group</Tip>
+          {ui.canEdit ? (
+            <>
+              <Tip k="F">Frame</Tip>
+              <Tip k="R / O / L">Rectangle, ellipse, line</Tip>
+              <Tip k="T">Text</Tip>
+              <Tip k="P">Pen</Tip>
+              <Tip k="Shift A">Auto layout</Tip>
+              <Tip k="⌘ G">Group</Tip>
+            </>
+          ) : (
+            <>
+              <Tip k="Click">Inspect a layer</Tip>
+              <Tip k="Shift 2">Zoom to selection</Tip>
+            </>
+          )}
           <Tip k="Space-drag">Pan</Tip>
           <Tip k="⌘ scroll">Zoom</Tip>
           <Tip k="Shift 1">Zoom to fit</Tip>

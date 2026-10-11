@@ -63,17 +63,21 @@ export function Toolbar({ store }: { store: EditorStore }) {
           {btn('text', 'Text (T)', <Type size={16} />)}
         </>
       )}
-      <span className="tool-sep" />
-      <button
-        type="button"
-        className={`tool${commentMode ? ' active' : ''}`}
-        title="Comment (C)"
-        aria-label="Comment"
-        aria-pressed={commentMode}
-        onClick={() => store.setCommentMode(!commentMode)}
-      >
-        <MessageCircle size={16} />
-      </button>
+      {!store.shareToken && (
+        <>
+          <span className="tool-sep" />
+          <button
+            type="button"
+            className={`tool${commentMode ? ' active' : ''}`}
+            title="Comment (C)"
+            aria-label="Comment"
+            aria-pressed={commentMode}
+            onClick={() => store.setCommentMode(!commentMode)}
+          >
+            <MessageCircle size={16} />
+          </button>
+        </>
+      )}
       {!ui.canEdit && <span className="view-only">View only</span>}
       {menu.element}
     </div>

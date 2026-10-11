@@ -2561,3 +2561,117 @@ kbd {
   display: flex;
   gap: 2px;
 }
+
+/* ---------- switch ---------- */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  cursor: pointer;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+.switch-track {
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background 0.15s;
+  position: relative;
+}
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+.switch input:checked + .switch-track {
+  background: var(--accent);
+}
+.switch input:checked + .switch-track::after {
+  transform: translateX(14px);
+}
+.switch input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.switch input:disabled + .switch-track {
+  opacity: 0.5;
+}
+.switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+/* ---------- share dialog ---------- */
+.share-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.share-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.share-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+.share-icon-on {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.share-text {
+  flex: 1;
+  min-width: 0;
+}
+.share-title {
+  font-weight: 600;
+}
+.share-sub {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+.share-link {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 44px;
+}
+.share-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.share-note {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: var(--font-size-xs);
+}
+@media (max-width: 520px) {
+  .share-link {
+    padding-left: 0;
+  }
+}
+.share-link .copy-field-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

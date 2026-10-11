@@ -86,6 +86,34 @@ export interface FileInfo {
   createdBy: string;
 }
 
+/** A file's public view-only link (`GET/PUT /api/files/:id/share`). */
+export interface ShareLink {
+  enabled: boolean;
+  token?: string;
+  url?: string;
+  createdBy?: string | null;
+  createdAt?: string;
+  expiresAt?: string | null;
+}
+
+export interface ShareUpdate {
+  enabled: boolean;
+  /** Days until the link stops working; 0 = never; omit to keep the current expiry. */
+  expiresInDays?: number;
+  /** Issue a new token; the old link stops working immediately. */
+  regenerate?: boolean;
+}
+
+/** What's behind a public share link (no sign-in needed). */
+export interface SharedFileInfo {
+  fileId: string;
+  name: string;
+  workspaceName: string;
+  sharedBy: string | null;
+  updatedAt: string;
+  expiresAt: string | null;
+}
+
 export interface ApiToken {
   id: string;
   name: string;
@@ -374,6 +402,21 @@ export function fileSocketUrl(fileId: string): string {
   return `${proto}//${window.location.host}/api/files/${enc(fileId)}/ws`;
 }
 
+/** URLs behind a public share link. They work without signing in. */
+export const shareUrls = {
+  socket(token: string): string {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/api/share/${enc(token)}/ws`;
+  },
+  /** Prefix the engine appends asset ids to. */
+  assetBase: (token: string) => `/api/share/${enc(token)}/assets/`,
+  asset: (token: string, assetId: string) => `/api/share/${enc(token)}/assets/${enc(assetId)}`,
+  exportPng: (token: string, opts: PngExportOptions = {}) =>
+    withQuery(`/api/share/${enc(token)}/export.png`, { node: opts.node, page: opts.page, scale: opts.scale }),
+  exportSvg: (token: string, opts: ExportOptions = {}) =>
+    withQuery(`/api/share/${enc(token)}/export.svg`, { node: opts.node, page: opts.page }),
+};
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -469,6 +512,16 @@ const files = {
   versionPreviewUrl: (id: string, versionId: string) => `/api/files/${enc(id)}/versions/${enc(versionId)}/preview.svg`,
 };
 
+const share = {
+  /** The file's public link, if one is on. Any member can read it. */
+  get: (fileId: string) => request<ShareLink>('GET', `/api/files/${enc(fileId)}/share`),
+  /** Turn the link on/off, change its expiry or regenerate it (editors only). */
+  update: (fileId: string, body: ShareUpdate) => request<ShareLink>('PUT', `/api/files/${enc(fileId)}/share`, { body }),
+  /** Public: the file behind a link. */
+  info: (token: string) => request<SharedFileInfo>('GET', `/api/share/${enc(token)}`, { reportUnauthorized: false }),
+  urls: shareUrls,
+};
+
 const comments = {
   list: (fileId: string) => request<CommentThread[]>('GET', `/api/files/${enc(fileId)}/comments`),
   create: (fileId: string, c: NewComment) => request<{ id: string }>('POST', `/api/files/${enc(fileId)}/comments`, { body: c }),
@@ -507,6 +560,7 @@ export const api = {
   files,
   tokens,
   comments,
+  share,
   admin,
   assets: { url: assetUrl },
 };

@@ -150,6 +150,15 @@ fn tools() -> Value {
             "properties": { "file_id": file_id, "node_id": { "type": "string" }, "page_id": { "type": "string" } },
             "required": ["file_id"]
         })),
+        tool("share_file", "Create (or turn off) a public view-only link to a file, so anyone with the link can watch it live without an account. Returns the URL.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "enabled": { "type": "boolean", "description": "Default true; false turns the link off" },
+                "expires_in_days": { "type": "integer", "description": "Days until the link stops working; 0 = never. Omit to keep the current expiry (a new link never expires)." }
+            },
+            "required": ["file_id"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -364,6 +373,7 @@ impl Ctx {
             "save_version" => self.save_version(args).await,
             "list_comments" => self.list_comments(args).await,
             "list_components" => self.list_components(args).await,
+            "share_file" => self.share_file(args).await,
             "create_component" => self.create_component(args).await,
             "detach_instance" => self.detach_instance(args).await,
             "add_comment" => self.add_comment(args).await,
@@ -897,6 +907,31 @@ impl Ctx {
             )));
         }
         Ok(text_result(svg))
+    }
+
+    async fn share_file(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+        let days = args.get("expires_in_days").and_then(Value::as_u64).map(|d| d.min(3650) as u32);
+        let uid = self.user.id.clone();
+        let f2 = fid.clone();
+        let (old, row) = self
+            .st
+            .db
+            .call(move |c| crate::api_share::set_share(c, &uid, &f2, enabled, days, false))
+            .await
+            .map_err(err_msg)?;
+        if let Some(t) = old {
+            self.st.rooms.kick_share_if_open(&fid, &t).await;
+        }
+        Ok(text_result(match row {
+            Some((token, _, _, expires)) => format!(
+                "Anyone with this link can view the file live (no account needed){}: {}",
+                expires.map(|e| format!(", until {}", ts(e))).unwrap_or_default(),
+                crate::api_share::share_url(&self.base, &token)
+            ),
+            None => "Public link turned off.".to_string(),
+        }))
     }
 
     async fn list_components(&self, args: &Value) -> ToolResult {

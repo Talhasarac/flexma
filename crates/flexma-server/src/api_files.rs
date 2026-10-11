@@ -226,7 +226,7 @@ pub async fn thumbnail(State(st): State<AppState>, user: AuthUser, Path(id): Pat
         .into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct ExportQuery {
     node: Option<String>,
     page: Option<String>,
@@ -264,12 +264,22 @@ pub async fn export_svg(
 ) -> AppResult<Response> {
     let fid = id.clone();
     st.db.call(move |c| file_access(c, &user.id, &fid, Role::Viewer)).await?;
-    let room = st.rooms.get(&id).await?;
+    export_svg_response(&st, &id, q, None).await
+}
+
+/// SVG export of a file (access already checked). `share_token` makes image
+/// references resolvable for anonymous viewers.
+pub async fn export_svg_response(st: &AppState, id: &str, q: ExportQuery, share_token: Option<String>) -> AppResult<Response> {
+    let room = st.rooms.get(id).await?;
     let with_bg = q.background.unwrap_or(true);
     let svg = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
-            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Url)
+            let mode = match &share_token {
+                Some(t) => render::AssetMode::Shared(t),
+                None => render::AssetMode::Url,
+            };
+            render::export_svg(doc, &ids, if with_bg { bg } else { None }, mode)
                 .map(|(s, _)| s)
                 .ok_or_else(|| "nothing to export".to_string())
         })
@@ -286,7 +296,16 @@ pub async fn export_png(
 ) -> AppResult<Response> {
     let fid = id.clone();
     st.db.call(move |c| file_access(c, &user.id, &fid, Role::Viewer)).await?;
-    let room = st.rooms.get(&id).await?;
+    export_png_response(&st, &id, q, 8192).await
+}
+
+/// Rasterizing is memory-hungry (up to 4 bytes per pixel), so only a few
+/// PNG exports run at once; the rest wait their turn.
+static PNG_RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// PNG export of a file (access already checked), longest side ≤ `max_dim`.
+pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_dim: u32) -> AppResult<Response> {
+    let room = st.rooms.get(id).await?;
     let data_dir = st.cfg.data_dir.clone();
     let scale = q.scale.unwrap_or(2.0);
     let with_bg = q.background.unwrap_or(true);
@@ -299,7 +318,8 @@ pub async fn export_png(
         })
         .await?
         .map_err(AppError::bad_request)?;
-    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 8192))
+    let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
+    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, max_dim))
         .await
         .map_err(AppError::internal)?
         .map_err(AppError::bad_request)?;
@@ -345,10 +365,19 @@ pub async fn upload_asset(
 }
 
 pub async fn get_asset(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Response> {
+    let uid = user.id.clone();
+    serve_asset(&st, &id, move |c, ws| require_workspace(c, &uid, ws, Role::Viewer).map(|_| ())).await
+}
+
+/// Serve an uploaded image after `allow(conn, workspace_id)` approves access.
+pub async fn serve_asset<F>(st: &AppState, id: &str, allow: F) -> AppResult<Response>
+where
+    F: FnOnce(&rusqlite::Connection, &str) -> AppResult<()> + Send + 'static,
+{
     if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(AppError::not_found("asset"));
     }
-    let aid = id.clone();
+    let aid = id.to_string();
     let mime: String = st
         .db
         .call(move |c| {
@@ -358,11 +387,11 @@ pub async fn get_asset(State(st): State<AppState>, user: AuthUser, Path(id): Pat
                 })
                 .optional()?;
             let (ws, mime) = row.ok_or_else(|| AppError::not_found("asset"))?;
-            require_workspace(c, &user.id, &ws, Role::Viewer).map_err(|_| AppError::not_found("asset"))?;
+            allow(c, &ws).map_err(|_| AppError::not_found("asset"))?;
             Ok(mime)
         })
         .await?;
-    let bytes = tokio::fs::read(render::asset_path(&st.cfg.data_dir, &id))
+    let bytes = tokio::fs::read(render::asset_path(&st.cfg.data_dir, id))
         .await
         .map_err(|_| AppError::not_found("asset"))?;
     Ok((

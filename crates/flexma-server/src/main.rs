@@ -8,6 +8,7 @@ mod api_admin;
 mod api_auth;
 mod api_comments;
 mod api_files;
+mod api_share;
 mod api_tokens;
 mod api_versions;
 mod api_workspaces;
@@ -114,6 +115,13 @@ async fn main() {
         .route("/files/{id}/ws", get(ws::handler))
         .route("/files/{id}/versions", get(api_versions::list).post(api_versions::create))
         .route("/files/{id}/comments", get(api_comments::list).post(api_comments::create))
+        .route("/files/{id}/share", get(api_share::get).put(api_share::update))
+        .route("/share/{token}", get(api_share::info))
+        .route("/share/{token}/ws", get(ws::share_handler))
+        .route("/share/{token}/assets/{aid}", get(api_share::asset))
+        .route("/share/{token}/export.svg", get(api_share::export_svg))
+        .route("/share/{token}/export.png", get(api_share::export_png))
+        .route("/share/{token}/thumbnail.svg", get(api_share::thumbnail))
         .route("/comments/{id}", patch(api_comments::update).delete(api_comments::delete))
         .route("/files/{id}/versions/{vid}/preview.svg", get(api_versions::preview))
         .route("/files/{id}/versions/{vid}/restore", post(api_versions::restore))

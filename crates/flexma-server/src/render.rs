@@ -39,6 +39,8 @@ pub fn thumbnail_svg(doc: &Document) -> Option<String> {
 pub enum AssetMode<'a> {
     /// Reference assets by URL (for browsers).
     Url,
+    /// Reference assets through a public share link (`/api/share/{token}/assets/{id}`).
+    Shared(&'a str),
     /// Inline assets as data URIs (for rasterizing on the server).
     Inline(&'a Path),
 }
@@ -51,6 +53,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         }
         match &assets {
             AssetMode::Url => Some(format!("/api/assets/{id}")),
+            AssetMode::Shared(token) => Some(format!("/api/share/{token}/assets/{id}")),
             AssetMode::Inline(dir) => {
                 let bytes = std::fs::read(asset_path(dir, id)).ok()?;
                 let mime = sniff_mime(&bytes).unwrap_or("image/png");

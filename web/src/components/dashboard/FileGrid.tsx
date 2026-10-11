@@ -71,6 +71,7 @@ export function FileGrid({ files, loading, error, onRetry, showProject, empty, f
         ))}
       </ul>
       {menu.element}
+      {actions.element}
     </>
   );
 }

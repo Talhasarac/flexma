@@ -65,6 +65,35 @@ Roles: `owner` > `editor` > `viewer`. Viewers can open files read-only.
 
 `file = { id, name, projectId, projectName, workspaceId, role, createdAt, updatedAt, createdBy }`
 
+## Share links (public, view-only)
+
+One link per file. Anyone with it can watch the file live, inspect layers and
+export, without an account. Guests can't edit, comment or see comments.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/files/:id/share` | – | `share` (any member) |
+| PUT | `/api/files/:id/share` | `{ enabled, expiresInDays?, regenerate? }` | `share` (editors and owners) |
+
+`share = { enabled: false } | { enabled: true, token, url, createdBy, createdAt, expiresAt }`
+
+- `expiresInDays`: `0` means never. Leave it out to keep the current expiry; a new link never expires.
+- `regenerate: true` issues a new token and keeps the expiry. The old URL stops working at once.
+- Turning a link off or regenerating it disconnects everyone viewing through the old token.
+
+Public endpoints (no sign-in; `:token` is the 32-character link token):
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/share/:token` | `{ fileId, name, workspaceName, sharedBy, updatedAt, expiresAt }` |
+| GET (WS) | `/api/share/:token/ws` | the multiplayer socket, joined as a read-only `Guest` peer (`isGuest: true`) |
+| GET | `/api/share/:token/export.svg`, `/export.png` | same query parameters as the file exports |
+| GET | `/api/share/:token/thumbnail.svg` | preview of the first page (cacheable for 60 s) |
+| GET | `/api/share/:token/assets/:assetId` | image bytes for the file's workspace |
+
+A dead, expired or unknown token returns 404. The web app serves the viewer at `/s/:token`
+and sends signed-in workspace members on to the full editor.
+
 ## Version history
 
 | Method | Path | Body | Response |
@@ -110,13 +139,13 @@ Server → client:
 - `{ t: "ops", from: clientId, batch: n, ops: [op] }` — `from` equal to your clientId means it is the ack of your batch `n`
 - `{ t: "reject", batch: n, error }` (followed by corrective `ops` from `"server"`)
 - `{ t: "presence", peer }`, `{ t: "leave", clientId }`
-- `{ t: "error", error }`
+- `{ t: "error", error, fatal? }` (`fatal`: stop reconnecting, e.g. the share link was turned off)
 
 Client → server:
 - `{ t: "ops", batch: n, ops: [op] }`
 - `{ t: "presence", cursor: [x, y] | null, selection: [ids], page: pageId }`
 
-`peer = { clientId, userId, name, color, cursor, selection, page, isAgent }`
+`peer = { clientId, userId, name, color, cursor, selection, page, isAgent, isGuest }`
 `op = { op: "create", node } | { op: "update", id, props } | { op: "delete", id }`
 
 ## MCP

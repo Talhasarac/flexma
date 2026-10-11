@@ -3,7 +3,7 @@
 // engine version counter so components re-render only when their slice changes.
 import { useSyncExternalStore } from 'react';
 import type { FlexmaEditor } from '../engine';
-import { api, type CommentThread } from '../lib/api';
+import { api, exportPngUrl, exportSvgUrl, shareUrls, type CommentThread, type ExportOptions, type PngExportOptions } from '../lib/api';
 import type { ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, Tool } from './types';
 
 type Listener = () => void;
@@ -29,6 +29,8 @@ export interface ServerMessage {
 export class EditorStore {
   readonly engine: FlexmaEditor;
   readonly fileId: string;
+  /** Set when the file was opened through a public view-only link. */
+  readonly shareToken: string | null;
   private listeners = new Set<Listener>();
   private socket: WebSocket | null = null;
   private retry = 0;
@@ -70,9 +72,26 @@ export class EditorStore {
   private notifyQueued = false;
   private flushTimer = 0;
 
-  constructor(engine: FlexmaEditor, fileId: string) {
+  constructor(engine: FlexmaEditor, fileId: string, shareToken: string | null = null) {
     this.engine = engine;
     this.fileId = fileId;
+    this.shareToken = shareToken;
+    // Guests have no session cookie, so images load through the link instead.
+    if (shareToken) engine.set_asset_base(shareUrls.assetBase(shareToken));
+  }
+
+  // ---------------- URLs (work for members and link guests) ----------------
+
+  exportPngUrl(opts: PngExportOptions = {}) {
+    return this.shareToken ? shareUrls.exportPng(this.shareToken, opts) : exportPngUrl(this.fileId, opts);
+  }
+
+  exportSvgUrl(opts: ExportOptions = {}) {
+    return this.shareToken ? shareUrls.exportSvg(this.shareToken, opts) : exportSvgUrl(this.fileId, opts);
+  }
+
+  assetUrl(assetId: string) {
+    return this.shareToken ? shareUrls.asset(this.shareToken, assetId) : api.assets.url(assetId);
   }
 
   // ---------------- subscription ----------------
@@ -148,6 +167,7 @@ export class EditorStore {
   getOpenThread = () => this.openThread;
 
   async refreshComments() {
+    if (this.shareToken) return; // comments are for workspace members only
     try {
       this.comments = await api.comments.list(this.fileId);
       this.notify();
@@ -157,7 +177,7 @@ export class EditorStore {
   }
 
   setCommentMode(on: boolean) {
-    if (this.commentMode === on) return;
+    if (this.commentMode === on || (on && this.shareToken)) return;
     this.commentMode = on;
     if (on) this.engine.set_tool('select');
     else if (this.openThread === 'draft') this.openThread = null;

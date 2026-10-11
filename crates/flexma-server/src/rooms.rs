@@ -39,6 +39,8 @@ pub struct Peer {
     pub selection: Vec<String>,
     pub page: Option<String>,
     pub is_agent: bool,
+    /// Anonymous viewer via a public share link.
+    pub is_guest: bool,
 }
 
 pub struct JoinInfo {
@@ -46,6 +48,8 @@ pub struct JoinInfo {
     pub name: String,
     pub color: String,
     pub role: Role,
+    /// Set for anonymous viewers who came in through a public share link.
+    pub share_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -122,6 +126,8 @@ enum Cmd {
     Flush { reply: oneshot::Sender<()> },
     /// Send a message to every connected client (e.g. "comments changed").
     Broadcast { msg: Msg },
+    /// Disconnect guests who joined through a share link that was turned off.
+    KickShare { token: String },
     /// Stop the actor. `discard` skips the final save (used when the stored
     /// document was replaced underneath, e.g. a version restore).
     Shutdown { notify: Option<String>, discard: bool },
@@ -178,6 +184,11 @@ impl RoomHandle {
         rx.await.map_err(|_| closed())
     }
 
+    /// Disconnect guests that joined through `token`.
+    pub async fn kick_share(&self, token: String) {
+        let _ = self.tx.send(Cmd::KickShare { token }).await;
+    }
+
     /// Notify every connected client.
     pub async fn broadcast(&self, msg: Value) {
         let _ = self.tx.send(Cmd::Broadcast { msg: Arc::from(msg.to_string()) }).await;
@@ -202,6 +213,14 @@ impl RoomHandle {
 }
 
 impl Rooms {
+    /// Kick share-link guests from a file's room, if it is open.
+    pub async fn kick_share_if_open(&self, file_id: &str, token: &str) {
+        let h = self.rooms.lock().unwrap().get(file_id).cloned();
+        if let Some(h) = h {
+            h.kick_share(token.to_string()).await;
+        }
+    }
+
     /// Notify clients of a file only if its room is open (no need to load it).
     pub async fn notify_if_open(&self, file_id: &str, msg: Value) {
         let h = self.rooms.lock().unwrap().get(file_id).cloned();
@@ -344,6 +363,7 @@ struct Client {
     out: mpsc::Sender<Msg>,
     peer: Peer,
     role: Role,
+    share_token: Option<String>,
 }
 
 struct Room {
@@ -436,6 +456,7 @@ impl Room {
                     selection: vec![],
                     page: None,
                     is_agent: false,
+                    is_guest: info.share_token.is_some(),
                 };
                 let init = json!({
                     "t": "init",
@@ -449,7 +470,7 @@ impl Room {
                     return;
                 }
                 self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
-                self.clients.insert(client_id.clone(), Client { out, peer, role: info.role });
+                self.clients.insert(client_id.clone(), Client { out, peer, role: info.role, share_token: info.share_token });
                 self.stats.clients.store(self.clients.len(), Ordering::Relaxed);
                 let _ = reply.send(client_id);
             }
@@ -498,6 +519,7 @@ impl Room {
                         selection: sel,
                         page,
                         is_agent: true,
+                        is_guest: false,
                     };
                     self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
                     self.agents.insert(agent.key, (peer, Instant::now()));
@@ -509,6 +531,18 @@ impl Room {
                 f(&self.doc, &peers);
             }
             Cmd::Broadcast { msg } => self.broadcast(msg, None),
+            Cmd::KickShare { token } => {
+                let gone: Vec<String> =
+                    self.clients.iter().filter(|(_, c)| c.share_token.as_deref() == Some(token.as_str())).map(|(id, _)| id.clone()).collect();
+                let bye = msg(json!({ "t": "error", "error": "This share link is no longer active.", "fatal": true }));
+                for id in gone {
+                    if let Some(c) = self.clients.remove(&id) {
+                        let _ = c.out.try_send(bye.clone());
+                    }
+                    self.broadcast(msg(json!({ "t": "leave", "clientId": id })), None);
+                }
+                self.stats.clients.store(self.clients.len(), Ordering::Relaxed);
+            }
             Cmd::Shutdown { .. } | Cmd::Flush { .. } => {}
         }
     }

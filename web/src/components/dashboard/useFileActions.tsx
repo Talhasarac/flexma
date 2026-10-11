@@ -1,24 +1,26 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CopyPlus, ExternalLink, FolderInput, Link2, PencilLine, SquareArrowOutUpRight, Trash } from 'lucide-react';
+import { CopyPlus, ExternalLink, FolderInput, Link2, PencilLine, Share2, SquareArrowOutUpRight, Trash } from 'lucide-react';
 import { api, type FileInfo } from '../../lib/api';
 import { copyText } from '../../lib/clipboard';
 import { useDashboard } from '../../lib/dashboard';
 import { canEdit } from '../../lib/format';
 import { useDialogs } from '../Dialogs';
 import type { MenuEntry } from '../Menu';
+import { ShareDialog } from '../ShareDialog';
 import { useToast } from '../Toast';
 
 export function fileUrl(file: Pick<FileInfo, 'id'>): string {
   return `/file/${file.id}`;
 }
 
-/** Rename / duplicate / move / delete flows for file cards. */
+/** Rename / duplicate / move / share / delete flows for file cards. Render `element`. */
 export function useFileActions() {
   const navigate = useNavigate();
   const toast = useToast();
   const dialogs = useDialogs();
   const { projects, notifyFilesChanged } = useDashboard();
+  const [sharing, setSharing] = useState<FileInfo | null>(null);
 
   const open = useCallback((file: FileInfo) => navigate(fileUrl(file)), [navigate]);
 
@@ -137,6 +139,7 @@ export function useFileActions() {
           onSelect: () => window.open(fileUrl(file), '_blank', 'noopener'),
         },
         { label: 'Copy link', icon: <Link2 size={14} />, onSelect: () => void copyLink(file) },
+        { label: 'Share…', icon: <Share2 size={14} />, onSelect: () => setSharing(file) },
       ];
       if (editable) {
         items.push(
@@ -153,5 +156,7 @@ export function useFileActions() {
     [copyLink, duplicate, move, open, remove, rename],
   );
 
-  return { open, rename, duplicate, move, moveTo, copyLink, remove, menuItems };
+  const element = sharing && <ShareDialog open onClose={() => setSharing(null)} file={sharing} />;
+
+  return { open, rename, duplicate, move, moveTo, copyLink, remove, menuItems, element };
 }

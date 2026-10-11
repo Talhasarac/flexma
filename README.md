@@ -30,6 +30,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 **Collaboration**
 - Real-time multiplayer with live cursors, selections and presence.
 - Shared workspaces with owner, editor and viewer roles, invite links, projects and files.
+- Public view-only share links: anyone with the link can watch a file live and export it, without an account. Links can expire, be reset or be turned off.
 
 **AI agents**
 - A built-in MCP server lets Claude Code, Codex or any MCP client list, read, create, edit and screenshot designs live.

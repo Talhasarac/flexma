@@ -2,7 +2,6 @@
 // follow the component and keep their own overrides.
 import { useMemo, useState } from 'react';
 import { Component as ComponentIcon, Crosshair, Plus } from 'lucide-react';
-import { exportSvgUrl } from '../lib/api';
 import { useComponents, useUi, type EditorStore } from './store';
 
 export function AssetsPanel({ store }: { store: EditorStore }) {
@@ -51,7 +50,7 @@ export function AssetsPanel({ store }: { store: EditorStore }) {
                       store.poll();
                     }}
                   >
-                    <img src={`${exportSvgUrl(store.fileId, { node: c.id })}&background=false&v=${stamp}`} alt="" loading="lazy" />
+                    <img src={`${store.exportSvgUrl({ node: c.id })}&background=false&v=${stamp}`} alt="" loading="lazy" />
                   </button>
                   <div className="asset-meta">
                     <span className="asset-name">{c.name}</span>
