@@ -124,6 +124,7 @@ async fn main() {
 
     let rooms = rooms::Rooms::new(db.clone());
     let state = state::AppState { cfg: Arc::new(cfg.clone()), db, rooms: rooms.clone() };
+    tokio::spawn(api_files::backfill_image_hashes(state.clone()));
 
     let api = Router::new()
         .route("/setup", get(api_auth::setup))

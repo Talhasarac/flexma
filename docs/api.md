@@ -60,7 +60,7 @@ Roles: `owner` > `editor` > `viewer`. Viewers can open files read-only.
 | GET | `/api/files/:id/export.svg?node=<id>&page=<id>` | – | SVG export |
 | GET | `/api/files/:id/export.png?node=<id>&page=<id>&scale=2` | – | PNG export |
 | POST | `/api/files/:id/assets` | raw image bytes, `Content-Type: image/*` | `{ id, url, width, height, mime }` |
-| POST | `/api/image-uploads/:token` | raw image bytes, no sign-in | asset + `remainingUploads` + a ready-made `node`: upload through a link from the MCP `upload_image` tool (same rules as font upload links) |
+| POST | `/api/image-uploads/:token` | raw image bytes, no sign-in | asset + `remainingUploads` + a ready-made `node` (`reused: true` when the workspace already had the same picture; its asset id comes back): upload through a link from the MCP `upload_image` tool (same rules as font upload links) |
 | POST | `/api/node-uploads/:token` | JSON array of node specs (or `{nodes:[…]}`), no sign-in | `{ created, updated, deleted, matched, remainingUploads, nodes: [{id, name, type}], result }` (`nodes` = the resulting top-level nodes, in order; `matched` = top-level specs whose `key` updated an existing node): creates a node tree like `create_nodes`, or updates the nodes an earlier upload made from specs with the same `key`, as the agent that asked for the link via MCP `upload_nodes` (up to 50,000 nodes per batch) |
 | GET | `/api/assets/:id` | – | image bytes |
 | GET (WS) | `/api/files/:id/ws` | – | multiplayer socket, see below |

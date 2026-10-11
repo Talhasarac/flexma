@@ -396,6 +396,26 @@ fn check_image(st: &AppState, body: &[u8]) -> AppResult<&'static str> {
 /// Save an image to a workspace's assets (access already checked).
 async fn store_image(st: &AppState, ws: &str, file_id: &str, user_id: &str, mime: &str, body: &[u8]) -> AppResult<Value> {
     let (w, h) = imagesize::blob_size(body).map(|s| (s.width as i64, s.height as i64)).unwrap_or((0, 0));
+    // The same picture again (a re-export, a second upload) reuses its asset.
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(body))
+    };
+    let (ws2, hash2) = (ws.to_string(), hash.clone());
+    let existing: Option<(String, String)> = st
+        .db
+        .call(move |c| {
+            Ok(c.query_row("SELECT id, mime FROM assets WHERE workspace_id = ?1 AND sha256 = ?2 ORDER BY created_at LIMIT 1", params![ws2, hash2], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?)
+        })
+        .await?;
+    if let Some((aid, mime)) = existing {
+        if render::asset_path(&st.cfg.data_dir, &aid).exists() {
+            return Ok(json!({ "id": aid, "url": format!("/api/assets/{aid}"), "width": w, "height": h, "mime": mime, "reused": true }));
+        }
+    }
     let aid = new_id();
     let dir = st.cfg.data_dir.join("assets");
     tokio::fs::create_dir_all(&dir).await.map_err(AppError::internal)?;
@@ -405,14 +425,44 @@ async fn store_image(st: &AppState, ws: &str, file_id: &str, user_id: &str, mime
     st.db
         .call(move |c| {
             c.execute(
-                "INSERT INTO assets (id, workspace_id, file_id, mime, width, height, size, created_by, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![aid2, ws, fid, mime2, w, h, size, uid, now()],
+                "INSERT INTO assets (id, workspace_id, file_id, mime, width, height, size, created_by, created_at, sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![aid2, ws, fid, mime2, w, h, size, uid, now(), hash],
             )?;
             Ok(())
         })
         .await?;
     Ok(json!({ "id": aid, "url": format!("/api/assets/{aid}"), "width": w, "height": h, "mime": mime }))
+}
+
+/// Hash images uploaded before content hashes existed, a few at a time, so
+/// they can be reused too.
+pub async fn backfill_image_hashes(st: AppState) {
+    loop {
+        let batch: Vec<String> = match st
+            .db
+            .call(|c| {
+                let mut q = c.prepare("SELECT id FROM assets WHERE sha256 IS NULL LIMIT 50")?;
+                let ids = q.query_map([], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?;
+                Ok(ids)
+            })
+            .await
+        {
+            Ok(b) if !b.is_empty() => b,
+            _ => return,
+        };
+        for aid in batch {
+            let hash = match tokio::fs::read(render::asset_path(&st.cfg.data_dir, &aid)).await {
+                Ok(bytes) => {
+                    use sha2::{Digest, Sha256};
+                    hex::encode(Sha256::digest(&bytes))
+                }
+                // Missing file: mark it so it isn't retried (and never matches).
+                Err(_) => "missing".to_string(),
+            };
+            let _ = st.db.call(move |c| Ok(c.execute("UPDATE assets SET sha256 = ?1 WHERE id = ?2", params![hash, aid])?)).await;
+        }
+    }
 }
 
 /// `POST /api/image-uploads/{token}`: one image per request, no sign-in (the

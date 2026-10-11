@@ -196,6 +196,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE files ADD COLUMN thumbnail_version INTEGER;
     UPDATE files SET thumbnail = NULL;
     "#,
+    // Image content hashes, so uploading the same picture again reuses it.
+    r#"
+    ALTER TABLE assets ADD COLUMN sha256 TEXT;
+    CREATE INDEX assets_sha256 ON assets(workspace_id, sha256);
+    "#,
 ];
 
 impl Db {
