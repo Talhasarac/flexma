@@ -29,6 +29,8 @@ cargo run -p flexma-server                   # http://localhost:8080 (serves web
   - Last writer wins per property.
 - Instance children are derived state. `flexma_doc::components::sync_instances` expands them on every replica, with ids `instanceId~sourceId`, so they are never stored or sent.
   - Ops aimed at derived nodes must go through `components::route_ops`, which turns them into `overrides` updates on the instance. Both `Editor::apply_local` and the server do this.
+- Shared styles are derived state too. STYLE nodes live at the document root (`Document::pages()` lists only pages), and layers link to them with `fillStyleId` / `strokeStyleId` / `textStyleId`. `flexma_doc::styles::sync_styles` copies style values in on every replica after `components::sync_instances`.
+  - Ops go through `styles::route_ops` before `components::route_ops`, so editing a styled prop directly detaches that style.
 - Auto layout (`flexma_doc::layout`) is derived state. Every replica recomputes it locally after applying ops, and it is never sent as ops.
 - Sibling order uses fractional-index strings (`index`); ties are broken by node id.
 - Local edits go through `Editor::apply_local`, which records undo, queues the op for sync and re-runs layout. Remote ops go through `apply_remote`.

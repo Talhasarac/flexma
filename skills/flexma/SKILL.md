@@ -28,6 +28,7 @@ The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexm
 
 1. **Find the file.** Use `list_workspaces`, then `list_files` (filter by `workspace_id` or `project_id`). If the user gave a link like `https://host/file/<id>`, the id is the last path segment. Create a new file with `create_file` when asked, and give the user the link it returns.
 2. **Look before you touch.** Call `get_file_tree` to see the pages and what is already there. Use `node_id` and `depth` to drill into big files. If the user says "this", "the selected…" or "here", call `get_selection` to find out what they have selected right now.
+   - In an existing design, call `audit_design` and `list_styles` first, then reuse its colors, type styles, spacing and components instead of inventing new values.
 3. **Build in sections.** Make one `create_nodes` call per meaningful chunk (a screen shell, a nav bar, a hero, a card grid), with nested `children`. That is atomic, fast, and appears to collaborators as one step. Leave out `x`/`y` on top-level nodes to auto-place new work beside existing content, so you never cover someone's work.
 4. **Check your work visually.** Call `get_screenshot` on the frame you built and actually look at it:
    - Is the alignment right?
@@ -35,8 +36,8 @@ The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexm
    - Is there enough contrast, and is spacing consistent?
    - Does the hierarchy read clearly?
 
-   Fix problems with `update_nodes`, then check again. Do at least one screenshot pass for anything non-trivial.
-5. **Checkpoint before big changes.** Before redesigning, deleting or restructuring existing work, call `save_version` with a clear label. People can then roll back from Version history.
+   Fix problems with `update_nodes`, then check again. Do at least one screenshot pass for anything non-trivial. `audit_design` on your frame catches contrast, off-grid spacing and off-scale type that are easy to miss in a screenshot.
+5. **Checkpoint before big changes.** Before redesigning, deleting or restructuring existing work, call `save_version` with a clear label. People can then roll back from Version history. If one of your own steps went wrong, `undo_agent_changes` reverses your last tool calls (people's later edits are kept).
 6. **Refine, don't rebuild.** Prefer `update_nodes` (change props), `move_nodes` (re-parent or reorder) and `duplicate_nodes` over deleting and recreating. That keeps the ids collaborators and comments refer to.
 7. **Report back.** Say briefly what you made, where it is (the page and frame name), and the file link.
 
@@ -56,6 +57,21 @@ Anything that repeats (buttons, inputs, cards, nav items, list rows, avatars) sh
 3. **Customize one instance.** `update_nodes` works on an instance's inner layers through their ids from `get_file_tree` (they look like `instanceId~layerId`). These edits become overrides on that instance. Deleting an inner layer hides it.
 4. **Change all instances.** Edit the main component's layers. Overrides survive.
 5. **Discover existing ones.** Call `list_components` before building UI in an existing file, and reuse what's there. Call `detach_instance` only when a copy truly needs to diverge.
+
+## Styles
+
+Shared color and text styles keep a design consistent: change a style once and every layer using it updates, for everyone.
+
+- **See them:** `list_styles`. Prefer existing styles over raw values.
+- **Make them:** `create_styles` with `{type:"color", name:"Brand/Primary", color:"#6d5dfc"}` or `{type:"text", name:"Heading/H1", font:"Inter", size:40, weight:800, lineHeight:48}`. Group with `/`. The same name again updates the style.
+- **Use them:** `fillStyle`, `strokeStyle` or `textStyle` (a style's name or id) in `create_nodes` / `update_nodes`. `null` detaches. Setting `fill` (or a font prop) directly on a styled layer detaches that style too.
+- **Change them:** `update_styles` with `{style:"Brand/Primary", color:"#e11d48"}` (add `rename` to rename). `delete_styles` unlinks layers, which keep their look.
+
+## Icons, SVG and data
+
+- **Icons:** `search_icons` finds icons in the built-in Lucide set (about 1,900 outline icons) by name or meaning. Place one with `{ "type": "icon", "icon": "search", "size": 24, "color": "#111111" }` anywhere in a `create_nodes` tree, e.g. inside a button's auto-layout row. Never draw icons by hand.
+- **SVG:** `import_svg` turns SVG markup (a logo, illustration, chart or diagram you wrote or found) into editable vector layers. Give `width` to scale it; `flatten: true` merges same-styled shapes into one layer.
+- **Data:** `fill_with_data` makes one copy of a component (or any layer) per row: `{ component: "User card", columns: 3, rows: [{ "Name": "Ada", "Role": "Engineer", "Avatar": { "image": "<asset id>" } }] }`. Keys are layer names; strings set text, objects set props, `null` hides a layer, `_self` styles the copy. Use it for lists, tables, feeds and grids with realistic content.
 
 ## Images
 
@@ -115,6 +131,12 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `create_component` | Turn a frame or group into a reusable component |
 | `detach_instance` | Turn an instance into a plain, independent frame |
 | `save_version` | Checkpoint the file in its version history before risky edits |
+| `undo_agent_changes` | Undo your own last tool calls in a file (people's later edits are kept) |
+| `audit_design` | Colors, type, spacing, radii and fonts in use, plus contrast and consistency problems |
+| `list_styles`, `create_styles`, `update_styles`, `delete_styles` | Shared color and text styles |
+| `search_icons` | Find Lucide icons; place with `{type:"icon", icon:"<name>"}` |
+| `import_svg` | SVG markup → editable vector layers |
+| `fill_with_data` | One component instance or layer copy per data row |
 | `list_fonts` | See the workspace's fonts (uploaded and Google Fonts) and their weights |
 | `add_font` | Add a Google Fonts family to the workspace so everyone sees it |
 | `upload_font` | Upload the user's own .ttf/.otf files: returns a 15-minute `curl` upload link |

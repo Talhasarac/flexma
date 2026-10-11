@@ -22,6 +22,10 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `strokeAlign` | `INSIDE` \| `CENTER` \| `OUTSIDE` | `CENTER` | |
 | `cornerRadius` / `radius` / `borderRadius` | number \| [tl,tr,br,bl] | 0 | An array sets `cornerRadii` (each corner separately). |
 | `effects` / `shadow` | effect[] \| shadow object | none | See Effects. |
+| `fillStyle`, `strokeStyle` | style name or id \| null | none | Link to a shared color style (see `list_styles`); null detaches. |
+| `fillRule` | `NONZERO` \| `EVENODD` | `NONZERO` | For vectors with holes. |
+| `strokeCap` / `linecap` | `NONE` (butt) \| `ROUND` \| `SQUARE` | flat (round for lines) | Stroke ends. |
+| `strokeJoin` / `linejoin` | `MITER` \| `ROUND` \| `BEVEL` | `MITER` | Stroke corners. |
 | `flipX`, `flipY` | bool | false | |
 | `description` | string | "" | Notes for collaborators and agents. |
 | `absolute` / `layoutAbsolute` | bool | false | Take the node out of its auto-layout parent's flow. |
@@ -94,6 +98,7 @@ Sizing rules:
 | `letterSpacing` | px |
 | `italic` | bool |
 | `textDecoration` | `UNDERLINE`, `STRIKETHROUGH` or `null` |
+| `textStyle` | Link to a shared text style by name or id (sets font, size, weight, line height, letter spacing); null detaches. |
 | `textAutoResize` | `WIDTH_AND_HEIGHT` (default: grows with the text), `HEIGHT` (fixed width, wraps; the default once you give a width), `NONE` (fixed box) |
 
 For paragraphs, give the text a width (a number, or `"fill"` inside auto layout) so it wraps.
@@ -110,6 +115,13 @@ For paragraphs, give the text a width (a number, or `"fill"` inside auto layout)
 - **Editing.**
   - Updating a layer inside an instance stores an override; deleting one hides it.
   - Moving or reparenting layers inside an instance isn't allowed. Change the component instead.
+
+## ICON
+
+`{ "type": "icon", "icon": "shopping-cart", "size": 24, "color": "#111111", "strokeWidth": 2 }`
+
+- `icon`: a Lucide icon name from `search_icons` (spaces work: "arrow right").
+- Becomes a frame of `size`×`size` holding one vector with round caps and joins. Other props (x, y, name, opacity…) apply to the frame.
 
 ## IMAGE
 

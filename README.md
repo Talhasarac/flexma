@@ -26,6 +26,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Comments pinned to the canvas or to layers, with threads, replies and resolve. Agents can read and resolve them too.
 - Components and instances, with overrides, nested instances, an Assets panel, detach, and "go to main component". Edits to a main component update every instance live, for people and agents alike.
 - Workspace fonts: upload .ttf/.otf files or add any of the ~1,950 Google Fonts families (served by your own server, not Google). Everyone in the workspace, share-link viewers and exports get the same fonts, and missing fonts are flagged with one-click fixes.
+- Shared color and text styles: change one and every layer using it updates, for everyone.
 - Export to PNG and SVG.
 
 **Collaboration**
@@ -36,6 +37,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 **AI agents**
 - A built-in MCP server lets Claude Code, Codex or any MCP client list, read, create, edit and screenshot designs live.
 - Unlimited connections.
+- Agents can upload images and fonts, place any of 1,900 built-in icons, import SVG as editable vectors, fill components with data, audit a design for contrast and consistency, manage shared styles, and undo their own changes.
 - OAuth browser sign-in, like Figma's hosted MCP, plus API tokens for headless agents.
 - The Flexma skill teaches agents the platform and good design practice. It installs into Claude Code and Codex with one command.
 
