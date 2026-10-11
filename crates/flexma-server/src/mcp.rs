@@ -41,7 +41,7 @@ fn tools() -> Value {
     let file_id = json!({ "type": "string", "description": "File id" });
     let node_spec = json!({
         "type": "object",
-        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|NONE), gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip (true|false|\"alpha\": clip to the fill's alpha, like a Unity Mask), hideFill (mask without drawing the fill), children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing, wrap (false: only newlines break), overflow (VISIBLE|CLIP|ELLIPSIS|TRUNCATE, for fixed boxes). LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT', tint?:'#hex' (multiply), slice?: 9-slice insets in image px, filled?: {method: HORIZONTAL|VERTICAL|RADIAL_90|RADIAL_180|RADIAL_360, amount: 0..1, origin, clockwise} like Unity's Filled image}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors). Shorthand types: {type:'image', asset:'<id from upload_image>'} (sized from the image), {type:'icon', icon:'<name from search_icons>', size, color}, {type:'instance', component:'<name>'}. Shared styles: fillStyle / strokeStyle / textStyle: '<style name>' (see list_styles); a style wins over raw values given with it.",
+        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|NONE), gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip (true|false|\"alpha\": clip to the fill's alpha, like a Unity Mask), hideFill (mask without drawing the fill), children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing, wrap (false: only newlines break), overflow (VISIBLE|CLIP|ELLIPSIS|TRUNCATE, for fixed boxes). LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT', tint?:'#hex' (multiply), slice?: 9-slice insets in image px, filled?: {method: HORIZONTAL|VERTICAL|RADIAL_90|RADIAL_180|RADIAL_360, amount: 0..1, origin, clockwise} like Unity's Filled image}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors). Shorthand types: {type:'image', asset:'<id from upload_image>'} (sized from the image), {type:'icon', icon:'<name from search_icons>', size, color}, {type:'instance', component:'<name>'}. Shared styles: fillStyle / strokeStyle / textStyle: '<style name>' (see list_styles); a style wins over raw values given with it. key: a stable external id; a top-level spec whose key matches an existing node updates it (and its children, matched by key) in place.",
         "properties": { "type": { "type": "string" }, "children": { "type": "array", "items": { "type": "object" } } },
         "required": ["type"],
         "additionalProperties": true
@@ -279,7 +279,7 @@ fn tools() -> Value {
             },
             "required": ["file_id", "styles"]
         })),
-        tool("upload_nodes", "Create a large node tree from a JSON file instead of pasting it into create_nodes (exports of many frames, generated layouts). Returns a curl command with a short-lived upload link; POST a JSON array of node specs (the same format as create_nodes' nodes) or {\"nodes\": [...]}, one batch per request.", json!({
+        tool("upload_nodes", "Create a large node tree from a JSON file instead of pasting it into create_nodes (exports of many frames, generated layouts). Returns a curl command with a short-lived upload link; POST a JSON array of node specs (the same format as create_nodes' nodes) or {\"nodes\": [...]}, one batch per request. Give nodes a stable 'key' (e.g. a Unity object path) and re-uploading updates the same nodes in place instead of adding copies.", json!({
             "type": "object",
             "properties": {
                 "file_id": file_id,
@@ -756,14 +756,22 @@ impl Ctx {
                 n += 1;
                 format!("{prefix}:{n}")
             };
-            let (ops, top) = build_create_ops(tx.doc, &parent, &specs, index, &mut gen)?;
-            let count = ops.len();
-            let errs = tx.apply_all(ops);
+            // Specs with a `key` that an earlier upload created update those nodes.
+            let up = flexma_doc::upsert::build_upsert_ops(tx.doc, &parent, &specs, index, &mut gen)?;
+            let top = up.top.clone();
+            let errs = tx.apply_all(up.ops);
             if !errs.is_empty() {
                 return Err(format!("some nodes could not be created: {errs:?}"));
             }
             tx.relayout();
-            let mut out = format!("Created {count} node(s) in {parent}:\n");
+            let mut out = if up.matched > 0 {
+                format!(
+                    "Updated {} existing top-level node(s) by key in {parent}: {} node(s) changed, {} created, {} deleted:\n",
+                    up.matched, up.updated, up.created, up.deleted
+                )
+            } else {
+                format!("Created {} node(s) in {parent}:\n", up.created)
+            };
             for id in top.iter().take(if depth == 0 { 200 } else { usize::MAX }) {
                 outline(tx.doc, id, 0, depth, &mut out);
             }
@@ -776,7 +784,7 @@ impl Ctx {
                 .filter_map(|id| tx.doc.get(id))
                 .map(|n| json!({ "id": n.id, "name": n.name, "type": n.kind.as_str() }))
                 .collect();
-            Ok(json!({ "text": out, "nodes": nodes }))
+            Ok(json!({ "text": out, "nodes": nodes, "created": up.created, "updated": up.updated, "deleted": up.deleted, "matched": up.matched }))
         })
         .await
         .map_err(err_msg)?
@@ -1280,6 +1288,7 @@ impl Ctx {
                 for c in nodes {
                     let mut c2 = c.clone();
                     c2.id = mapping[&c.id].clone();
+                    c2.key = None;
                     if c.id == *id {
                         c2.index = next_idx.clone();
                         c2.x += dx.unwrap_or(n.width + 40.0);
@@ -2033,6 +2042,10 @@ fn place_on_page(doc: &Document, parent: &str, specs: &mut [Value]) {
         if o.contains_key("x") || o.contains_key("y") || o.contains_key("x1") {
             continue;
         }
+        // Re-uploads keep the node where it is.
+        if o.get("key").and_then(Value::as_str).is_some_and(|k| flexma_doc::upsert::find_by_key(doc, k).is_some()) {
+            continue;
+        }
         o.insert("x".into(), json!(x));
         o.insert("y".into(), json!(y));
         let w = o.get("width").or_else(|| o.get("w")).and_then(Value::as_f64).unwrap_or(400.0);
@@ -2588,7 +2601,10 @@ pub async fn upload_nodes_with_link(
     let ctx = Ctx { base: st.base_url(&headers), st, user };
     match ctx.create_specs_raw(&file_id, parent_id, index, specs, String::new(), 0).await {
         Ok(v) => axum::Json(json!({
-            "created": total,
+            "created": v["created"],
+            "updated": v["updated"],
+            "deleted": v["deleted"],
+            "matched": v["matched"],
             "remainingUploads": grant.remaining,
             "nodes": v["nodes"],
             "result": v["text"],

@@ -192,6 +192,7 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
 - Images and fonts: upload files with `upload_image` / `upload_font` (run the `curl` command they return); don't paste file contents into tool calls.
 - Big trees (an exported game UI, hundreds of frames): write the specs to a JSON file and send it with `upload_nodes` instead of pasting huge `create_nodes` payloads. Each batch is one undoable step; split very large exports by screen.
+- Re-exports: give every node a stable `key` (e.g. its Unity object path). Uploading again then updates the same nodes in place (ids, comments and people's additions survive) instead of adding copies. Don't delete and recreate screens.
 - Fixed text boxes (TextMeshPro rects): give `width` and `height` with `overflow` (`CLIP`, `ELLIPSIS` or `TRUNCATE`); `wrap: false` keeps each paragraph on one line.
 - Text outlines: give TEXT a `stroke`, `strokeWeight` and `strokeAlign` (`OUTSIDE` keeps the letters' fill intact; `CENTER` matches TextMeshPro outlines). They render in the editor and in exports.
 - Rendering limits: drop shadows on text, and shadow `spread`, show in exports and screenshots differently from the editor (the editor shadows a frame's box, exports shadow its painted content). Prefer simple shadows for things that must match everywhere. Without a real picture, use a neutral placeholder rectangle named "Image: …".

@@ -28,6 +28,7 @@ pub mod path;
 pub mod styles;
 pub mod svg;
 pub mod text;
+pub mod upsert;
 
 pub use color::Color;
 pub use doc::{DocSnapshot, Document};

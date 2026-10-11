@@ -260,6 +260,9 @@ define_node! {
     overrides: serde_json::Map<String, serde_json::Value> = serde_json::Map::new() => "overrides",
     /// Free-form notes, handy for agents to leave intent or component docs.
     description: String = String::new() => "description",
+    /// A stable id from outside Flexma (e.g. a Unity object), so a later upload
+    /// updates this node in place instead of adding a copy. Copies don't keep it.
+    key: Option<String> = None => "key",
     /// For STYLE nodes: FILL (uses `fills`) or TEXT (uses the font props).
     style_type: StyleType = StyleType::Fill => "styleType",
     /// Shared styles this node uses; their values are applied on every replica.

@@ -28,6 +28,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `strokeJoin` / `linejoin` | `MITER` \| `ROUND` \| `BEVEL` | `MITER` | Stroke corners. |
 | `flipX`, `flipY` | bool | false | |
 | `description` | string | "" | Notes for collaborators and agents. |
+| `key` | string | none | A stable id from the source of the design (e.g. a Unity object). Uploading a top-level spec with the same `key` again updates that node in place: see Re-uploads. |
 | `absolute` / `layoutAbsolute` | bool | false | Take the node out of its auto-layout parent's flow. |
 | `constraints` | `{horizontal, vertical}` \| string | `MIN` / `MIN` | How the node follows when its parent frame or instance is resized, like Unity anchors. See Constraints. |
 | `children` | spec[] | | `FRAME` and `GROUP` only. |
@@ -181,6 +182,19 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
   - `origin`: where the fill starts, by name or by Unity's `fillOrigin` number. `HORIZONTAL`: `LEFT`, `RIGHT`. `VERTICAL`: `BOTTOM`, `TOP`. `RADIAL_90` (pivot in that corner): `BOTTOM_LEFT`, `TOP_LEFT`, `TOP_RIGHT`, `BOTTOM_RIGHT`. `RADIAL_180` (pivot mid-edge): `BOTTOM`, `LEFT`, `TOP`, `RIGHT`. `RADIAL_360` (pivot in the center, sweep starts there): `BOTTOM`, `RIGHT`, `TOP`, `LEFT`. Defaults to the first.
   - `clockwise` (default true) sets the radial sweep direction.
 - All of these also work on any `IMAGE` paint, e.g. a frame's background.
+
+## Re-uploads (`key`)
+
+Give every node of an export a `key` that stays the same between exports, such as a Unity object path or id. When a top-level spec's `key` matches a node already in the file, `create_nodes` and `upload_nodes` update that node instead of adding a copy:
+
+- Changed properties are updated, and the node ids stay the same, so comments, links and instances keep working.
+- Children are matched by `key` within their parent, or by name and type when they have no key. New children are created, and keyed children missing from the spec are deleted.
+- Nodes that people added in Flexma (no `key`) are kept, on top of the exported ones.
+- A top-level node without `x`/`y` keeps its position. One found on another page or frame moves to the given parent.
+- Copies made in Flexma (duplicate, paste) drop their `key`.
+- Keys must be unique among siblings. At the top level they should be unique in the file.
+
+The result says how many nodes changed, were created and were deleted. A re-upload is one undoable step.
 
 ## Alpha masks
 

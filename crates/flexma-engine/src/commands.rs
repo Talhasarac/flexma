@@ -56,6 +56,7 @@ impl Editor {
             for n in nodes {
                 let mut c = n.clone();
                 c.id = map[&n.id].clone();
+                c.key = None;
                 if n.id == *root {
                     c.index = index.clone();
                     c.x += dx;
@@ -612,6 +613,7 @@ impl Editor {
         for n in &nodes {
             let mut c = n.clone();
             c.id = map[&n.id].clone();
+            c.key = None;
             if roots.contains(&n.id) {
                 let o = v["origins"][&n.id].as_array().map(|a| Vec2::new(a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0))).unwrap_or_default();
                 let p = inv.apply(o + shift);
