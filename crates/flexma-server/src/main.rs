@@ -24,6 +24,7 @@ mod oauth;
 mod render;
 mod rooms;
 mod state;
+mod uploads;
 mod ws;
 
 use axum::extract::{DefaultBodyLimit, Request};
@@ -179,6 +180,7 @@ async fn main() {
         .route("/workspaces/{id}/fonts", get(api_fonts::list).post(api_fonts::upload).delete(api_fonts::delete_family))
         .route("/workspaces/{id}/fonts/google", post(api_fonts::add_google))
         .route("/font-uploads/{token}", post(api_fonts::upload_with_link))
+        .route("/image-uploads/{token}", post(api_files::upload_image_with_link))
         .route("/fonts/{id}", get(api_fonts::file))
         .route("/google-fonts", get(api_fonts::google_catalogue))
         .route("/google-fonts/preview", get(api_fonts::google_preview))

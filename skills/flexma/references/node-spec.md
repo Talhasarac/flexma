@@ -8,7 +8,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| `type` | string | required | `FRAME`, `GROUP`, `RECTANGLE`, `ELLIPSE`, `LINE`, `TEXT`, `VECTOR`, `POLYGON`, `STAR`. Also accepted, case-insensitive: `rect`, `circle`, `box`, `path`, `label`, `container`, `triangle`. |
+| `type` | string | required | `FRAME`, `GROUP`, `RECTANGLE`, `ELLIPSE`, `LINE`, `TEXT`, `VECTOR`, `POLYGON`, `STAR`, `IMAGE` (shorthand, see below). Also accepted, case-insensitive: `rect`, `circle`, `box`, `path`, `label`, `container`, `triangle`. |
 | `name` | string | type name (text: its content) | Shown in the layers panel. |
 | `x`, `y` | number | auto | Position relative to the parent. Ignored inside auto layout (unless `absolute: true`). Leave them out on top-level nodes to auto-place beside existing content. |
 | `width` / `w`, `height` / `h` | number \| `"fill"` \| `"hug"` | 100 | `"fill"` stretches inside an auto-layout parent. `"hug"` (auto-layout frames, text) shrinks to fit the content. |
@@ -110,6 +110,15 @@ For paragraphs, give the text a width (a number, or `"fill"` inside auto layout)
 - **Editing.**
   - Updating a layer inside an instance stores an override; deleting one hides it.
   - Moving or reparenting layers inside an instance isn't allowed. Change the component instead.
+
+## IMAGE
+
+`{ "type": "image", "asset": "<id>", "fit": "FILL", "radius": 12 }`
+
+- `asset` (alias `src`): an id from `upload_image` or `list_images`. Required.
+- `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`; `cover` and `contain` work too.
+- Width and height default to the image's own size, scaled so the longest side is at most 1200. Give one side and the other keeps the proportions.
+- It becomes a `RECTANGLE` named "Image" with an `IMAGE` fill, so every rectangle prop works. To put an image behind content, give a frame an `IMAGE` fill instead.
 
 ## LINE
 

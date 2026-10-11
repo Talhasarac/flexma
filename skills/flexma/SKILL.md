@@ -57,6 +57,17 @@ Anything that repeats (buttons, inputs, cards, nav items, list rows, avatars) sh
 4. **Change all instances.** Edit the main component's layers. Overrides survive.
 5. **Discover existing ones.** Call `list_components` before building UI in an existing file, and reuse what's there. Call `detach_instance` only when a copy truly needs to diverge.
 
+## Images
+
+- **Upload:** call `upload_image` (say how many with `files`) and run the `curl` command it returns once per image. Each upload prints an asset id and a ready-made node.
+- **Place:** put `{ "type": "image", "asset": "<id>" }` in `create_nodes`.
+  - Leave out width and height to keep the picture's proportions (longest side up to 1200), or give one side and the other follows.
+  - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`.
+  - It's a rectangle with an image fill, so `radius`, `stroke`, `shadow` and `opacity` work, and it can sit inside auto layout.
+- **As a background:** any frame or shape can take `fill: { "type": "IMAGE", "asset": "<id>", "fit": "FILL" }`, e.g. a hero frame with text on top.
+- **Reuse:** `list_images` shows pictures already in the workspace and which ones this file uses.
+- **From the web:** download the picture first (`curl -L -o photo.jpg <url>`), then upload it. Only use images the user has the rights to. For placeholders, a solid color or gradient block is fine.
+
 ## Working with comments
 
 People leave feedback as comment pins on the canvas. When asked to "address feedback" or "handle comments":
@@ -107,6 +118,8 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `list_fonts` | See the workspace's fonts (uploaded and Google Fonts) and their weights |
 | `add_font` | Add a Google Fonts family to the workspace so everyone sees it |
 | `upload_font` | Upload the user's own .ttf/.otf files: returns a 15-minute `curl` upload link |
+| `upload_image` | Upload PNG/JPEG/GIF/WebP images: returns a 15-minute `curl` upload link |
+| `list_images` | Images already in the workspace, to reuse |
 | `share_file` | Get a public view-only link (no account needed) to hand to someone, or turn it off |
 | `list_comments` | Read open feedback threads (who, where, which node, replies) |
 | `add_comment` | Pin a note on a node or point, or reply to a thread (`reply_to`) |

@@ -5,21 +5,17 @@
 
 use crate::api_share::resolve;
 use crate::auth::{require_workspace, AuthUser, Role};
-use crate::db::random_string;
 use crate::error::{AppError, AppResult};
 use crate::fonts::{self, font_path};
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 pub async fn list(State(st): State<AppState>, user: AuthUser, Path(ws): Path<String>) -> AppResult<Json<Value>> {
     let rows = st
@@ -224,89 +220,20 @@ pub async fn google_preview(State(st): State<AppState>, _user: AuthUser, Query(q
 }
 
 // ---------------------------------------------------------------------------
-// Upload links (for agents)
+// Upload links (for agents, see `uploads.rs`)
 // ---------------------------------------------------------------------------
 
-/// How long an upload link from `upload_font` works.
-const UPLOAD_LINK_TTL: Duration = Duration::from_secs(15 * 60);
-/// Most files one link accepts (a family's styles).
-pub const MAX_LINK_FILES: u32 = 20;
-const LINK_TOKEN_LEN: usize = 32;
-
-struct UploadLink {
-    workspace_id: String,
-    user_id: String,
-    remaining: u32,
-    expires: Instant,
-}
-
-fn upload_links() -> &'static Mutex<HashMap<String, UploadLink>> {
-    static LINKS: OnceLock<Mutex<HashMap<String, UploadLink>>> = OnceLock::new();
-    LINKS.get_or_init(Default::default)
-}
-
-/// A link that accepts `files` font uploads into a workspace for 15 minutes,
-/// on behalf of `user_id`. Agents run `curl --data-binary @font.ttf <link>`
-/// with files on the user's computer. Links live in memory only.
-pub fn create_upload_link(workspace_id: &str, user_id: &str, files: u32) -> String {
-    let token = random_string(LINK_TOKEN_LEN);
-    let now = Instant::now();
-    let mut links = upload_links().lock().unwrap();
-    links.retain(|_, l| l.expires > now && l.remaining > 0);
-    links.insert(
-        token.clone(),
-        UploadLink {
-            workspace_id: workspace_id.to_string(),
-            user_id: user_id.to_string(),
-            remaining: files.clamp(1, MAX_LINK_FILES),
-            expires: now + UPLOAD_LINK_TTL,
-        },
-    );
-    token
-}
-
 /// `POST /api/font-uploads/{token}`: one .ttf/.otf file per request, no
-/// sign-in (the link is the credential).
+/// sign-in (the link from MCP `upload_font` is the credential).
 pub async fn upload_with_link(State(st): State<AppState>, Path(token): Path<String>, body: Bytes) -> AppResult<Json<Value>> {
-    let dead = || AppError::new(StatusCode::NOT_FOUND, "this upload link has expired or been used up; get a new one with upload_font");
-    if token.len() != LINK_TOKEN_LEN || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(dead());
-    }
     // A broken file doesn't use up one of the link's uploads.
     let info = fonts::inspect(&body).map_err(AppError::bad_request)?;
-    let (ws, user_id, remaining) = {
-        let mut links = upload_links().lock().unwrap();
-        let link = links
-            .get_mut(&token)
-            .filter(|l| l.expires > Instant::now() && l.remaining > 0)
-            .ok_or_else(dead)?;
-        link.remaining -= 1;
-        let out = (link.workspace_id.clone(), link.user_id.clone(), link.remaining);
-        if link.remaining == 0 {
-            links.remove(&token);
-        }
-        out
-    };
+    let grant = crate::uploads::take(&token, |k| *k == crate::uploads::Kind::Font, "upload_font")?;
     // The person may have lost access since the link was made.
-    let (u, w) = (user_id.clone(), ws.clone());
+    let (u, w) = (grant.user_id.clone(), grant.workspace_id.clone());
     st.db.call(move |c| require_workspace(c, &u, &w, Role::Editor).map(|_| ())).await?;
-    let mut face = store_face(&st, &ws, &user_id, info, "upload", body.to_vec()).await?;
-    fonts::fonts_changed(&st, &ws).await;
-    face["remainingUploads"] = json!(remaining);
+    let mut face = store_face(&st, &grant.workspace_id, &grant.user_id, info, "upload", body.to_vec()).await?;
+    fonts::fonts_changed(&st, &grant.workspace_id).await;
+    face["remainingUploads"] = json!(grant.remaining);
     Ok(Json(face))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upload_links_count_down_and_clamp() {
-        let token = create_upload_link("ws", "user", 99);
-        let links = upload_links().lock().unwrap();
-        let link = links.get(&token).unwrap();
-        assert_eq!(link.remaining, MAX_LINK_FILES);
-        assert!(link.expires > Instant::now() + Duration::from_secs(14 * 60));
-        assert_eq!(token.len(), LINK_TOKEN_LEN);
-    }
 }

@@ -17,7 +17,8 @@ use axum::response::{IntoResponse, Response};
 use flexma_doc::friendly::{build_create_ops, normalize_props};
 use flexma_doc::geom::{fmt_num, Vec2};
 use flexma_doc::{Document, Node, NodeId, NodeType, Op, Rect, ROOT_ID};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
+use std::collections::HashMap;
 use serde_json::{json, Map, Value};
 
 const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -178,6 +179,19 @@ fn tools() -> Value {
                 "file_id": file_id,
                 "files": { "type": "integer", "description": "How many font files you'll upload (one per style: Regular, Bold, Italic…). Default 1, max 20." }
             },
+            "required": ["file_id"]
+        })),
+        tool("upload_image", "Upload images (PNG, JPEG, GIF or WebP) from the user's computer, or ones you downloaded, into the file's workspace. Returns a curl command with a short-lived upload link; run it once per image, then place each with create_nodes {type:'image', asset:'<id>'}.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "files": { "type": "integer", "description": "How many images you'll upload. Default 1, max 20." }
+            },
+            "required": ["file_id"]
+        })),
+        tool("list_images", "List images already uploaded to the file's workspace (newest first): asset id, size, type, who uploaded it, and whether this file uses it. Reuse them with {type:'image', asset:'<id>'}.", json!({
+            "type": "object",
+            "properties": { "file_id": file_id },
             "required": ["file_id"]
         })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
@@ -398,6 +412,8 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "upload_image" => self.upload_image(args).await,
+            "list_images" => self.list_images(args).await,
             "create_component" => self.create_component(args).await,
             "detach_instance" => self.detach_instance(args).await,
             "add_comment" => self.add_comment(args).await,
@@ -608,6 +624,8 @@ impl Ctx {
         let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
         let room = self.room(&fid, Role::Editor).await?;
         let note = self.font_note(&fid, args).await;
+        let mut specs = specs;
+        self.size_images(&fid, &mut specs).await?;
         let prefix = format!("a{}", random_string(5));
         room.mutate(self.agent(), move |tx| {
             let parent = match parent {
@@ -1067,7 +1085,7 @@ impl Ctx {
 
     async fn upload_font(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
-        let max = crate::api_fonts::MAX_LINK_FILES;
+        let max = crate::uploads::MAX_FILES;
         let files = args.get("files").and_then(Value::as_u64).unwrap_or(1).clamp(1, max as u64) as u32;
         let uid = self.user.id.clone();
         let ws = self
@@ -1076,7 +1094,7 @@ impl Ctx {
             .call(move |c| Ok(file_access(c, &uid, &fid, Role::Editor)?.0))
             .await
             .map_err(err_msg)?;
-        let token = crate::api_fonts::create_upload_link(&ws, &self.user.id, files);
+        let token = crate::uploads::create(crate::uploads::Kind::Font, &ws, &self.user.id, files);
         let url = format!("{}/api/font-uploads/{token}", self.base);
         Ok(text_result(format!(
             "Upload link ready. It works for {files} font {} over the next 15 minutes. Run this once per file:\n\n\
@@ -1087,6 +1105,152 @@ impl Ctx {
              Only upload fonts the user is licensed to use on the web. Don't share this link.",
             if files == 1 { "file" } else { "files" }
         )))
+    }
+
+    /// Give `{type:"image"}` specs without a size the image's own proportions
+    /// (longest side at most 1200 px), and check their assets exist here.
+    async fn size_images(&self, file_id: &str, specs: &mut [Value]) -> Result<(), String> {
+        fn collect<'a>(specs: &'a mut [Value], out: &mut Vec<&'a mut serde_json::Map<String, Value>>) {
+            for s in specs {
+                let Some(o) = s.as_object_mut() else { continue };
+                let is_image = o.get("type").and_then(Value::as_str).map(flexma_doc::friendly::is_image_type).unwrap_or(false);
+                if is_image {
+                    out.push(o);
+                } else if let Some(Value::Array(children)) = o.get_mut("children") {
+                    collect(children, out);
+                }
+            }
+        }
+        let mut images = Vec::new();
+        collect(specs, &mut images);
+        if images.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = images
+            .iter()
+            .filter_map(|o| ["asset", "src", "image"].iter().find_map(|k| o.get(*k).and_then(Value::as_str)).map(str::to_string))
+            .collect();
+        let fid = file_id.to_string();
+        let sizes: HashMap<String, (f64, f64)> = self
+            .st
+            .db
+            .call(move |c| {
+                let ws = crate::fonts::file_workspace(c, &fid)?;
+                let mut out = HashMap::new();
+                for id in ids {
+                    let row: Option<(i64, i64)> = c
+                        .query_row("SELECT width, height FROM assets WHERE id = ?1 AND workspace_id = ?2", params![id, ws], |r| {
+                            Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0), r.get::<_, Option<i64>>(1)?.unwrap_or(0)))
+                        })
+                        .optional()?;
+                    if let Some((w, h)) = row {
+                        out.insert(id, (w as f64, h as f64));
+                    }
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(err_msg)?;
+        for o in images {
+            let id = ["asset", "src", "image"].iter().find_map(|k| o.get(*k).and_then(Value::as_str)).unwrap_or_default().to_string();
+            let &(w, h) = sizes.get(&id).ok_or_else(|| format!("image asset '{id}' isn't in this workspace; upload it with upload_image or pick one from list_images"))?;
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            let num = |k: &str, alt: &str| o.get(k).or_else(|| o.get(alt)).and_then(Value::as_f64);
+            match (num("width", "w"), num("height", "h")) {
+                (None, None) => {
+                    let s = (1200.0_f64 / w.max(h)).min(1.0);
+                    o.insert("width".into(), json!((w * s).round()));
+                    o.insert("height".into(), json!((h * s).round()));
+                }
+                (Some(width), None) if !o.contains_key("height") && !o.contains_key("h") => {
+                    o.insert("height".into(), json!((width * h / w).round()));
+                }
+                (None, Some(height)) if !o.contains_key("width") && !o.contains_key("w") => {
+                    o.insert("width".into(), json!((height * w / h).round()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn upload_image(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let max = crate::uploads::MAX_FILES;
+        let files = args.get("files").and_then(Value::as_u64).unwrap_or(1).clamp(1, max as u64) as u32;
+        let (uid, f2) = (self.user.id.clone(), fid.clone());
+        let ws = self
+            .st
+            .db
+            .call(move |c| Ok(file_access(c, &uid, &f2, Role::Editor)?.0))
+            .await
+            .map_err(err_msg)?;
+        let token = crate::uploads::create(crate::uploads::Kind::Image { file_id: fid }, &ws, &self.user.id, files);
+        let url = format!("{}/api/image-uploads/{token}", self.base);
+        let mb = self.st.cfg.max_upload_bytes / (1024 * 1024);
+        Ok(text_result(format!(
+            "Upload link ready. It works for {files} {} over the next 15 minutes. Run this once per image:\n\n\
+             curl -sS --data-binary @\"/path/to/photo.jpg\" {url}\n\n\
+             Each upload prints the new asset id, its pixel size and a ready-made node like {{\"type\":\"image\",\"asset\":\"<id>\"}}. \
+             Put that node in create_nodes (leave out width/height to use the image's proportions), or use the asset as a fill on any frame or shape: \
+             {{\"type\":\"IMAGE\",\"asset\":\"<id>\",\"fit\":\"FILL\"}} (FILL crops to cover, FIT letterboxes, STRETCH distorts). \
+             PNG, JPEG, GIF or WebP, up to {mb} MB each. For a picture on the web, download it first (curl -L -o photo.jpg <url>), then upload it. \
+             Only use images the user has the rights to. Don't share this link.",
+            if files == 1 { "image" } else { "images" }
+        )))
+    }
+
+    async fn list_images(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let room = self.room(&fid, Role::Viewer).await?;
+        let used: std::collections::HashSet<String> = room
+            .read(|doc, _| {
+                doc.nodes()
+                    .flat_map(|n| n.fills.iter().chain(n.strokes.iter()))
+                    .filter_map(|p| match p {
+                        flexma_doc::Paint::Image { asset, .. } => Some(asset.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .await
+            .map_err(err_msg)?;
+        let f2 = fid.clone();
+        let rows: Vec<(String, i64, i64, String, i64, Option<String>, i64)> = self
+            .st
+            .db
+            .call(move |c| {
+                let ws = crate::fonts::file_workspace(c, &f2)?;
+                let mut stmt = c.prepare(
+                    "SELECT a.id, COALESCE(a.width, 0), COALESCE(a.height, 0), a.mime, a.size, u.name, a.created_at
+                     FROM assets a LEFT JOIN users u ON u.id = a.created_by
+                     WHERE a.workspace_id = ?1 ORDER BY a.created_at DESC LIMIT 50",
+                )?;
+                let rows = stmt
+                    .query_map(params![ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .map_err(err_msg)?;
+        if rows.is_empty() {
+            return Ok(text_result("No images in this workspace yet. Add some with upload_image."));
+        }
+        let mut out = String::from("Images in this workspace (newest first):\n");
+        for (id, w, h, mime, size, by, at) in rows {
+            let kind = mime.trim_start_matches("image/").to_uppercase();
+            out.push_str(&format!(
+                "- {id}: {w}×{h} {kind}, {} KB, uploaded{} {}{}\n",
+                (size + 1023) / 1024,
+                by.map(|b| format!(" by {b}")).unwrap_or_default(),
+                ts(at),
+                if used.contains(&id) { " (used in this file)" } else { "" }
+            ));
+        }
+        out.push_str("Place one with create_nodes {type:'image', asset:'<id>'}.");
+        Ok(text_result(out))
     }
 
     async fn list_components(&self, args: &Value) -> ToolResult {

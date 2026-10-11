@@ -7,7 +7,7 @@ use crate::render;
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use flexma_doc::{Document, NodeId, NodeType};
@@ -374,38 +374,63 @@ pub async fn upload_asset(
     State(st): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<Value>> {
+    let mime = check_image(&st, &body)?;
+    let (fid, uid) = (id.clone(), user.id.clone());
+    let ws = st.db.call(move |c| Ok(file_access(c, &uid, &fid, Role::Editor)?.0)).await?;
+    Ok(Json(store_image(&st, &ws, &id, &user.id, mime, &body).await?))
+}
+
+/// The image's type, or why it can't be used.
+fn check_image(st: &AppState, body: &[u8]) -> AppResult<&'static str> {
     if body.is_empty() {
         return Err(AppError::bad_request("empty upload"));
     }
     if body.len() > st.cfg.max_upload_bytes {
         return Err(AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "image is too large"));
     }
-    let mime = render::sniff_mime(&body).ok_or_else(|| AppError::bad_request("unsupported image type (use PNG, JPEG, GIF or WebP)"))?;
-    let _ = headers;
-    let (w, h) = imagesize::blob_size(&body).map(|s| (s.width as i64, s.height as i64)).unwrap_or((0, 0));
-    let fid = id.clone();
-    let uid = user.id.clone();
-    let ws = st.db.call(move |c| Ok(file_access(c, &uid, &fid, Role::Editor)?.0)).await?;
+    render::sniff_mime(body).ok_or_else(|| AppError::bad_request("unsupported image type (use PNG, JPEG, GIF or WebP)"))
+}
+
+/// Save an image to a workspace's assets (access already checked).
+async fn store_image(st: &AppState, ws: &str, file_id: &str, user_id: &str, mime: &str, body: &[u8]) -> AppResult<Value> {
+    let (w, h) = imagesize::blob_size(body).map(|s| (s.width as i64, s.height as i64)).unwrap_or((0, 0));
     let aid = new_id();
     let dir = st.cfg.data_dir.join("assets");
     tokio::fs::create_dir_all(&dir).await.map_err(AppError::internal)?;
-    tokio::fs::write(render::asset_path(&st.cfg.data_dir, &aid), &body).await.map_err(AppError::internal)?;
+    tokio::fs::write(render::asset_path(&st.cfg.data_dir, &aid), body).await.map_err(AppError::internal)?;
     let size = body.len() as i64;
-    let aid2 = aid.clone();
+    let (aid2, ws, fid, uid, mime2) = (aid.clone(), ws.to_string(), file_id.to_string(), user_id.to_string(), mime.to_string());
     st.db
         .call(move |c| {
             c.execute(
                 "INSERT INTO assets (id, workspace_id, file_id, mime, width, height, size, created_by, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![aid2, ws, id, mime, w, h, size, user.id, now()],
+                params![aid2, ws, fid, mime2, w, h, size, uid, now()],
             )?;
             Ok(())
         })
         .await?;
-    Ok(Json(json!({ "id": aid, "url": format!("/api/assets/{aid}"), "width": w, "height": h })))
+    Ok(json!({ "id": aid, "url": format!("/api/assets/{aid}"), "width": w, "height": h, "mime": mime }))
+}
+
+/// `POST /api/image-uploads/{token}`: one image per request, no sign-in (the
+/// link from MCP `upload_image` is the credential).
+pub async fn upload_image_with_link(State(st): State<AppState>, Path(token): Path<String>, body: Bytes) -> AppResult<Json<Value>> {
+    // A broken file doesn't use up one of the link's uploads.
+    let mime = check_image(&st, &body)?;
+    let grant = crate::uploads::take(&token, |k| matches!(k, crate::uploads::Kind::Image { .. }), "upload_image")?;
+    let crate::uploads::Kind::Image { file_id } = &grant.kind else {
+        return Err(AppError::internal("wrong upload link kind"));
+    };
+    // The person may have lost access since the link was made.
+    let (uid, fid) = (grant.user_id.clone(), file_id.clone());
+    st.db.call(move |c| file_access(c, &uid, &fid, Role::Editor).map(|_| ())).await?;
+    let mut asset = store_image(&st, &grant.workspace_id, file_id, &grant.user_id, mime, &body).await?;
+    asset["remainingUploads"] = json!(grant.remaining);
+    asset["node"] = json!({ "type": "image", "asset": asset["id"], "width": asset["width"], "height": asset["height"] });
+    Ok(Json(asset))
 }
 
 pub async fn get_asset(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Response> {

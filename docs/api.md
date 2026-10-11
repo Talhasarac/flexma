@@ -59,7 +59,8 @@ Roles: `owner` > `editor` > `viewer`. Viewers can open files read-only.
 | GET | `/api/files/:id/thumbnail.png` | – | PNG preview of the first page, rendered with the workspace's fonts and cached per file version |
 | GET | `/api/files/:id/export.svg?node=<id>&page=<id>` | – | SVG export |
 | GET | `/api/files/:id/export.png?node=<id>&page=<id>&scale=2` | – | PNG export |
-| POST | `/api/files/:id/assets` | raw image bytes, `Content-Type: image/*` | `{ id, url, width, height }` |
+| POST | `/api/files/:id/assets` | raw image bytes, `Content-Type: image/*` | `{ id, url, width, height, mime }` |
+| POST | `/api/image-uploads/:token` | raw image bytes, no sign-in | asset + `remainingUploads` + a ready-made `node`: upload through a link from the MCP `upload_image` tool (same rules as font upload links) |
 | GET | `/api/assets/:id` | – | image bytes |
 | GET (WS) | `/api/files/:id/ws` | – | multiplayer socket, see below |
 

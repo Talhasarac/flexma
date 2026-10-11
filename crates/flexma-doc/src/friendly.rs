@@ -374,6 +374,39 @@ fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> 
     Ok(())
 }
 
+/// Image types agents may use; see `expand_image`.
+pub fn is_image_type(t: &str) -> bool {
+    matches!(t.trim().to_ascii_lowercase().as_str(), "image" | "img" | "picture" | "photo")
+}
+
+/// `{type:"image", asset, fit?}` becomes a rectangle filled with the image
+/// (images are fills, like in Figma). `fit` is FILL (default, crops to cover),
+/// FIT (letterbox) or STRETCH; CSS-style `cover`/`contain` work too.
+pub fn expand_image(spec: &Value) -> Result<Option<Value>, String> {
+    let Some(obj) = spec.as_object() else { return Ok(None) };
+    if !obj.get("type").and_then(Value::as_str).map(is_image_type).unwrap_or(false) {
+        return Ok(None);
+    }
+    let asset = ["asset", "src", "image"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(Value::as_str))
+        .ok_or("an image node needs \"asset\": an id from upload_image or list_images")?;
+    let fit = match obj.get("fit").and_then(Value::as_str).unwrap_or("FILL").to_ascii_uppercase().as_str() {
+        "FILL" | "COVER" => "FILL",
+        "FIT" | "CONTAIN" => "FIT",
+        "STRETCH" => "STRETCH",
+        other => return Err(format!("unknown image fit '{other}' (use FILL, FIT or STRETCH)")),
+    };
+    let mut out = obj.clone();
+    for k in ["asset", "src", "image", "fit", "fill", "fills", "background"] {
+        out.remove(k);
+    }
+    out.insert("type".into(), json!("RECTANGLE"));
+    out.entry("name").or_insert(json!("Image"));
+    out.insert("fills".into(), json!([{ "type": "IMAGE", "asset": asset, "fit": fit }]));
+    Ok(Some(Value::Object(out)))
+}
+
 fn build_one(
     doc: &Document,
     spec: &Value,
@@ -383,8 +416,10 @@ fn build_one(
     ops: &mut Vec<Op>,
     new_id: &mut dyn FnMut() -> NodeId,
 ) -> Result<NodeId, String> {
+    let expanded = expand_image(spec)?;
+    let spec = expanded.as_ref().unwrap_or(spec);
     let obj = spec.as_object().ok_or("each node spec must be an object")?;
-    let ty = obj.get("type").and_then(|v| v.as_str()).ok_or("node spec needs a \"type\" (FRAME, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR, POLYGON, STAR, GROUP, COMPONENT, INSTANCE)")?;
+    let ty = obj.get("type").and_then(|v| v.as_str()).ok_or("node spec needs a \"type\" (FRAME, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR, POLYGON, STAR, GROUP, COMPONENT, INSTANCE, IMAGE)")?;
     let kind = parse_type(ty).ok_or_else(|| format!("unknown node type '{ty}'"))?;
     if kind == NodeType::Page && parent_kind != NodeType::Document {
         return Err("pages can only be created at the document root".into());
@@ -551,6 +586,26 @@ mod tests {
         assert!(card.width >= 232.0, "{}", card.width);
         let body = doc.children(&top[0])[2].clone();
         assert_eq!(doc.get(&body).unwrap().width, card.width - 32.0);
+    }
+
+    #[test]
+    fn image_shorthand_becomes_an_image_fill() {
+        let mut doc = Document::new_empty();
+        let mut gen = || "img:1".to_string();
+        let spec = json!([{ "type": "image", "asset": "abc123", "width": 320, "height": 200, "fit": "contain", "radius": 12 }]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        let n = doc.get(&top[0]).unwrap();
+        assert_eq!((n.kind, n.name.as_str(), n.width, n.corner_radius), (NodeType::Rectangle, "Image", 320.0, 12.0));
+        match &n.fills[..] {
+            [crate::paint::Paint::Image { asset, fit, .. }] => {
+                assert_eq!(asset, "abc123");
+                assert_eq!(format!("{fit:?}").to_uppercase(), "FIT");
+            }
+            other => panic!("expected one image fill, got {other:?}"),
+        }
+        assert!(expand_image(&json!({ "type": "image" })).is_err(), "asset is required");
     }
 
     #[test]
