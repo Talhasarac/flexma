@@ -99,10 +99,9 @@ pub struct NineSlice {
     /// Layer pixels per image pixel for the border: 1 draws it at the image's
     /// own size, 0.5 suits @2x art. From Unity: reference pixels per unit ÷
     /// (sprite pixels per unit × pixels per unit multiplier).
-    #[serde(skip_serializing_if = "is_one")]
+    /// Always written (like `fillCenter`), so reading a node shows the whole slice.
     pub scale: f32,
     /// Draw the center patch (Unity's Fill Center). Off leaves only the frame.
-    #[serde(skip_serializing_if = "is_true")]
     pub fill_center: bool,
 }
 
@@ -727,8 +726,8 @@ mod tests {
         let Paint::Image { tint, slice: Some(s), .. } = &p else { panic!("{p:?}") };
         assert_eq!(tint.unwrap().to_hex(), "#ff8800");
         assert_eq!((s.top, s.right, s.bottom, s.left, s.scale, s.fill_center), (4.0, 8.0, 4.0, 8.0, 1.0, true));
-        // Round trip keeps defaults out.
-        assert_eq!(serde_json::to_value(&p).unwrap()["slice"], json!({ "top": 4.0, "right": 8.0, "bottom": 4.0, "left": 8.0 }));
+        // Round trip spells out scale and fillCenter, so reading a node shows the whole slice.
+        assert_eq!(serde_json::to_value(&p).unwrap()["slice"], json!({ "top": 4.0, "right": 8.0, "bottom": 4.0, "left": 8.0, "scale": 1.0, "fillCenter": true }));
         let s: NineSlice = serde_json::from_value(json!({ "left": 10, "right": 10, "scale": 0.5, "fillCenter": false })).unwrap();
         assert_eq!((s.top, s.left, s.scale, s.fill_center), (0.0, 10.0, 0.5, false));
         // Insets never overlap: in the image, or in a box smaller than the borders.

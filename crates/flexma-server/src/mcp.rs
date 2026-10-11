@@ -2140,7 +2140,29 @@ fn first_fill_hex(n: &Node) -> Option<String> {
     n.fills.iter().find(|p| p.is_visible()).map(|p| match p {
         flexma_doc::Paint::Solid { color, .. } => color.to_hex(),
         flexma_doc::Paint::LinearGradient { .. } => "gradient".into(),
-        flexma_doc::Paint::Image { asset, .. } => format!("image:{asset}"),
+        flexma_doc::Paint::Image { asset, fit, slice, filled, crop, tint, .. } => {
+            // How the image is drawn, at a glance.
+            let mut how = Vec::new();
+            if let Some(c) = crop {
+                how.push(format!("crop {},{} {}×{}", fmt_num(c.x), fmt_num(c.y), fmt_num(c.width), fmt_num(c.height)));
+            }
+            if slice.is_some() {
+                how.push("9-slice".to_string());
+            } else if *fit != flexma_doc::ImageFit::Fill {
+                how.push(format!("{fit:?}").to_lowercase());
+            }
+            if let Some(f) = filled {
+                how.push(format!("filled {:?} {}%", f.method, (f.amount * 100.0).round()));
+            }
+            if let Some(t) = tint.filter(|t| *t != flexma_doc::Color::WHITE) {
+                how.push(format!("tint {}", t.to_hex()));
+            }
+            if how.is_empty() {
+                format!("image:{asset}")
+            } else {
+                format!("image:{asset} ({})", how.join(", "))
+            }
+        }
     })
 }
 
