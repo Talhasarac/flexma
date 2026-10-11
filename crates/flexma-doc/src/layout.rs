@@ -4,7 +4,8 @@
 
 use crate::doc::Document;
 use crate::node::{NodeId, NodeType};
-use crate::paint::{LayoutAlign, LayoutMode, SizingMode};
+use crate::node::Node;
+use crate::paint::{GridCorner, LayoutAlign, LayoutMode, SizingMode};
 use std::collections::HashSet;
 
 fn is_auto(doc: &Document, id: &str) -> bool {
@@ -90,6 +91,31 @@ fn measure_hug(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
     let n = doc.get(id).unwrap().clone();
     let horizontal = n.layout_mode == LayoutMode::Horizontal;
     let flow = flow_children(doc, id);
+    if n.layout_mode == LayoutMode::Grid {
+        let g = grid_geom(doc, &n, &flow);
+        let (bw, bh) = g.block();
+        let w = if n.layout_sizing_horizontal == SizingMode::Hug { bw + n.padding.left + n.padding.right } else { n.width };
+        let h = if n.layout_sizing_vertical == SizingMode::Hug { bh + n.padding.top + n.padding.bottom } else { n.height };
+        if doc.set_geometry(id, n.x, n.y, w.max(0.0), h.max(0.0)) {
+            out.push(id.to_string());
+        }
+        return;
+    }
+    if wraps(&n) {
+        // The main axis is fixed; the cross axis may hug the lines.
+        let lines = wrap_lines(doc, &n, &flow);
+        let cross: f64 = lines.iter().map(|l| l.cross).sum::<f64>() + cross_gap(&n) * lines.len().saturating_sub(1) as f64;
+        let (mut w, mut h) = (n.width, n.height);
+        if horizontal && n.layout_sizing_vertical == SizingMode::Hug {
+            h = cross + n.padding.top + n.padding.bottom;
+        } else if !horizontal && n.layout_sizing_horizontal == SizingMode::Hug {
+            w = cross + n.padding.left + n.padding.right;
+        }
+        if doc.set_geometry(id, n.x, n.y, w.max(0.0), h.max(0.0)) {
+            out.push(id.to_string());
+        }
+        return;
+    }
     let mut main = 0.0f64;
     let mut cross = 0.0f64;
     let mut cross_all = 0.0f64;
@@ -136,7 +162,14 @@ fn measure_hug(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
 
 /// Top-down: size FILL children and position all flow children.
 fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
-    if is_auto(doc, id) {
+    let special = doc.get(id).filter(|n| is_auto(doc, id) && (n.layout_mode == LayoutMode::Grid || wraps(n))).cloned();
+    if let Some(n) = special {
+        if n.layout_mode == LayoutMode::Grid {
+            arrange_grid(doc, &n, out);
+        } else {
+            arrange_wrapped(doc, &n, out);
+        }
+    } else if is_auto(doc, id) {
         let n = doc.get(id).unwrap().clone();
         let horizontal = n.layout_mode == LayoutMode::Horizontal;
         let flow = flow_children(doc, id);
@@ -235,6 +268,157 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
     }
 }
 
+/// Wrapping needs a fixed main axis to wrap against.
+fn wraps(n: &Node) -> bool {
+    n.layout_wrap
+        && match n.layout_mode {
+            LayoutMode::Horizontal => n.layout_sizing_horizontal != SizingMode::Hug,
+            LayoutMode::Vertical => n.layout_sizing_vertical != SizingMode::Hug,
+            _ => false,
+        }
+}
+
+fn cross_gap(n: &Node) -> f64 {
+    n.counter_axis_spacing.unwrap_or(n.item_spacing)
+}
+
+struct Line {
+    items: Vec<NodeId>,
+    /// Main-axis length (with gaps) and cross-axis thickness.
+    main: f64,
+    cross: f64,
+}
+
+/// Break flow children into lines along the main axis.
+fn wrap_lines(doc: &Document, n: &Node, flow: &[NodeId]) -> Vec<Line> {
+    let horizontal = n.layout_mode == LayoutMode::Horizontal;
+    let inner = if horizontal { n.width - n.padding.left - n.padding.right } else { n.height - n.padding.top - n.padding.bottom };
+    let mut lines: Vec<Line> = Vec::new();
+    for c in flow {
+        let Some(cn) = doc.get(c) else { continue };
+        let (cm, cc) = if horizontal { (cn.width, cn.height) } else { (cn.height, cn.width) };
+        let cc = if child_fill(cn, horizontal).1 { 0.0 } else { cc };
+        match lines.last_mut() {
+            Some(l) if l.main + n.item_spacing + cm <= inner + 0.01 => {
+                l.main += n.item_spacing + cm;
+                l.cross = l.cross.max(cc);
+                l.items.push(c.clone());
+            }
+            _ => lines.push(Line { items: vec![c.clone()], main: cm, cross: cc }),
+        }
+    }
+    lines
+}
+
+fn arrange_wrapped(doc: &mut Document, n: &Node, out: &mut Vec<NodeId>) {
+    let horizontal = n.layout_mode == LayoutMode::Horizontal;
+    let flow = flow_children(doc, &n.id);
+    let lines = wrap_lines(doc, n, &flow);
+    let inner_main = if horizontal { n.width - n.padding.left - n.padding.right } else { n.height - n.padding.top - n.padding.bottom };
+    let (start_main, start_cross) = if horizontal { (n.padding.left, n.padding.top) } else { (n.padding.top, n.padding.left) };
+    let mut cross_cursor = 0.0;
+    for line in &lines {
+        let free = (inner_main - line.main).max(0.0);
+        let (mut cursor, gap) = match n.primary_axis_align {
+            LayoutAlign::Start => (0.0, n.item_spacing),
+            LayoutAlign::Center => (free / 2.0, n.item_spacing),
+            LayoutAlign::End => (free, n.item_spacing),
+            LayoutAlign::SpaceBetween if line.items.len() > 1 => (0.0, n.item_spacing + free / (line.items.len() - 1) as f64),
+            LayoutAlign::SpaceBetween => (0.0, n.item_spacing),
+        };
+        for c in &line.items {
+            let Some(cn) = doc.get(c) else { continue };
+            let (cm, mut cc) = if horizontal { (cn.width, cn.height) } else { (cn.height, cn.width) };
+            if child_fill(cn, horizontal).1 {
+                cc = line.cross;
+            }
+            let off = match n.counter_axis_align {
+                LayoutAlign::Start | LayoutAlign::SpaceBetween => 0.0,
+                LayoutAlign::Center => (line.cross - cc) / 2.0,
+                LayoutAlign::End => line.cross - cc,
+            };
+            let (m, x) = (start_main + cursor, start_cross + cross_cursor + off);
+            let (px, py, w, h) = if horizontal { (m, x, cm, cc) } else { (x, m, cc, cm) };
+            if doc.set_geometry(c, px, py, w.max(0.0), h.max(0.0)) {
+                out.push(c.clone());
+            }
+            cursor += cm + gap;
+        }
+        cross_cursor += line.cross + cross_gap(n);
+    }
+}
+
+struct GridGeom {
+    cols: usize,
+    rows: usize,
+    cell: (f64, f64),
+    gap: (f64, f64),
+}
+
+impl GridGeom {
+    fn block(&self) -> (f64, f64) {
+        let span = |k: usize, size: f64, gap: f64| if k == 0 { 0.0 } else { k as f64 * size + (k - 1) as f64 * gap };
+        (span(self.cols, self.cell.0, self.gap.0), span(self.rows, self.cell.1, self.gap.1))
+    }
+}
+
+/// Columns, rows and cell size of a GRID frame, like Unity's GridLayoutGroup:
+/// fixed columns, fixed rows, or as many columns as fit the width.
+fn grid_geom(doc: &Document, n: &Node, flow: &[NodeId]) -> GridGeom {
+    let count = flow.len();
+    let cell = n.grid_cell_size.map(|[w, h]| (w.max(0.0), h.max(0.0))).unwrap_or_else(|| {
+        flow.iter().filter_map(|c| doc.get(c)).fold((0.0f64, 0.0f64), |(w, h), c| (w.max(c.width), h.max(c.height)))
+    });
+    let gap = (n.item_spacing, cross_gap(n));
+    let cols = match (n.grid_columns, n.grid_rows) {
+        (Some(c), _) => c.max(1) as usize,
+        (None, Some(r)) => count.div_ceil(r.max(1) as usize).max(1),
+        (None, None) if n.layout_sizing_horizontal == SizingMode::Hug => ((count as f64).sqrt().ceil() as usize).max(1),
+        (None, None) => {
+            let inner = n.width - n.padding.left - n.padding.right;
+            (((inner + gap.0) / (cell.0 + gap.0).max(1e-6)).floor() as usize).max(1)
+        }
+    };
+    let rows = match (n.grid_columns, n.grid_rows) {
+        (None, Some(r)) => (r.max(1) as usize).max(count.div_ceil(cols)),
+        _ => count.div_ceil(cols),
+    };
+    GridGeom { cols, rows, cell, gap }
+}
+
+fn arrange_grid(doc: &mut Document, n: &Node, out: &mut Vec<NodeId>) {
+    let flow = flow_children(doc, &n.id);
+    let g = grid_geom(doc, n, &flow);
+    let (bw, bh) = g.block();
+    let inner_w = n.width - n.padding.left - n.padding.right;
+    let inner_h = n.height - n.padding.top - n.padding.bottom;
+    // The block of cells is aligned inside the frame.
+    let align = |a: LayoutAlign, free: f64| match a {
+        LayoutAlign::Center => free / 2.0,
+        LayoutAlign::End => free,
+        _ => 0.0,
+    };
+    let x0 = n.padding.left + align(n.primary_axis_align, inner_w - bw);
+    let y0 = n.padding.top + align(n.counter_axis_align, inner_h - bh);
+    for (i, c) in flow.iter().enumerate() {
+        let (mut col, mut row) = if n.grid_vertical { (i / g.rows.max(1), i % g.rows.max(1)) } else { (i % g.cols, i / g.cols) };
+        if matches!(n.grid_start_corner, GridCorner::TopRight | GridCorner::BottomRight) {
+            col = g.cols.saturating_sub(1 + col);
+        }
+        if matches!(n.grid_start_corner, GridCorner::BottomLeft | GridCorner::BottomRight) {
+            row = g.rows.saturating_sub(1 + row);
+        }
+        let Some(cn) = doc.get(c) else { continue };
+        // An explicit cell size sizes every child, as in Unity.
+        let (w, h) = if n.grid_cell_size.is_some() { g.cell } else { (cn.width, cn.height) };
+        let x = x0 + col as f64 * (g.cell.0 + g.gap.0);
+        let y = y0 + row as f64 * (g.cell.1 + g.gap.1);
+        if doc.set_geometry(c, x, y, w, h) {
+            out.push(c.clone());
+        }
+    }
+}
+
 fn child_fill(cn: &crate::node::Node, parent_horizontal: bool) -> (bool, bool) {
     let fw = cn.layout_sizing_horizontal == SizingMode::Fill;
     let fh = cn.layout_sizing_vertical == SizingMode::Fill;
@@ -286,5 +470,58 @@ mod tests {
         relayout(&mut doc, &["r:0".to_string()]);
         let r0 = doc.get("r:0").unwrap();
         assert_eq!(r0.width, 200.0 - 10.0 - 10.0 - 30.0);
+    }
+
+    fn build(spec: serde_json::Value) -> (Document, Vec<NodeId>) {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("g:{n}")
+        };
+        let (ops, top) = crate::friendly::build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        relayout_all(&mut doc);
+        let kids = doc.children(&top[0]).to_vec();
+        let mut all = top;
+        all.extend(kids);
+        (doc, all)
+    }
+
+    fn rect_of(doc: &Document, id: &str) -> (f64, f64, f64, f64) {
+        let n = doc.get(id).unwrap();
+        (n.x, n.y, n.width, n.height)
+    }
+
+    #[test]
+    fn horizontal_wrap_breaks_lines() {
+        let item = serde_json::json!({ "type": "rect", "w": 40, "h": 20 });
+        let (doc, ids) = build(serde_json::json!([{ "type": "frame", "layout": "horizontal", "wrap": true, "width": 110, "gap": 10, "rowGap": 5, "padding": 5,
+            "children": [item, item, item, { "type": "rect", "w": 40, "h": 30 }, item] }]));
+        // Two fit per 100 px line (40 + 10 + 40): rows at y 5, 30, 65.
+        let pos: Vec<(f64, f64)> = ids[1..].iter().map(|c| (rect_of(&doc, c).0, rect_of(&doc, c).1)).collect();
+        assert_eq!(pos, vec![(5.0, 5.0), (55.0, 5.0), (5.0, 30.0), (55.0, 30.0), (5.0, 65.0)]);
+        // The height hugs the three lines: 20 + 5 + 30 + 5 + 20 + padding.
+        assert_eq!(rect_of(&doc, &ids[0]).3, 90.0);
+    }
+
+    #[test]
+    fn grid_like_unity() {
+        let item = serde_json::json!({ "type": "rect", "w": 10, "h": 10 });
+        // Fixed 3 columns, 50×40 cells, filled from the top-right.
+        let (doc, ids) = build(serde_json::json!([{ "type": "frame", "layout": "grid", "columns": 3, "cellSize": [50, 40], "gap": 10, "rowGap": 20,
+            "startCorner": "UPPER_RIGHT", "children": [item, item, item, item] }]));
+        assert_eq!(rect_of(&doc, &ids[0]).2, 170.0, "hugs 3 cells and 2 gaps");
+        assert_eq!(rect_of(&doc, &ids[0]).3, 100.0, "and 2 rows");
+        assert_eq!(rect_of(&doc, &ids[1]), (120.0, 0.0, 50.0, 40.0), "first child top-right, sized to the cell");
+        assert_eq!(rect_of(&doc, &ids[3]), (0.0, 0.0, 50.0, 40.0));
+        assert_eq!(rect_of(&doc, &ids[4]), (120.0, 60.0, 50.0, 40.0));
+        // Flexible: as many 30 px columns as fit 100 px with 5 px gaps (3).
+        let (doc, ids) = build(serde_json::json!([{ "type": "frame", "layout": "grid", "width": 100, "cellSize": [30, 30], "gap": 5, "startAxis": "vertical", "rows": 2,
+            "children": [item, item, item] }]));
+        // Rows fixed at 2, filling columns first: (0,0), (0,1), (1,0).
+        let pos: Vec<(f64, f64)> = ids[1..].iter().map(|c| (rect_of(&doc, c).0, rect_of(&doc, c).1)).collect();
+        assert_eq!(pos, vec![(0.0, 0.0), (0.0, 35.0), (35.0, 0.0)]);
     }
 }

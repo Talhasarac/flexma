@@ -74,7 +74,9 @@ Type defaults:
 
 | Property | Values | Notes |
 |---|---|---|
-| `layout` / `layoutMode` / `direction` | `VERTICAL` (`column`), `HORIZONTAL` (`row`), `NONE` | Turns on flexbox-like layout. |
+| `layout` / `layoutMode` / `direction` | `VERTICAL` (`column`), `HORIZONTAL` (`row`), `GRID`, `NONE` | Turns on flexbox-like layout, or a grid (see below). |
+| `wrap` / `layoutWrap` | bool | Rows (or columns) wrap onto new lines when they run out of room. Needs a fixed width (height for vertical); the other axis can hug. |
+| `rowGap` / `counterAxisSpacing` | number | Space between wrapped lines or grid rows (default: `gap`). |
 | `gap` / `itemSpacing` | number | Space between children. |
 | `padding` | number \| [v, h] \| [t, r, b, l] \| {top,right,bottom,left} | |
 | `justify` / `primaryAxisAlign` | `start`, `center`, `end`, `space-between` | Along the layout direction. |
@@ -83,6 +85,17 @@ Type defaults:
 | `clipAlpha` | bool | The same as `clip: "alpha"` (turns clipping on). |
 | `hideFill` | bool | Don't draw the fills. They still shape an alpha mask. |
 | `layoutSizingHorizontal` / `layoutSizingVertical` | `FIXED`, `HUG`, `FILL` | Same as `width`/`height: "hug" \| "fill"`. |
+
+Grids, like Unity's GridLayoutGroup:
+
+```json
+{ "type": "frame", "layout": "grid", "columns": 4, "cellSize": [64, 64], "gap": 8, "rowGap": 8, "padding": 12, "children": [ … ] }
+```
+
+- `columns` fixes the column count, or `rows` fixes the row count. With neither, as many columns fit as the width allows (or a square-ish grid if the frame hugs).
+- `cellSize: [w, h]` sizes every cell and child. Leave it out to size cells by the largest child.
+- `startCorner` (`TOP_LEFT`, `TOP_RIGHT`, `BOTTOM_LEFT`, `BOTTOM_RIGHT`; Unity's `UPPER_LEFT` etc. work too) and `startAxis: "vertical"` (fill columns first) set the order.
+- `justify` and `alignItems` place the block of cells inside the frame. The frame hugs its cells unless it has a size.
 
 Sizing rules:
 

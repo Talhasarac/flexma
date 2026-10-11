@@ -621,6 +621,19 @@ pub enum LayoutMode {
     None,
     Horizontal,
     Vertical,
+    /// Uniform cells in rows and columns, like Unity's GridLayoutGroup.
+    Grid,
+}
+
+/// Where a grid starts placing children (Unity's Start Corner).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GridCorner {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

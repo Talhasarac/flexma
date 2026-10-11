@@ -247,6 +247,16 @@ define_node! {
     primary_axis_align: LayoutAlign = LayoutAlign::Start => "primaryAxisAlign",
     counter_axis_align: LayoutAlign = LayoutAlign::Start => "counterAxisAlign",
     layout_wrap: bool = false => "layoutWrap",
+    /// Space between wrapped lines, or between grid rows. `None` = `itemSpacing`.
+    counter_axis_spacing: Option<f64> = None => "counterAxisSpacing",
+    /// GRID: a fixed number of columns (or rows); neither = as many columns as fit.
+    grid_columns: Option<u32> = None => "gridColumns",
+    grid_rows: Option<u32> = None => "gridRows",
+    /// GRID: every cell's size (children are sized to it); `None` = the largest child.
+    grid_cell_size: Option<[f64; 2]> = None => "gridCellSize",
+    grid_start_corner: GridCorner = GridCorner::TopLeft => "gridStartCorner",
+    /// GRID: fill columns first instead of rows (Unity's Start Axis: Vertical).
+    grid_vertical: bool = false => "gridVertical",
     /// Horizontal sizing: FIXED, HUG (auto-layout frames) or FILL (children of auto-layout frames).
     layout_sizing_horizontal: SizingMode = SizingMode::Fixed => "layoutSizingHorizontal",
     layout_sizing_vertical: SizingMode = SizingMode::Fixed => "layoutSizingVertical",

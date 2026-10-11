@@ -12,6 +12,7 @@ import {
   AlignStartVertical,
   ArrowDown,
   ArrowRight,
+  LayoutGrid,
   Eye,
   EyeOff,
   FlipHorizontal2,
@@ -367,7 +368,17 @@ function AutoLayoutSection({ sel, set, begin, end, store }: SectionProps & { sto
   const p = pad === 'mixed' ? null : pad;
   const primary = common(sel, (n) => n.primaryAxisAlign);
   const counter = common(sel, (n) => n.counterAxisAlign);
-  const horizontal = mode === 'HORIZONTAL';
+  // A grid aligns its block of cells like a horizontal layout: main = x.
+  const horizontal = mode === 'HORIZONTAL' || mode === 'GRID';
+  const grid = mode === 'GRID';
+  const wrap = common(sel, (n) => n.layoutWrap) === true;
+  const cell = common(sel, (n) => n.gridCellSize ?? null);
+  const c = cell === 'mixed' ? null : cell;
+  const setCell = (i: 0 | 1, v: number) => {
+    const next: [number, number] = c ? [...c] : [0, 0];
+    next[i] = Math.max(0, v);
+    set({ gridCellSize: next[0] > 0 && next[1] > 0 ? next : null });
+  };
   const cells: ('START' | 'CENTER' | 'END')[] = ['START', 'CENTER', 'END'];
   return (
     <Section
@@ -387,12 +398,34 @@ function AutoLayoutSection({ sel, set, begin, end, store }: SectionProps & { sto
             <button type="button" className={mode === 'HORIZONTAL' ? 'on' : ''} title="Horizontal" onClick={() => set({ layoutMode: 'HORIZONTAL' })}>
               <ArrowRight size={13} />
             </button>
+            <button type="button" className={grid ? 'on' : ''} title="Grid" onClick={() => set({ layoutMode: 'GRID' })}>
+              <LayoutGrid size={13} />
+            </button>
           </div>
-          <NumberInput label="Gap" title="Spacing between items" value={common(sel, (n) => n.itemSpacing)} min={0} onChange={(v) => set({ itemSpacing: v })} onScrubStart={begin} onScrubEnd={end} />
-          <label className="check">
-            <input type="checkbox" checked={primary === 'SPACE_BETWEEN'} onChange={(e) => set({ primaryAxisAlign: e.target.checked ? 'SPACE_BETWEEN' : 'START' })} />
-            Space between
-          </label>
+          <NumberInput label="Gap" title={grid ? 'Space between columns' : 'Spacing between items'} value={common(sel, (n) => n.itemSpacing)} min={0} onChange={(v) => set({ itemSpacing: v })} onScrubStart={begin} onScrubEnd={end} />
+          {(grid || wrap) && (
+            <NumberInput
+              label={grid ? 'Rows' : 'Lines'}
+              title={grid ? 'Space between rows' : 'Space between wrapped lines'}
+              value={common(sel, (n) => n.counterAxisSpacing ?? n.itemSpacing)}
+              min={0}
+              onChange={(v) => set({ counterAxisSpacing: v })}
+              onScrubStart={begin}
+              onScrubEnd={end}
+            />
+          )}
+          {!grid && (
+            <label className="check">
+              <input type="checkbox" checked={primary === 'SPACE_BETWEEN'} onChange={(e) => set({ primaryAxisAlign: e.target.checked ? 'SPACE_BETWEEN' : 'START' })} />
+              Space between
+            </label>
+          )}
+          {!grid && (
+            <label className="check" title="Wrap items onto new lines (needs a fixed width or height)">
+              <input type="checkbox" checked={wrap} onChange={(e) => set({ layoutWrap: e.target.checked })} />
+              Wrap
+            </label>
+          )}
         </div>
         <div className="align-box" title="Alignment">
           {cells.map((row) =>
@@ -421,6 +454,20 @@ function AutoLayoutSection({ sel, set, begin, end, store }: SectionProps & { sto
         <NumberInput label="B" title="Padding bottom" value={p ? p.bottom : 'mixed'} min={0} onChange={(v) => p && set({ padding: { ...p, bottom: v } })} onScrubStart={begin} onScrubEnd={end} />
         <NumberInput label="L" title="Padding left" value={p ? p.left : 'mixed'} min={0} onChange={(v) => p && set({ padding: { ...p, left: v } })} onScrubStart={begin} onScrubEnd={end} />
       </div>
+      {grid && (
+        <div className="grid4">
+          <NumberInput
+            label="Cols"
+            title="Columns (0 = as many as fit)"
+            value={common(sel, (n) => n.gridColumns ?? 0)}
+            min={0}
+            precision={0}
+            onChange={(v) => set({ gridColumns: v >= 1 ? Math.round(v) : null })}
+          />
+          <NumberInput label="W" title="Cell width (0 = the widest child)" value={c ? c[0] : 0} min={0} onChange={(v) => setCell(0, v)} onScrubStart={begin} onScrubEnd={end} />
+          <NumberInput label="H" title="Cell height (0 = the tallest child)" value={c ? c[1] : 0} min={0} onChange={(v) => setCell(1, v)} onScrubStart={begin} onScrubEnd={end} />
+        </div>
+      )}
     </Section>
   );
 }

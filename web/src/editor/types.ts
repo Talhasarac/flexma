@@ -190,7 +190,12 @@ export interface NodeData {
   pathData: string;
   pointCount: number;
   innerRadius: number;
-  layoutMode: 'NONE' | 'HORIZONTAL' | 'VERTICAL';
+  layoutMode: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'GRID';
+  layoutWrap?: boolean;
+  counterAxisSpacing?: number | null;
+  gridColumns?: number | null;
+  gridRows?: number | null;
+  gridCellSize?: [number, number] | null;
   itemSpacing: number;
   padding: Padding;
   primaryAxisAlign: 'START' | 'CENTER' | 'END' | 'SPACE_BETWEEN';
@@ -210,7 +215,7 @@ export interface NodeData {
   overrideCount?: number;
   instanceCount?: number;
   parentType: NodeType | null;
-  parentLayout: 'NONE' | 'HORIZONTAL' | 'VERTICAL';
+  parentLayout: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'GRID';
 }
 
 export interface Peer {

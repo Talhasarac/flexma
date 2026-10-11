@@ -187,10 +187,47 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                 let m = match v.as_str().map(|s| s.to_ascii_lowercase()) {
                     Some(s) if s == "row" || s == "horizontal" || s == "h" => "HORIZONTAL",
                     Some(s) if s == "column" || s == "col" || s == "vertical" || s == "v" => "VERTICAL",
+                    Some(s) if s == "grid" => "GRID",
                     Some(s) if s == "none" || s.is_empty() => "NONE",
-                    _ => return Err(format!("'{k}' must be HORIZONTAL, VERTICAL or NONE")),
+                    _ => return Err(format!("'{k}' must be HORIZONTAL, VERTICAL, GRID or NONE")),
                 };
                 out.insert("layoutMode".into(), m.into());
+            }
+            "rowGap" | "lineGap" | "counterAxisSpacing" => {
+                out.insert("counterAxisSpacing".into(), v.clone());
+            }
+            "columns" | "gridColumns" => {
+                out.insert("gridColumns".into(), v.clone());
+            }
+            "rows" | "gridRows" => {
+                out.insert("gridRows".into(), v.clone());
+            }
+            "cellSize" | "gridCellSize" => {
+                let cell = match v {
+                    Value::Array(a) if a.len() == 2 => v.clone(),
+                    Value::Object(o) => json!([o.get("width").or_else(|| o.get("w")).or_else(|| o.get("x")), o.get("height").or_else(|| o.get("h")).or_else(|| o.get("y"))]),
+                    Value::Null => Value::Null,
+                    _ => return Err(format!("'{k}' must be [width, height]")),
+                };
+                out.insert("gridCellSize".into(), cell);
+            }
+            "startCorner" | "gridStartCorner" => {
+                let c = match v.as_str().map(|s| s.to_ascii_uppercase().replace(['-', ' '], "_")).as_deref() {
+                    Some("TOP_LEFT" | "UPPER_LEFT") => "TOP_LEFT",
+                    Some("TOP_RIGHT" | "UPPER_RIGHT") => "TOP_RIGHT",
+                    Some("BOTTOM_LEFT" | "LOWER_LEFT") => "BOTTOM_LEFT",
+                    Some("BOTTOM_RIGHT" | "LOWER_RIGHT") => "BOTTOM_RIGHT",
+                    _ => return Err(format!("'{k}' must be TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT or BOTTOM_RIGHT")),
+                };
+                out.insert("gridStartCorner".into(), c.into());
+            }
+            "startAxis" => {
+                let vertical = match v.as_str().map(|s| s.to_ascii_lowercase()).as_deref() {
+                    Some("horizontal") => false,
+                    Some("vertical") => true,
+                    _ => return Err(format!("'{k}' must be HORIZONTAL or VERTICAL")),
+                };
+                out.insert("gridVertical".into(), Value::Bool(vertical));
             }
             "gap" | "spacing" | "itemSpacing" => {
                 out.insert("itemSpacing".into(), v.clone());
@@ -241,6 +278,14 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                     return Err(format!("'{k}' is larger than 64 KB"));
                 }
                 out.insert("meta".into(), v);
+            }
+            "wrap" | "flexWrap" | "layoutWrap" if kind.is_frame_like() => {
+                let on = match v {
+                    Value::Bool(b) => *b,
+                    Value::String(s) => !matches!(s.to_ascii_lowercase().as_str(), "nowrap" | "no_wrap" | "none" | "false"),
+                    _ => return Err(format!("'{k}' must be true or false")),
+                };
+                out.insert("layoutWrap".into(), Value::Bool(on));
             }
             "wrap" | "textWrap" | "wordWrap" => {
                 out.insert("textWrap".into(), v.clone());
