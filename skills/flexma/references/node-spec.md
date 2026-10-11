@@ -98,6 +98,19 @@ Sizing rules:
 
 For paragraphs, give the text a width (a number, or `"fill"` inside auto layout) so it wraps.
 
+## COMPONENT and INSTANCE
+
+- **`COMPONENT`** behaves like a `FRAME`: same props, auto layout, children. It is the source of truth.
+- **`INSTANCE`** fields:
+  - `component` (alias `componentId`, `of`): the main component's id or name. Required when creating.
+  - `text`: shorthand that overrides the component's first text layer.
+  - `overrides`: `{ "<layer name or id>": { …props } }`. The key `""` targets the instance itself, though setting props directly on the instance does the same.
+  - Any frame prop (`fill`, `radius`, `padding`, `layout`, …) set on the instance overrides the component's value. Unset props follow the component.
+  - An instance can't have `children`. Its layers come from the component, and their ids look like `<instanceId>~<componentLayerId>`. Nested instances use `I~N~S`.
+- **Editing.**
+  - Updating a layer inside an instance stores an override; deleting one hides it.
+  - Moving or reparenting layers inside an instance isn't allowed. Change the component instead.
+
 ## LINE
 
 Either give the endpoints, `{ "type": "line", "x1": 0, "y1": 0, "x2": 200, "y2": 0, "stroke": "#000", "strokeWeight": 2 }`,

@@ -9,7 +9,7 @@ use crate::scene::Scene;
 use crate::sync::Sync;
 use crate::text::TextEngine;
 use crate::tools::{Gesture, Tool};
-use flexma_doc::layout;
+use flexma_doc::{components, layout};
 use flexma_doc::{Document, Node, NodeId, NodeType, Op, OpEffect, Rect, Vec2};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -132,6 +132,7 @@ impl Editor {
     pub fn load(&mut self, doc_json: &str, client_id: &str, can_edit: bool) -> Result<(), String> {
         let unacked = if self.loaded { self.sync.take_unacked() } else { vec![] };
         let mut doc = Document::from_json(doc_json)?;
+        components::sync_all(&mut doc);
         layout::relayout_all(&mut doc);
         self.doc = doc;
         self.sync.reset(client_id);
@@ -150,6 +151,8 @@ impl Editor {
                     self.sync.push(op);
                 }
             }
+            let synced = components::sync_instances(&mut self.doc, &changed, &[]);
+            changed.extend(synced);
             layout::relayout(&mut self.doc, &changed);
         }
         self.doc.walk(flexma_doc::ROOT_ID, &mut |n| {
@@ -206,13 +209,27 @@ impl Editor {
                 }
             }
         }
-        let laid = layout::relayout(&mut self.doc, &eff.changed);
+        let laid = self.derive(&mut eff);
         self.after_effect(&eff, &laid);
         // Someone (often an agent) just put the first content on the page we're
         // looking at: bring it into view.
         if page_was_empty && !self.doc.children(&self.scene.page).is_empty() && matches!(self.gesture, crate::tools::Gesture::None) {
             self.zoom_to_fit(false);
         }
+    }
+
+    /// Derived state after ops: re-expand affected instances, then auto layout.
+    /// Returns nodes whose derived geometry/content changed.
+    fn derive(&mut self, eff: &mut OpEffect) -> Vec<NodeId> {
+        let synced = components::sync_instances(&mut self.doc, &eff.changed, &eff.removed);
+        if !synced.is_empty() {
+            eff.structure = true;
+        }
+        let mut changed = eff.changed.clone();
+        changed.extend(synced.iter().cloned());
+        let mut laid = layout::relayout(&mut self.doc, &changed);
+        laid.extend(synced);
+        laid
     }
 
     pub fn after_effect(&mut self, eff: &OpEffect, laid: &[NodeId]) {
@@ -262,6 +279,8 @@ impl Editor {
         if !self.can_edit || ops.is_empty() {
             return vec![];
         }
+        // Edits aimed inside instances become overrides on the instance.
+        let ops = components::route_ops(&self.doc, ops);
         let auto_txn = !self.history.is_open();
         if auto_txn {
             let sel = self.selection.clone();
@@ -280,7 +299,7 @@ impl Editor {
                 Err(e) => errors.push(e),
             }
         }
-        let laid = layout::relayout(&mut self.doc, &eff.changed);
+        let laid = self.derive(&mut eff);
         self.after_effect(&eff, &laid);
         if auto_txn {
             self.history.end();
@@ -293,6 +312,7 @@ impl Editor {
         if !self.can_edit {
             return;
         }
+        let ops = components::route_ops(&self.doc, ops);
         let mut eff = OpEffect::default();
         for op in ops {
             if let Ok(e) = self.doc.apply(&op) {
@@ -300,7 +320,7 @@ impl Editor {
                 eff.merge(e);
             }
         }
-        let laid = layout::relayout(&mut self.doc, &eff.changed);
+        let laid = self.derive(&mut eff);
         self.after_effect(&eff, &laid);
     }
 
@@ -354,7 +374,7 @@ impl Editor {
                 eff.merge(e);
             }
         }
-        let laid = layout::relayout(&mut self.doc, &eff.changed);
+        let laid = self.derive(&mut eff);
         self.after_effect(&eff, &laid);
         // `back` holds per-op inverse lists in application order; flatten so that
         // applying it reversed restores the state before this call.
@@ -461,7 +481,7 @@ impl Editor {
         for (id, mut props) in updates {
             let Some(n) = self.doc.get(&id).cloned() else { continue };
             // Resizing a hugging auto-layout frame makes that axis fixed.
-            if n.kind == NodeType::Frame {
+            if n.kind.is_frame_like() {
                 if props.contains_key("width") && !props.contains_key("layoutSizingHorizontal") && n.layout_sizing_horizontal == flexma_doc::SizingMode::Hug {
                     props.insert("layoutSizingHorizontal".into(), json!("FIXED"));
                 }
@@ -508,6 +528,7 @@ impl Editor {
                 "visible": n.visible,
                 "locked": n.locked,
                 "layout": n.layout_mode != flexma_doc::LayoutMode::None,
+                "derived": flexma_doc::node::is_derived_id(&n.id),
                 "children": kids,
             })
         }
@@ -537,6 +558,14 @@ impl Editor {
                 let parent = n.parent.as_deref().and_then(|p| self.doc.get(p));
                 j["parentType"] = json!(parent.map(|p| p.kind));
                 j["parentLayout"] = json!(parent.map(|p| p.layout_mode).unwrap_or_default());
+                j["derived"] = json!(flexma_doc::node::is_derived_id(&n.id));
+                if n.kind == NodeType::Instance {
+                    j["componentName"] = json!(n.component_id.as_deref().and_then(|c| self.doc.get(c)).map(|c| c.name.clone()));
+                    j["overrideCount"] = json!(n.overrides.len());
+                }
+                if n.kind == NodeType::Component {
+                    j["instanceCount"] = json!(flexma_doc::components::instances_of(&self.doc, &n.id).len());
+                }
                 j
             })
             .collect();

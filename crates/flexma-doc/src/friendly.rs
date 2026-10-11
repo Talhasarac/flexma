@@ -22,6 +22,8 @@ pub fn parse_type(s: &str) -> Option<NodeType> {
         "polygon" | "triangle" => NodeType::Polygon,
         "star" => NodeType::Star,
         "page" => NodeType::Page,
+        "component" | "main component" | "symbol" => NodeType::Component,
+        "instance" => NodeType::Instance,
         _ => return None,
     })
 }
@@ -280,13 +282,100 @@ pub fn build_create_ops(
     let mut ops = Vec::new();
     let mut top = Vec::new();
     for (spec, key) in specs.iter().zip(keys) {
-        let id = build_one(spec, parent, parent_node.kind, key, &mut ops, new_id)?;
+        let id = build_one(doc, spec, parent, parent_node.kind, key, &mut ops, new_id)?;
         top.push(id);
     }
     Ok((ops, top))
 }
 
+/// Find a main component by id or name.
+pub fn find_component(doc: &Document, key: &str) -> Option<NodeId> {
+    if doc.get(key).map(|n| n.kind == NodeType::Component).unwrap_or(false) {
+        return Some(key.to_string());
+    }
+    let mut found = None;
+    doc.walk(crate::node::ROOT_ID, &mut |n| {
+        if found.is_none() && n.kind == NodeType::Component && n.name == key {
+            found = Some(n.id.clone());
+        }
+    });
+    found
+}
+
+/// Build an INSTANCE node from a friendly spec: `{type:"instance", component:"Button",
+/// text:"Buy", overrides:{"Label":{text:"Buy", color:"#fff"}}}`.
+fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> Result<(), String> {
+    let ckey = obj
+        .get("component")
+        .or_else(|| obj.get("componentId"))
+        .or_else(|| obj.get("of"))
+        .and_then(Value::as_str)
+        .ok_or("instances need \"component\": the main component's id or name")?;
+    let cid = find_component(doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file"))?;
+    let comp = doc.get(&cid).unwrap();
+    node.component_id = Some(cid.clone());
+    node.width = comp.width;
+    node.height = comp.height;
+    node.layout_sizing_horizontal = comp.layout_sizing_horizontal;
+    node.layout_sizing_vertical = comp.layout_sizing_vertical;
+    node.name = comp.name.clone();
+    let mut overrides = Map::new();
+    // `text` shorthand: the component's first text layer.
+    if let Some(t) = obj.get("text") {
+        let mut first_text = None;
+        doc.walk(&cid, &mut |n| {
+            if first_text.is_none() && n.kind == NodeType::Text {
+                first_text = Some(n.id.clone());
+            }
+        });
+        let tid = first_text.ok_or("this component has no text layer for \"text\"")?;
+        let mut o = Map::new();
+        o.insert("characters".into(), t.clone());
+        o.insert("needsMeasure".into(), Value::Bool(true));
+        overrides.insert(tid, Value::Object(o));
+    }
+    if let Some(Value::Object(ov)) = obj.get("overrides") {
+        for (k, v) in ov {
+            let key = crate::components::resolve_override_key(doc, &cid, k)
+                .ok_or_else(|| format!("override target '{k}' is not a layer in component '{}'", comp.name))?;
+            let target_kind = if key.is_empty() { NodeType::Instance } else { doc.get(&key).map(|n| n.kind).unwrap_or(NodeType::Rectangle) };
+            let props = v.as_object().ok_or_else(|| format!("override for '{k}' must be an object"))?;
+            let mut norm = normalize_props(target_kind, props)?;
+            if target_kind == NodeType::Text && norm.contains_key("characters") {
+                norm.insert("needsMeasure".into(), Value::Bool(true));
+            }
+            let entry = overrides.entry(key).or_insert_with(|| Value::Object(Map::new()));
+            if let Value::Object(e) = entry {
+                e.extend(norm);
+            }
+        }
+    }
+    // Estimate the size of overridden text so hugging layouts are right before
+    // a browser measures it exactly.
+    for (key, val) in overrides.iter_mut() {
+        let Some(src) = doc.get(key).filter(|n| n.kind == NodeType::Text) else { continue };
+        let Some(obj) = val.as_object_mut() else { continue };
+        if !obj.contains_key("characters") && !obj.contains_key("fontSize") {
+            continue;
+        }
+        let mut probe = src.clone();
+        for (k, v) in obj.iter() {
+            let _ = probe.set_prop(k, v);
+        }
+        let (_, w, h) = crate::text::estimate_layout(&probe);
+        if probe.text_auto_resize == crate::paint::TextAutoResize::WidthAndHeight && !obj.contains_key("width") {
+            obj.insert("width".into(), serde_json::json!(w));
+        }
+        if probe.text_auto_resize != crate::paint::TextAutoResize::None && !obj.contains_key("height") {
+            obj.insert("height".into(), serde_json::json!(h));
+        }
+    }
+    node.overrides = overrides;
+    Ok(())
+}
+
 fn build_one(
+    doc: &Document,
     spec: &Value,
     parent: &str,
     parent_kind: NodeType,
@@ -295,10 +384,13 @@ fn build_one(
     new_id: &mut dyn FnMut() -> NodeId,
 ) -> Result<NodeId, String> {
     let obj = spec.as_object().ok_or("each node spec must be an object")?;
-    let ty = obj.get("type").and_then(|v| v.as_str()).ok_or("node spec needs a \"type\" (FRAME, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR, POLYGON, STAR, GROUP)")?;
+    let ty = obj.get("type").and_then(|v| v.as_str()).ok_or("node spec needs a \"type\" (FRAME, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR, POLYGON, STAR, GROUP, COMPONENT, INSTANCE)")?;
     let kind = parse_type(ty).ok_or_else(|| format!("unknown node type '{ty}'"))?;
     if kind == NodeType::Page && parent_kind != NodeType::Document {
         return Err("pages can only be created at the document root".into());
+    }
+    if parent_kind == NodeType::Instance {
+        return Err("instances can't contain other layers; add them to the main component".into());
     }
     let id = new_id();
     let mut node = Node::new(id.clone(), kind);
@@ -311,9 +403,12 @@ fn build_one(
             node.height = 100.0;
             node.fills = vec![crate::paint::Paint::solid(Color::rgba(0.85, 0.85, 0.85, 1.0))];
         }
-        NodeType::Frame => {
+        NodeType::Frame | NodeType::Component => {
             node.width = 100.0;
             node.height = 100.0;
+        }
+        NodeType::Instance => {
+            build_instance(doc, obj, &mut node)?;
         }
         NodeType::Line => {
             node.width = 100.0;
@@ -324,13 +419,38 @@ fn build_one(
         }
         _ => {}
     }
-    let props = normalize_props(kind, obj)?;
+    let props = if kind == NodeType::Instance {
+        let rest: Map<String, Value> = obj
+            .iter()
+            .filter(|(k, _)| !matches!(k.as_str(), "component" | "componentId" | "of" | "overrides" | "text"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        normalize_props(kind, &rest)?
+    } else {
+        normalize_props(kind, obj)?
+    };
     // A frame with auto layout and no explicit size hugs its content by default.
     let has_layout = props.get("layoutMode").and_then(|v| v.as_str()).map(|s| s != "NONE").unwrap_or(false);
     for (k, v) in &props {
         node.set_prop(k, v)?;
     }
-    if kind == NodeType::Frame && has_layout {
+    if kind == NodeType::Instance {
+        // Inherited props given at creation are instance overrides (else the
+        // main component's values would win on the next sync).
+        let mut own = Map::new();
+        for (k, v) in &props {
+            if crate::components::INHERITED.contains(&k.as_str()) {
+                own.insert(k.clone(), v.clone());
+            }
+        }
+        if !own.is_empty() {
+            let entry = node.overrides.entry(String::new()).or_insert_with(|| Value::Object(Map::new()));
+            if let Value::Object(e) = entry {
+                e.extend(own);
+            }
+        }
+    }
+    if matches!(kind, NodeType::Frame | NodeType::Component) && has_layout {
         if !obj.contains_key("width") && !obj.contains_key("w") {
             node.layout_sizing_horizontal = crate::paint::SizingMode::Hug;
         }
@@ -395,7 +515,7 @@ fn build_one(
     ops.push(Op::Create { node });
     let keys = fractional::keys_between(None, None, children.len());
     for (c, key) in children.iter().zip(keys) {
-        build_one(c, &id, kind, key, ops, new_id)?;
+        build_one(doc, c, &id, kind, key, ops, new_id)?;
     }
     Ok(id)
 }

@@ -13,6 +13,7 @@ The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexm
 
 - **Workspace → project → file → page → nodes.** A file has one or more pages, and each page is a free canvas.
 - **Node types:**
+  - `COMPONENT`: a reusable main component, a frame-like container. `INSTANCE`: a live copy of a component (see "Components" below).
   - `FRAME`: a container. Frames are artboards and screens, and they also make cards and buttons. They can clip their content and use auto layout.
   - `GROUP`
   - `RECTANGLE`, `ELLIPSE`, `LINE`, `POLYGON`, `STAR`
@@ -38,6 +39,23 @@ The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexm
 5. **Checkpoint before big changes.** Before redesigning, deleting or restructuring existing work, call `save_version` with a clear label. People can then roll back from Version history.
 6. **Refine, don't rebuild.** Prefer `update_nodes` (change props), `move_nodes` (re-parent or reorder) and `duplicate_nodes` over deleting and recreating. That keeps the ids collaborators and comments refer to.
 7. **Report back.** Say briefly what you made, where it is (the page and frame name), and the file link.
+
+## Components (design systems)
+
+Anything that repeats (buttons, inputs, cards, nav items, list rows, avatars) should be a component. Change it once and every instance updates.
+
+1. **Make one.**
+   - Build it as a normal frame with `create_nodes`, with clear layer names (e.g. `Label`, `Icon`).
+   - Call `create_component` with that frame's id, or create it directly with `{type: "component", ...}`.
+   - Put components together on a page named "Components" when building a system.
+2. **Use it.** `create_nodes` with `{type: "instance", component: "Button", text: "Buy now"}`.
+   - `text` overrides the component's first text layer.
+   - For anything else, use `overrides: { "<layer name or id>": { color: "#fff", text: "…", visible: false } }`.
+   - Instance-level styling like `fill` or `stroke` is also an override.
+   - Create the component in an earlier call than its instances, since instances look the component up by name or id.
+3. **Customize one instance.** `update_nodes` works on an instance's inner layers through their ids from `get_file_tree` (they look like `instanceId~layerId`). These edits become overrides on that instance. Deleting an inner layer hides it.
+4. **Change all instances.** Edit the main component's layers. Overrides survive.
+5. **Discover existing ones.** Call `list_components` before building UI in an existing file, and reuse what's there. Call `detach_instance` only when a copy truly needs to diverge.
 
 ## Working with comments
 
@@ -81,6 +99,9 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `get_nodes` | Read full props of specific nodes (includes `absoluteBounds`) |
 | `find_nodes` | Search by name, text or type |
 | `get_selection` | See what live collaborators have selected |
+| `list_components` | The file's main components (its design system) |
+| `create_component` | Turn a frame or group into a reusable component |
+| `detach_instance` | Turn an instance into a plain, independent frame |
 | `save_version` | Checkpoint the file in its version history before risky edits |
 | `list_comments` | Read open feedback threads (who, where, which node, replies) |
 | `add_comment` | Pin a note on a node or point, or reply to a thread (`reply_to`) |

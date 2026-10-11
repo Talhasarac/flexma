@@ -212,7 +212,7 @@ pub async fn thumbnail(State(st): State<AppState>, user: AuthUser, Path(id): Pat
                 c.query_row("SELECT thumbnail, document FROM files WHERE id = ?1", params![id], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })?;
-            Ok(thumb.or_else(|| Document::from_json(&doc).ok().and_then(|d| render::thumbnail_svg(&d))))
+            Ok(thumb.or_else(|| render::load_document(&doc).and_then(|d| render::thumbnail_svg(&d))))
         })
         .await?;
     Ok((

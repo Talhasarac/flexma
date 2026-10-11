@@ -94,6 +94,7 @@ export function PropertiesPanel({ store, fileId }: Props) {
 
   return (
     <div className={`props${readOnly ? ' readonly' : ''}`}>
+      <ComponentBanner store={store} sel={sel} readOnly={readOnly} />
       {!readOnly && (
         <div className="align-row">
           <IconButton active={false} title="Align left" onClick={() => engine.align('left')}>
@@ -247,6 +248,93 @@ export function PropertiesPanel({ store, fileId }: Props) {
 
 function typeLabel(t: NodeData['type']) {
   return t.charAt(0) + t.slice(1).toLowerCase();
+}
+
+/** Component / instance context at the top of the Design panel. */
+function ComponentBanner({ store, sel, readOnly }: { store: EditorStore; sel: NodeData[]; readOnly: boolean }) {
+  const e = store.engine;
+  const act = (f: () => void) => () => {
+    f();
+    store.poll();
+  };
+  if (sel.length !== 1) {
+    const anyInstance = sel.some((n) => n.type === 'INSTANCE' && !n.derived);
+    if (!anyInstance || readOnly) return null;
+    return (
+      <div className="component-banner">
+        <div className="row-actions">
+          <button type="button" className="btn btn-xs" onClick={act(() => e.detach_instances())}>
+            Detach instances
+          </button>
+        </div>
+      </div>
+    );
+  }
+  const n = sel[0];
+  if (n.type === 'COMPONENT') {
+    return (
+      <div className="component-banner">
+        <span>
+          <b>❖ Main component</b> · {n.instanceCount ?? 0} instance{n.instanceCount === 1 ? '' : 's'}
+        </span>
+        {!readOnly && (
+          <div className="row-actions">
+            <button type="button" className="btn btn-xs" onClick={act(() => e.insert_instance(n.id))}>
+              Create instance
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (n.type === 'INSTANCE' && !n.derived) {
+    return (
+      <div className="component-banner">
+        <span>
+          <b>◇ {n.componentName ?? 'Missing component'}</b> instance
+          {n.overrideCount ? ` · ${n.overrideCount} override${n.overrideCount === 1 ? '' : 's'}` : ''}
+        </span>
+        <div className="row-actions">
+          <button type="button" className="btn btn-xs" onClick={act(() => e.go_to_main_component(n.id))}>
+            Go to main
+          </button>
+          {!readOnly && (
+            <>
+              {!!n.overrideCount && (
+                <button type="button" className="btn btn-xs" onClick={act(() => e.reset_overrides(JSON.stringify([n.id])))}>
+                  Reset
+                </button>
+              )}
+              <button type="button" className="btn btn-xs" onClick={act(() => e.detach_instances())}>
+                Detach
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (n.derived) {
+    return (
+      <div className="component-banner">
+        <span>
+          <b>Inside an instance</b> — changes here are saved as overrides; the rest follows the main component.
+        </span>
+      </div>
+    );
+  }
+  if (!readOnly && (n.type === 'FRAME' || n.type === 'GROUP')) {
+    return (
+      <div className="component-banner subtle">
+        <div className="row-actions">
+          <button type="button" className="btn btn-xs" onClick={act(() => e.create_component())} title="⌥⌘K">
+            ❖ Create component
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return null;
 }
 
 function sizingOptions(sel: NodeData[], inAutoLayout: boolean) {

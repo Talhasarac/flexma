@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 fn is_auto(doc: &Document, id: &str) -> bool {
     doc.get(id)
-        .map(|n| n.kind == NodeType::Frame && n.layout_mode != LayoutMode::None)
+        .map(|n| n.kind.is_frame_like() && n.layout_mode != LayoutMode::None)
         .unwrap_or(false)
 }
 
@@ -51,7 +51,7 @@ pub fn relayout(doc: &mut Document, changed: &[NodeId]) -> Vec<NodeId> {
 pub fn relayout_all(doc: &mut Document) -> Vec<NodeId> {
     let mut frames = Vec::new();
     doc.walk(crate::node::ROOT_ID, &mut |n| {
-        if n.kind == NodeType::Frame && n.layout_mode != LayoutMode::None {
+        if n.kind.is_frame_like() && n.layout_mode != LayoutMode::None {
             frames.push(n.id.clone());
         }
     });

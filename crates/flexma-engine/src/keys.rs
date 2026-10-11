@@ -82,6 +82,10 @@ impl Editor {
                 self.wrap_selection(NodeType::Group, false);
             }
             ("g", true, true, _) => self.ungroup(),
+            ("k", true, _, true) | ("˚", true, _, _) => {
+                self.create_component();
+            }
+            ("b", true, _, true) | ("∫", true, _, _) => self.detach_instances(),
             ("g", true, false, true) => {
                 self.wrap_selection(NodeType::Frame, false);
             }

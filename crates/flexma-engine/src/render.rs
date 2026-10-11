@@ -567,7 +567,7 @@ impl Renderer {
             let is_hidden = hidden.contains(&n.id) || opacity <= 0.0;
             if !is_hidden {
                 match n.kind {
-                    NodeType::Rectangle | NodeType::Frame | NodeType::Ellipse => {
+                    NodeType::Rectangle | NodeType::Frame | NodeType::Ellipse | NodeType::Component | NodeType::Instance => {
                         self.build_box(n, &world, opacity, &mut inst, &mut cmds, &push_shape);
                     }
                     NodeType::Text => {
@@ -597,7 +597,7 @@ impl Renderer {
                     _ => {}
                 }
             }
-            if n.kind == NodeType::Frame && n.clips_content && item.span > 0 && !content_fits(doc, scene, i, item.span as usize, n, &world) {
+            if n.kind.is_frame_like() && n.clips_content && item.span > 0 && !content_fits(doc, scene, i, item.span as usize, n, &world) {
                 let ci = (inst.len() / INST_FLOATS) as u32;
                 push_instance(
                     &mut inst,

@@ -28,11 +28,29 @@ pub enum NodeType {
     Vector,
     Polygon,
     Star,
+    /// A main component: a frame whose content is reused by instances.
+    Component,
+    /// An instance of a component. Its children are derived (never stored).
+    Instance,
+}
+
+/// Derived nodes (the expanded children of instances) have ids containing `~`:
+/// `instanceId~sourceId`, nested as `I~N~S`. Regular ids never contain `~`.
+pub fn is_derived_id(id: &str) -> bool {
+    id.contains('~')
 }
 
 impl NodeType {
     pub fn is_container(self) -> bool {
-        matches!(self, NodeType::Document | NodeType::Page | NodeType::Frame | NodeType::Group)
+        matches!(
+            self,
+            NodeType::Document | NodeType::Page | NodeType::Frame | NodeType::Group | NodeType::Component | NodeType::Instance
+        )
+    }
+
+    /// Frames, components and instances share box styling, clipping and auto layout.
+    pub fn is_frame_like(self) -> bool {
+        matches!(self, NodeType::Frame | NodeType::Component | NodeType::Instance)
     }
 
     /// Nodes that can be placed on a canvas (everything but the document and pages).
@@ -57,6 +75,8 @@ impl NodeType {
             NodeType::Vector => "VECTOR",
             NodeType::Polygon => "POLYGON",
             NodeType::Star => "STAR",
+            NodeType::Component => "COMPONENT",
+            NodeType::Instance => "INSTANCE",
         }
     }
 
@@ -73,6 +93,8 @@ impl NodeType {
             NodeType::Vector => "Vector",
             NodeType::Polygon => "Polygon",
             NodeType::Star => "Star",
+            NodeType::Component => "Component",
+            NodeType::Instance => "Instance",
         }
     }
 }
@@ -210,6 +232,11 @@ define_node! {
     /// Children with absolute positioning are ignored by their parent's auto layout.
     layout_absolute: bool = false => "layoutAbsolute",
 
+    /// INSTANCE: the main component it shows.
+    component_id: Option<NodeId> = None => "componentId",
+    /// INSTANCE: per-node overrides, keyed by the source node id relative to the
+    /// instance (`""` = the instance itself, `N~S` = inside nested instance N).
+    overrides: serde_json::Map<String, serde_json::Value> = serde_json::Map::new() => "overrides",
     /// Free-form notes, handy for agents to leave intent or component docs.
     description: String = String::new() => "description",
     /// Canvas background color (PAGE nodes).
@@ -225,7 +252,7 @@ pub fn default_node() -> &'static Node {
 impl Node {
     pub fn new(id: impl Into<NodeId>, kind: NodeType) -> Node {
         let mut n = Node { id: id.into(), kind, name: kind.default_name().to_string(), ..Node::default() };
-        if kind == NodeType::Frame {
+        if kind.is_frame_like() {
             n.clips_content = true;
             n.fills = vec![Paint::solid(Color::WHITE)];
         }

@@ -7,7 +7,7 @@
 use crate::auth::Role;
 use crate::db::{now, random_string, Db};
 use crate::error::{AppError, AppResult};
-use flexma_doc::layout;
+use flexma_doc::{components, layout};
 use flexma_doc::{Document, NodeId, Op};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -62,35 +62,50 @@ pub struct Tx<'a> {
     pub doc: &'a mut Document,
     applied: Vec<Op>,
     changed: Vec<NodeId>,
+    removed: Vec<NodeId>,
     touched: Vec<NodeId>,
 }
 
 impl Tx<'_> {
-    pub fn apply(&mut self, op: Op) -> Result<(), String> {
+    fn apply_routed(&mut self, op: Op) -> Result<(), String> {
         let eff = self.doc.apply(&op)?;
         match &op {
             Op::Delete { .. } => {}
             other => self.touched.push(other.target().to_string()),
         }
         self.changed.extend(eff.changed);
+        self.removed.extend(eff.removed);
         self.applied.push(op);
+        Ok(())
+    }
+
+    /// Apply one op (edits aimed inside instances become instance overrides).
+    pub fn apply(&mut self, op: Op) -> Result<(), String> {
+        for op in components::route_ops(self.doc, vec![op]) {
+            self.apply_routed(op)?;
+        }
         Ok(())
     }
 
     /// Apply many ops; returns per-op errors (index, message) without stopping.
     pub fn apply_all(&mut self, ops: Vec<Op>) -> Vec<(usize, String)> {
         let mut errs = Vec::new();
-        for (i, op) in ops.into_iter().enumerate() {
-            if let Err(e) = self.apply(op) {
+        for (i, op) in components::route_ops(self.doc, ops).into_iter().enumerate() {
+            if let Err(e) = self.apply_routed(op) {
                 errs.push((i, e));
             }
         }
         errs
     }
 
-    /// Run auto layout now (so results can report final geometry).
+    /// Re-expand affected instances and run auto layout (so results can report final geometry).
     pub fn relayout(&mut self) {
-        layout::relayout(self.doc, &self.changed);
+        let synced = components::sync_instances(self.doc, &self.changed, &self.removed);
+        let mut changed = std::mem::take(&mut self.changed);
+        changed.extend(synced);
+        self.removed.clear();
+        layout::relayout(self.doc, &changed);
+        self.changed = changed;
     }
 }
 
@@ -297,6 +312,7 @@ impl Rooms {
             .await?;
         let (json, version) = loaded.ok_or_else(|| AppError::not_found("file"))?;
         let mut doc = Document::from_json(&json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
+        components::sync_all(&mut doc);
         layout::relayout_all(&mut doc);
 
         let mut map = self.rooms.lock().unwrap();
@@ -453,7 +469,7 @@ impl Room {
                 self.broadcast(m, Some(&client_id));
             }
             Cmd::Mutate { agent, f, reply } => {
-                let mut tx = Tx { doc: &mut self.doc, applied: vec![], changed: vec![], touched: vec![] };
+                let mut tx = Tx { doc: &mut self.doc, applied: vec![], changed: vec![], removed: vec![], touched: vec![] };
                 let result = f(&mut tx);
                 tx.relayout();
                 let Tx { applied, touched, .. } = tx;
@@ -510,15 +526,19 @@ impl Room {
         let mut accepted = Vec::with_capacity(ops.len());
         let mut rejected = Vec::new();
         let mut changed = Vec::new();
-        for op in ops {
+        let mut removed = Vec::new();
+        for op in components::route_ops(&self.doc, ops) {
             match self.doc.apply(&op) {
                 Ok(eff) => {
                     changed.extend(eff.changed);
+                    removed.extend(eff.removed);
                     accepted.push(op);
                 }
                 Err(e) => rejected.push((op, e)),
             }
         }
+        let synced = components::sync_instances(&mut self.doc, &changed, &removed);
+        changed.extend(synced);
         layout::relayout(&mut self.doc, &changed);
         if !accepted.is_empty() {
             self.version += 1;

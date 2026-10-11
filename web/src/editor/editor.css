@@ -1197,3 +1197,115 @@
 .presets button:hover {
   background: var(--bg-hover);
 }
+
+/* ---------- components & assets ---------- */
+.left-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.layer-row.component-layer .layer-name,
+.layer-row.component-layer .type-icon {
+  color: #9747ff;
+}
+.assets {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.assets-search {
+  margin-bottom: 8px;
+}
+.assets-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  color: var(--text-muted);
+  padding: 24px 8px;
+  line-height: 1.5;
+}
+.assets-group h4 {
+  margin: 8px 4px 6px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.assets-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.asset-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border-radius: var(--radius);
+}
+.asset-item:hover {
+  background: var(--bg-hover);
+}
+.asset-thumb {
+  width: 56px;
+  height: 44px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--canvas-bg);
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  cursor: copy;
+  overflow: hidden;
+}
+.asset-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.asset-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  font-size: var(--font-size-xs);
+}
+.asset-name {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: #9747ff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asset-actions {
+  display: flex;
+  opacity: 0;
+}
+.asset-item:hover .asset-actions {
+  opacity: 1;
+}
+.component-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, #9747ff 7%, transparent);
+}
+.component-banner b {
+  color: #9747ff;
+}
+.component-banner .row-actions .btn {
+  flex: 1;
+}
+.component-banner.subtle {
+  background: none;
+}

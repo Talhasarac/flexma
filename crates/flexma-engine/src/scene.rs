@@ -60,7 +60,7 @@ impl Scene {
         let slot = self.order.len();
         self.index.insert(n.id.clone(), slot);
         self.order.push(Item { id: n.id.clone(), depth, span: 0, parent_opacity: opacity, clip });
-        let child_clip = if n.kind == NodeType::Frame && n.clips_content {
+        let child_clip = if n.kind.is_frame_like() && n.clips_content {
             Some(match clip {
                 Some(c) => intersect(&c, &bounds),
                 None => bounds,

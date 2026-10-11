@@ -71,6 +71,8 @@ fn check_parent(doc: &Document, node: &Node) -> Result<(), String> {
         _ => {
             if parent.kind == NodeType::Document {
                 Err("canvas nodes must live inside a page, frame or group".into())
+            } else if parent.kind == NodeType::Instance || crate::node::is_derived_id(parent_id) {
+                Err("instances can't contain other layers; edit the main component instead".into())
             } else if !parent.kind.is_container() {
                 Err(format!("parent '{parent_id}' ({}) cannot have children", parent.kind.as_str()))
             } else {
@@ -85,7 +87,7 @@ impl Document {
     pub fn apply(&mut self, op: &Op) -> Result<OpEffect, String> {
         match op {
             Op::Create { node } => {
-                if node.id.is_empty() || node.id.len() > 128 {
+                if node.id.is_empty() || node.id.len() > 128 || crate::node::is_derived_id(&node.id) {
                     return Err("invalid node id".into());
                 }
                 if self.contains(&node.id) {
@@ -102,6 +104,9 @@ impl Document {
                 Ok(OpEffect { structure: true, changed: vec![id, parent], removed: vec![] })
             }
             Op::Update { id, props } => {
+                if crate::node::is_derived_id(id) {
+                    return Err("layers inside an instance are changed through the instance's overrides".into());
+                }
                 let current = self.get(id).ok_or_else(|| format!("node '{id}' does not exist"))?;
                 if id == ROOT_ID && (props.contains_key("parent") || props.contains_key("index")) {
                     return Err("cannot move the document root".into());
@@ -130,6 +135,9 @@ impl Document {
                 Ok(OpEffect { structure, changed, removed: vec![] })
             }
             Op::Delete { id } => {
+                if crate::node::is_derived_id(id) {
+                    return Err("layers inside an instance can't be deleted; hide them instead".into());
+                }
                 let node = self.get(id).ok_or_else(|| format!("node '{id}' does not exist"))?;
                 if id == ROOT_ID {
                     return Err("cannot delete the document root".into());

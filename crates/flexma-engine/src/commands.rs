@@ -71,7 +71,7 @@ impl Editor {
     }
 
     pub fn duplicate(&mut self) {
-        let ids = self.top_selection();
+        let ids: Vec<NodeId> = self.top_selection().into_iter().filter(|id| !flexma_doc::node::is_derived_id(id)).collect();
         if ids.is_empty() || !self.can_edit {
             return;
         }
@@ -98,7 +98,7 @@ impl Editor {
 
     /// Wrap the selection in a new GROUP or FRAME. Returns the new node id.
     pub fn wrap_selection(&mut self, kind: NodeType, auto_layout: bool) -> Option<NodeId> {
-        let ids = self.top_selection();
+        let ids: Vec<NodeId> = self.top_selection().into_iter().filter(|id| !flexma_doc::node::is_derived_id(id)).collect();
         if ids.is_empty() || !self.can_edit {
             return None;
         }
@@ -127,7 +127,7 @@ impl Editor {
         g.width = b.width.round().max(1.0);
         g.height = b.height.round().max(1.0);
         g.name = if kind == NodeType::Group { "Group".into() } else { "Frame".into() };
-        if kind == NodeType::Frame {
+        if kind.is_frame_like() {
             g.fills = vec![];
             g.clips_content = false;
         }
@@ -197,12 +197,16 @@ impl Editor {
     }
 
     pub fn ungroup(&mut self) {
+        if self.top_selection().iter().any(|id| self.doc.get(id).map(|n| n.kind == NodeType::Instance).unwrap_or(false)) {
+            self.detach_instances();
+            return;
+        }
         let ids = self.top_selection();
         let mut new_sel = Vec::new();
         self.begin("ungroup");
         for id in ids {
             let Some(g) = self.doc.get(&id).cloned() else { continue };
-            if !matches!(g.kind, NodeType::Group | NodeType::Frame) {
+            if !matches!(g.kind, NodeType::Group | NodeType::Frame | NodeType::Component) {
                 continue;
             }
             let Some(parent) = g.parent.clone() else { continue };
@@ -238,7 +242,7 @@ impl Editor {
         if ids.len() == 1 {
             let n = self.doc.get(&ids[0]).cloned();
             if let Some(n) = n {
-                if n.kind == NodeType::Frame {
+                if n.kind.is_frame_like() {
                     if n.layout_mode != LayoutMode::None {
                         self.update_nodes(vec![(n.id.clone(), props(&[("layoutMode", json!("NONE"))]))]);
                         return;
@@ -568,7 +572,7 @@ impl Editor {
         let target = match self.selection.as_slice() {
             [one] => {
                 let n = self.doc.get(one).unwrap();
-                if matches!(n.kind, NodeType::Frame | NodeType::Group) && !roots.contains(one) {
+                if matches!(n.kind, NodeType::Frame | NodeType::Group | NodeType::Component) && !flexma_doc::node::is_derived_id(one) && !roots.contains(one) {
                     one.clone()
                 } else {
                     n.parent.clone().unwrap_or_else(|| self.scene.page.clone())
@@ -662,11 +666,137 @@ impl Editor {
     fn frame_drop_target(&self, world: Vec2) -> Option<NodeId> {
         for it in self.scene.order.iter().rev() {
             let n = self.doc.get(&it.id)?;
-            if n.kind == NodeType::Frame && !n.locked && self.scene.aabb.get(&it.id).map(|b| b.contains(world)).unwrap_or(false) {
+            if matches!(n.kind, NodeType::Frame | NodeType::Component) && !flexma_doc::node::is_derived_id(&n.id) && !n.locked && self.scene.aabb.get(&it.id).map(|b| b.contains(world)).unwrap_or(false) {
                 return Some(n.id.clone());
             }
         }
         None
+    }
+
+    // ---------------- components ----------------
+
+    /// Cmd+Alt+K: a selected frame/group becomes a main component; any other
+    /// selection is wrapped in a new component.
+    pub fn create_component(&mut self) -> Option<NodeId> {
+        let ids: Vec<NodeId> = self.top_selection().into_iter().filter(|id| !flexma_doc::node::is_derived_id(id)).collect();
+        if ids.is_empty() || !self.can_edit {
+            return None;
+        }
+        if ids.len() == 1 {
+            let n = self.doc.get(&ids[0])?.clone();
+            match n.kind {
+                NodeType::Component | NodeType::Instance => return None,
+                NodeType::Frame | NodeType::Group => {
+                    let cid = self.new_id();
+                    let ops = flexma_doc::components::convert_to_component_ops(&self.doc, &n.id, &cid).ok()?;
+                    self.begin("create component");
+                    self.apply_local(ops);
+                    self.end();
+                    self.set_selection(vec![cid.clone()]);
+                    return Some(cid);
+                }
+                _ => {}
+            }
+        }
+        let id = self.wrap_selection(NodeType::Component, false)?;
+        if let Some(n) = self.doc.get(&id) {
+            if n.name == "Frame" {
+                self.apply_local(vec![Op::update1(id.clone(), "name", json!("Component"))]);
+            }
+        }
+        Some(id)
+    }
+
+    /// Cmd+Alt+B: detach selected instances into plain frames.
+    pub fn detach_instances(&mut self) {
+        let ids: Vec<NodeId> = self
+            .top_selection()
+            .into_iter()
+            .filter(|id| !flexma_doc::node::is_derived_id(id) && self.doc.get(id).map(|n| n.kind == NodeType::Instance).unwrap_or(false))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.begin("detach");
+        let mut new_sel = Vec::new();
+        for id in ids {
+            let mut gen_ids: Vec<NodeId> = Vec::new();
+            let count = self.doc.descendants(&id).len() + 2;
+            for _ in 0..count {
+                gen_ids.push(self.new_id());
+            }
+            let mut it = gen_ids.into_iter();
+            let mut gen = || it.next().unwrap_or_default();
+            if let Ok((ops, frame)) = flexma_doc::components::detach_ops(&self.doc, &id, &mut gen) {
+                self.apply_local(ops);
+                new_sel.push(frame);
+            }
+        }
+        self.end();
+        self.set_selection(new_sel);
+    }
+
+    /// Place an instance of a component, centered in view (or next to content).
+    pub fn insert_instance(&mut self, comp_id: &str) -> Option<NodeId> {
+        if !self.can_edit {
+            return None;
+        }
+        self.ensure_scene();
+        let comp = self.doc.get(comp_id)?.clone();
+        let page = self.scene.page.clone();
+        let c = self.cam.visible_world(self.css_w, self.css_h).center();
+        let (x, y) = ((c.x - comp.width / 2.0).round(), (c.y - comp.height / 2.0).round());
+        let id = self.new_id();
+        let index = self.doc.index_at_end(&page);
+        let node = flexma_doc::components::new_instance(&self.doc, comp_id, &id, &page, index, x, y).ok()?;
+        self.begin("insert instance");
+        self.apply_local(vec![Op::Create { node }]);
+        self.end();
+        self.set_selection(vec![id.clone()]);
+        Some(id)
+    }
+
+    /// Jump to an instance's main component (switching pages if needed).
+    pub fn go_to_main_component(&mut self, inst_id: &str) {
+        let Some(cid) = self.doc.get(inst_id).and_then(|n| n.component_id.clone()) else { return };
+        if !self.doc.contains(&cid) {
+            return;
+        }
+        if let Some(page) = self.doc.page_of(&cid) {
+            self.set_page(&page);
+        }
+        self.set_selection(vec![cid]);
+        self.zoom_to_fit(true);
+    }
+
+    pub fn reset_overrides(&mut self, ids: &[NodeId]) {
+        let ops: Vec<Op> = ids
+            .iter()
+            .filter(|id| self.doc.get(id).map(|n| n.kind == NodeType::Instance && !flexma_doc::node::is_derived_id(&n.id)).unwrap_or(false))
+            .map(|id| Op::update1(id.clone(), "overrides", json!({})))
+            .collect();
+        self.apply_local(ops);
+    }
+
+    /// Main components in the document, for the Assets panel.
+    pub fn components_json(&self) -> Value {
+        let mut out = Vec::new();
+        self.doc.walk(flexma_doc::ROOT_ID, &mut |n| {
+            if n.kind == NodeType::Component {
+                let page = self.doc.page_of(&n.id);
+                out.push(json!({
+                    "id": n.id,
+                    "name": n.name,
+                    "page": page,
+                    "pageName": page.as_deref().and_then(|p| self.doc.get(p)).map(|p| p.name.clone()),
+                    "width": n.width,
+                    "height": n.height,
+                    "description": n.description,
+                    "instances": flexma_doc::components::instances_of(&self.doc, &n.id).len(),
+                }));
+            }
+        });
+        Value::Array(out)
     }
 
     // ---------------- pages ----------------

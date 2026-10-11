@@ -12,6 +12,8 @@ use flexma_doc::{Affine, Color, NodeType, Rect, Vec2};
 const ACCENT: [f32; 4] = [0.427, 0.365, 0.988, 1.0];
 const GUIDE: [f32; 4] = [0.949, 0.306, 0.118, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// Components and instances get Figma's purple.
+const COMPONENT: [f32; 4] = [0.592, 0.278, 1.0, 1.0];
 const NONE: [f32; 4] = [0.0; 4];
 
 fn rgba(c: [f32; 4], a: f32) -> [f32; 4] {
@@ -48,10 +50,16 @@ impl Editor {
                 line(buf, a, b, sw, color);
             }
             _ => {
-                let r = if n.kind == NodeType::Rectangle || n.kind == NodeType::Frame { n.radii()[0].min(n.width / 2.0) } else { 0.0 };
+                let r = if n.kind == NodeType::Rectangle || n.kind.is_frame_like() { n.radii()[0].min(n.width / 2.0) } else { 0.0 };
                 overlay_rect(buf, &m, n.width, n.height, NONE, color, sw, r, false);
             }
         }
+    }
+
+    /// Components, instances and layers inside instances are drawn in purple.
+    fn is_component_related(&self, id: &str) -> bool {
+        flexma_doc::node::is_derived_id(id)
+            || self.doc.get(id).map(|n| matches!(n.kind, NodeType::Component | NodeType::Instance)).unwrap_or(false)
     }
 
     pub fn build_overlay(&mut self) -> (Vec<f32>, Vec<Label>) {
@@ -65,7 +73,7 @@ impl Editor {
         let page = self.scene.page.clone();
         for c in self.doc.children(&page).to_vec() {
             let Some(n) = self.doc.get(&c) else { continue };
-            if n.kind != NodeType::Frame || !n.visible {
+            if !n.kind.is_frame_like() || !n.visible {
                 continue;
             }
             let Some(b) = self.scene.aabb.get(&c) else { continue };
@@ -80,13 +88,19 @@ impl Editor {
                 name.pop();
                 name.push('…');
             }
+            let is_comp = matches!(n.kind, NodeType::Component | NodeType::Instance);
+            let prefix = match n.kind {
+                NodeType::Component => "❖ ",
+                NodeType::Instance => "◇ ",
+                _ => "",
+            };
             labels.push(Label {
-                text: name,
+                text: format!("{prefix}{name}"),
                 x: sb.x,
                 y: sb.y - 18.0,
                 size: 11.0,
                 weight: if selected { 600 } else { 500 },
-                fg: if selected { "#6d5dfc".into() } else { "#8a8a8f".into() },
+                fg: if is_comp { "#9747ff".into() } else if selected { "#6d5dfc".into() } else { "#8a8a8f".into() },
                 bg: None,
                 center: false,
             });
@@ -127,7 +141,8 @@ impl Editor {
         // Hover.
         if let Some(h) = self.hover.clone() {
             if !self.selection.contains(&h) && !dragging && self.scene.index.contains_key(&h) {
-                self.outline_node(&mut buf, &h, ACCENT, 1.5);
+                let color = if self.is_component_related(&h) { COMPONENT } else { ACCENT };
+                self.outline_node(&mut buf, &h, color, 1.5);
             }
         }
 
@@ -146,7 +161,8 @@ impl Editor {
         let editing = self.editing_text.clone();
         for id in &sel {
             if self.scene.index.contains_key(id) {
-                self.outline_node(&mut buf, id, ACCENT, 1.0);
+                let color = if self.is_component_related(id) { COMPONENT } else { ACCENT };
+                self.outline_node(&mut buf, id, color, 1.0);
             }
         }
         if let Some(t) = &editing {

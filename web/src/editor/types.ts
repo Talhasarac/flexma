@@ -11,7 +11,9 @@ export type NodeType =
   | 'TEXT'
   | 'VECTOR'
   | 'POLYGON'
-  | 'STAR';
+  | 'STAR'
+  | 'COMPONENT'
+  | 'INSTANCE';
 
 export type Tool = 'select' | 'hand' | 'frame' | 'rectangle' | 'ellipse' | 'line' | 'text' | 'pen' | 'polygon' | 'star';
 
@@ -22,7 +24,20 @@ export interface LayerNode {
   visible: boolean;
   locked: boolean;
   layout: boolean;
+  /** A layer inside an instance (follows its main component). */
+  derived: boolean;
   children: LayerNode[];
+}
+
+export interface ComponentInfo {
+  id: string;
+  name: string;
+  page: string | null;
+  pageName: string | null;
+  width: number;
+  height: number;
+  description: string;
+  instances: number;
 }
 
 export interface PageInfo {
@@ -98,6 +113,12 @@ export interface NodeData {
   layoutSizingVertical: 'FIXED' | 'HUG' | 'FILL';
   layoutAbsolute: boolean;
   description: string;
+  componentId: string | null;
+  overrides: Record<string, Record<string, unknown>>;
+  derived: boolean;
+  componentName?: string | null;
+  overrideCount?: number;
+  instanceCount?: number;
   parentType: NodeType | null;
   parentLayout: 'NONE' | 'HORIZONTAL' | 'VERTICAL';
 }

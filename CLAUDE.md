@@ -27,6 +27,8 @@ cargo run -p flexma-server                   # http://localhost:8080 (serves web
 - Every document change is an `Op` (`create`/`update`/`delete`), applied through `Document::apply`.
   - The server is authoritative and echoes ops back as acks.
   - Last writer wins per property.
+- Instance children are derived state. `flexma_doc::components::sync_instances` expands them on every replica, with ids `instanceId~sourceId`, so they are never stored or sent.
+  - Ops aimed at derived nodes must go through `components::route_ops`, which turns them into `overrides` updates on the instance. Both `Editor::apply_local` and the server do this.
 - Auto layout (`flexma_doc::layout`) is derived state. Every replica recomputes it locally after applying ops, and it is never sent as ops.
 - Sibling order uses fractional-index strings (`index`); ties are broken by node id.
 - Local edits go through `Editor::apply_local`, which records undo, queues the op for sync and re-runs layout. Remote ops go through `apply_remote`.

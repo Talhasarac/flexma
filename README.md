@@ -24,6 +24,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Undo and redo, copy and paste, keyboard shortcuts that match Figma's, and a layers panel with drag-to-reorder.
 - Version history: automatic snapshots and named versions, with one-click restore.
 - Comments pinned to the canvas or to layers, with threads, replies and resolve. Agents can read and resolve them too.
+- Components and instances, with overrides, nested instances, an Assets panel, detach, and "go to main component". Edits to a main component update every instance live, for people and agents alike.
 - Export to PNG and SVG.
 
 **Collaboration**
@@ -73,6 +74,7 @@ The MCP tools are:
 | Read | `get_file_tree`, `get_nodes`, `find_nodes`, `get_selection` |
 | Edit | `create_nodes`, `update_nodes`, `move_nodes`, `duplicate_nodes`, `delete_nodes` |
 | Look | `get_screenshot`, `export_svg` |
+| Design system | `list_components`, `create_component`, `detach_instance` (plus `{type:"instance"}` in `create_nodes`) |
 | Feedback | `list_comments`, `add_comment`, `resolve_comment` |
 | Safety | `save_version` (checkpoint before big edits; people restore from Version history) |
 

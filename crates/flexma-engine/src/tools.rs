@@ -148,7 +148,8 @@ impl Editor {
     fn frame_at(&self, world: Vec2, exclude: &HashSet<NodeId>) -> Option<NodeId> {
         for it in self.scene.order.iter().rev() {
             let Some(n) = self.doc.get(&it.id) else { continue };
-            if n.kind != NodeType::Frame || n.locked || exclude.contains(&n.id) {
+            // Drop targets: frames and main components (never instances or their layers).
+            if !matches!(n.kind, NodeType::Frame | NodeType::Component) || flexma_doc::node::is_derived_id(&n.id) || n.locked || exclude.contains(&n.id) {
                 continue;
             }
             if self.doc.ancestors(&n.id).iter().any(|a| exclude.contains(a)) {
@@ -197,7 +198,7 @@ impl Editor {
         }
         let first = chain.first()?.clone();
         let fnode = self.doc.get(&first)?;
-        let top_frame_with_kids = fnode.kind == NodeType::Frame && !self.doc.children(&first).is_empty();
+        let top_frame_with_kids = matches!(fnode.kind, NodeType::Frame | NodeType::Component) && !self.doc.children(&first).is_empty();
         if top_frame_with_kids {
             if chain.len() > 1 {
                 return Some(chain[1].clone());
@@ -652,7 +653,7 @@ impl Editor {
             .filter(|it| it.depth == 0)
             .find(|it| {
                 let n = self.doc.get(&it.id).unwrap();
-                n.kind == NodeType::Frame && self.scene.aabb.get(&it.id).map(|b| b.contains(start)).unwrap_or(false)
+                matches!(n.kind, NodeType::Frame | NodeType::Component) && self.scene.aabb.get(&it.id).map(|b| b.contains(start)).unwrap_or(false)
             })
             .map(|it| it.id.clone());
         let parent = container.unwrap_or_else(|| self.scene.page.clone());
@@ -673,7 +674,8 @@ impl Editor {
             .into_iter()
             .filter_map(|id| {
                 let n = self.doc.get(&id)?;
-                if n.locked {
+                // Layers inside instances stay put (they follow the main component).
+                if n.locked || flexma_doc::node::is_derived_id(&id) {
                     return None;
                 }
                 let pw = n.parent.as_deref().map(|p| self.doc.world_transform(p)).unwrap_or_default();
@@ -689,7 +691,7 @@ impl Editor {
             let p = self.doc.parent_of(&items[0].id).map(str::to_string);
             p.filter(|p| {
                 let pn = self.doc.get(p).unwrap();
-                pn.kind == NodeType::Frame && pn.layout_mode != LayoutMode::None && !self.doc.get(&items[0].id).unwrap().layout_absolute
+                matches!(pn.kind, NodeType::Frame | NodeType::Component) && pn.layout_mode != LayoutMode::None && !self.doc.get(&items[0].id).unwrap().layout_absolute
             })
         } else {
             None
@@ -1097,7 +1099,7 @@ impl Editor {
                     props.insert(k, v);
                 }
             }
-            NodeType::Frame => {
+            NodeType::Frame | NodeType::Component | NodeType::Instance => {
                 if props.contains_key("width") && n0.layout_sizing_horizontal == flexma_doc::SizingMode::Hug {
                     props.insert("layoutSizingHorizontal".into(), json!("FIXED"));
                 }

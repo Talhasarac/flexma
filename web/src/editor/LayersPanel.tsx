@@ -1,10 +1,12 @@
 // Left panel: pages + a virtualized layer tree (front-most first), with
 // selection, inline rename, visibility/lock toggles and drag-to-reorder.
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { AssetsPanel } from './AssetsPanel';
 import {
   ChevronDown,
   ChevronRight,
   Circle,
+  Diamond,
   Component,
   Eye,
   EyeOff,
@@ -33,6 +35,10 @@ function TypeIcon({ type, layout }: { type: NodeType; layout: boolean }) {
   switch (type) {
     case 'FRAME':
       return layout ? <Hash size={s} /> : <Frame size={s} />;
+    case 'COMPONENT':
+      return <Component size={s} />;
+    case 'INSTANCE':
+      return <Diamond size={s} />;
     case 'GROUP':
       return <Group size={s} />;
     case 'RECTANGLE':
@@ -64,10 +70,25 @@ interface Row {
 }
 
 export function LayersPanel({ store }: { store: EditorStore }) {
+  const [tab, setTab] = useState<'layers' | 'assets'>('layers');
   return (
     <div className="layers-panel">
-      <PagesSection store={store} />
-      <LayerTree store={store} />
+      <div className="left-tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={tab === 'layers'} className={`panel-tab${tab === 'layers' ? ' active' : ''}`} onClick={() => setTab('layers')}>
+          Layers
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'assets'} className={`panel-tab${tab === 'assets' ? ' active' : ''}`} onClick={() => setTab('assets')}>
+          Assets
+        </button>
+      </div>
+      {tab === 'layers' ? (
+        <>
+          <PagesSection store={store} />
+          <LayerTree store={store} />
+        </>
+      ) : (
+        <AssetsPanel store={store} />
+      )}
     </div>
   );
 }
@@ -262,11 +283,12 @@ function LayerTree({ store }: { store: EditorStore }) {
   };
 
   const onDragOver = (e: DragEvent, row: Row) => {
-    if (!dragId.current || dragId.current === row.node.id) return;
+    // Nothing can be dropped among an instance's layers.
+    if (!dragId.current || dragId.current === row.node.id || row.node.derived) return;
     e.preventDefault();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const t = (e.clientY - r.top) / r.height;
-    const container = row.node.type === 'FRAME' || row.node.type === 'GROUP';
+    const container = row.node.type === 'FRAME' || row.node.type === 'GROUP' || row.node.type === 'COMPONENT';
     const where = container && t > 0.3 && t < 0.7 ? 'inside' : t < 0.5 ? 'above' : 'below';
     if (!drop || drop.id !== row.node.id || drop.where !== where) setDrop({ id: row.node.id, where });
   };
@@ -304,9 +326,9 @@ function LayerTree({ store }: { store: EditorStore }) {
             return (
               <div
                 key={n.id}
-                className={`layer-row${isSel ? ' selected' : ''}${parentSelected ? ' child-of-selected' : ''}${!n.visible ? ' hidden' : ''}${dropClass}`}
+                className={`layer-row${isSel ? ' selected' : ''}${parentSelected ? ' child-of-selected' : ''}${!n.visible ? ' hidden' : ''}${n.derived || n.type === 'COMPONENT' || n.type === 'INSTANCE' ? ' component-layer' : ''}${dropClass}`}
                 style={{ top: i * ROW_H, paddingLeft: 8 + row.depth * 14 }}
-                draggable={ui.canEdit && renaming !== n.id}
+                draggable={ui.canEdit && renaming !== n.id && !n.derived}
                 onDragStart={(e) => {
                   dragId.current = n.id;
                   e.dataTransfer.effectAllowed = 'move';

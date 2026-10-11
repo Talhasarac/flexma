@@ -12,6 +12,7 @@
 //! - [`friendly`]: forgiving node specs for AI agents (MCP)
 
 pub mod color;
+pub mod components;
 pub mod doc;
 pub mod fractional;
 pub mod friendly;

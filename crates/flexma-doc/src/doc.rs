@@ -95,12 +95,16 @@ impl Document {
         serde_json::to_string(&self.snapshot()).unwrap_or_else(|_| "{\"nodes\":[]}".into())
     }
 
-    /// Pre-order traversal.
+    /// Pre-order traversal of stored nodes. The derived children of instances
+    /// are skipped (unless the walk starts inside a derived subtree).
     pub fn walk(&self, id: &str, f: &mut dyn FnMut(&Node)) {
         if let Some(n) = self.nodes.get(id) {
             f(n);
+            let derived_parent = crate::node::is_derived_id(id);
             for c in self.children(id) {
-                self.walk(c, f);
+                if derived_parent || !crate::node::is_derived_id(c) {
+                    self.walk(c, f);
+                }
             }
         }
     }
@@ -235,7 +239,7 @@ impl Document {
         if let Some(n) = self.nodes.get(id) {
             if n.kind.is_scene() {
                 r = self.world_bounds(id);
-                if n.kind == NodeType::Frame && n.clips_content {
+                if n.kind.is_frame_like() && n.clips_content {
                     return r;
                 }
             }

@@ -9,6 +9,14 @@ use std::sync::{Arc, OnceLock};
 
 const MAX_THUMBNAIL_BYTES: usize = 1_500_000;
 
+/// Parse a stored document and derive its computed state (instances, layout).
+pub fn load_document(json: &str) -> Option<Document> {
+    let mut doc = Document::from_json(json).ok()?;
+    flexma_doc::components::sync_all(&mut doc);
+    flexma_doc::layout::relayout_all(&mut doc);
+    Some(doc)
+}
+
 pub fn page_background(doc: &Document, page: &str) -> Color {
     doc.get(page)
         .and_then(|p| p.background)

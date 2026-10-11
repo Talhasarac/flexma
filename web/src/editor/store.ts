@@ -4,7 +4,7 @@
 import { useSyncExternalStore } from 'react';
 import type { FlexmaEditor } from '../engine';
 import { api, type CommentThread } from '../lib/api';
-import type { ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, Tool } from './types';
+import type { ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, Tool } from './types';
 
 type Listener = () => void;
 
@@ -46,6 +46,7 @@ export class EditorStore {
   // cached snapshots
   private v = { structure: -1, selection: -1, ui: -1, zoom: -1, pages: -1 };
   private layers: LayerNode[] = [];
+  private components: ComponentInfo[] = [];
   private selection: NodeData[] = [];
   private pages: { pages: PageInfo[]; current: string } = { pages: [], current: '' };
   private ui: UiState = {
@@ -89,6 +90,7 @@ export class EditorStore {
     if (sv !== this.v.structure) {
       this.v.structure = sv;
       this.layers = JSON.parse(e.layers()) as LayerNode[];
+      this.components = JSON.parse(e.components()) as ComponentInfo[];
       this.pages = JSON.parse(e.pages()) as { pages: PageInfo[]; current: string };
       changed = true;
     }
@@ -136,6 +138,7 @@ export class EditorStore {
   }
 
   getLayers = () => this.layers;
+  getComponents = () => this.components;
   getSelection = () => this.selection;
   getPages = () => this.pages;
   getUi = () => this.ui;
@@ -308,6 +311,9 @@ export class EditorStore {
 
 export function useLayers(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getLayers);
+}
+export function useComponents(s: EditorStore) {
+  return useSyncExternalStore(s.subscribe, s.getComponents);
 }
 export function useSelection(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getSelection);

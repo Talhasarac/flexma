@@ -84,8 +84,7 @@ pub async fn preview(State(st): State<AppState>, user: AuthUser, Path((id, vid))
                 .ok_or_else(|| AppError::not_found("version"))
         })
         .await?;
-    let svg = Document::from_json(&doc)
-        .ok()
+    let svg = crate::render::load_document(&doc)
         .and_then(|d| crate::render::thumbnail_svg(&d))
         .unwrap_or_else(|| r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><rect width="320" height="200" fill="#f5f5f5"/></svg>"##.into());
     Ok((

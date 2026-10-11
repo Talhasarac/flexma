@@ -156,6 +156,17 @@ function Editor({ store, file, canvas, onFileChange }: { store: EditorStore; fil
       { label: 'Ungroup', hint: '⇧⌘G', disabled: !has || !edit, onSelect: act(() => e.ungroup()) },
       { label: 'Add auto layout', hint: '⇧A', disabled: !has || !edit, onSelect: act(() => e.add_auto_layout()) },
       { type: 'separator' },
+      { label: 'Create component', hint: '⌥⌘K', disabled: !has || !edit, onSelect: act(() => e.create_component()) },
+      { label: 'Detach instance', hint: '⌥⌘B', disabled: !has || !edit, onSelect: act(() => e.detach_instances()) },
+      {
+        label: 'Go to main component',
+        disabled: (JSON.parse(e.selection_ids()) as string[]).length !== 1,
+        onSelect: act(() => {
+          const [id] = JSON.parse(e.selection_ids()) as string[];
+          if (id) e.go_to_main_component(id.split('~')[0]);
+        }),
+      },
+      { type: 'separator' },
       { label: 'Show/Hide', hint: '⇧⌘H', disabled: !has || !edit, onSelect: act(() => e.toggle_visible(e.selection_ids())) },
       { label: 'Lock/Unlock', hint: '⇧⌘L', disabled: !has || !edit, onSelect: act(() => e.toggle_locked(e.selection_ids())) },
       { type: 'separator' },

@@ -168,7 +168,7 @@ impl Writer<'_> {
         let w = n.width;
         let h = n.height;
         Some(match n.kind {
-            NodeType::Rectangle | NodeType::Frame => {
+            NodeType::Rectangle | NodeType::Frame | NodeType::Component | NodeType::Instance => {
                 let r = n.radii();
                 if r.iter().all(|v| *v == r[0]) {
                     let rx = if r[0] > 0.0 { format!(r#" rx="{}""#, fmt_num(r[0])) } else { String::new() };
@@ -341,7 +341,7 @@ impl Writer<'_> {
 
         let kids: Vec<NodeId> = self.doc.children(&n.id).to_vec();
         if !kids.is_empty() {
-            let clip = n.kind == NodeType::Frame && n.clips_content;
+            let clip = n.kind.is_frame_like() && n.clips_content;
             if clip {
                 let id = self.id("c");
                 let shape = self.shape(n).unwrap_or_default();

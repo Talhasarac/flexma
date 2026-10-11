@@ -24,7 +24,8 @@ const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", 
 
 const INSTRUCTIONS: &str = "Flexma is a self-hosted collaborative design tool (like Figma). \
 Hierarchy: workspace > project > file > page > nodes. Nodes: FRAME (container/artboard, supports auto layout), \
-GROUP, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR (SVG path), POLYGON, STAR. Coordinates are pixels relative to the parent; \
+GROUP, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR (SVG path), POLYGON, STAR, COMPONENT (reusable main component) and \
+INSTANCE (a copy of a component; its layers have ids like inst~layer and edits to them become overrides). Coordinates are pixels relative to the parent; \
 y grows downward. Typical flow: list_workspaces -> list_files (or create_file) -> get_file_tree -> create_nodes / update_nodes \
 -> get_screenshot to check your work visually. Prefer auto-layout frames (layout: VERTICAL|HORIZONTAL, gap, padding, \
 justify, alignItems, width/height: number|\"fill\"|\"hug\") for UI. Colors are hex strings. Edits appear live to everyone \
@@ -148,6 +149,21 @@ fn tools() -> Value {
             "type": "object",
             "properties": { "file_id": file_id, "node_id": { "type": "string" }, "page_id": { "type": "string" } },
             "required": ["file_id"]
+        })),
+        tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
+            "type": "object",
+            "properties": { "file_id": file_id },
+            "required": ["file_id"]
+        })),
+        tool("create_component", "Turn an existing FRAME or GROUP into a reusable main component (keeps its look and children). Returns the component id. Then place copies with create_nodes {type:'instance', component:'<name or id>', text:'…', overrides:{'<layer name>':{…}}}.", json!({
+            "type": "object",
+            "properties": { "file_id": file_id, "node_id": { "type": "string" }, "name": { "type": "string" } },
+            "required": ["file_id", "node_id"]
+        })),
+        tool("detach_instance", "Convert an instance into a plain frame with editable copies of its layers (it stops following the main component).", json!({
+            "type": "object",
+            "properties": { "file_id": file_id, "node_id": { "type": "string" } },
+            "required": ["file_id", "node_id"]
         })),
         tool("list_comments", "Read the comment threads on a file (open ones by default): who said what, where (page/node), and replies. Use it to find feedback to address.", json!({
             "type": "object",
@@ -347,6 +363,9 @@ impl Ctx {
             "get_selection" => self.get_selection(args).await,
             "save_version" => self.save_version(args).await,
             "list_comments" => self.list_comments(args).await,
+            "list_components" => self.list_components(args).await,
+            "create_component" => self.create_component(args).await,
+            "detach_instance" => self.detach_instance(args).await,
             "add_comment" => self.add_comment(args).await,
             "resolve_comment" => self.resolve_comment(args).await,
             other => Err(format!("unknown tool '{other}'")),
@@ -605,7 +624,7 @@ impl Ctx {
                     re_estimate_text(node, &mut props);
                 }
                 // Resizing an auto-layout frame by hand switches it to fixed sizing.
-                if node.kind == NodeType::Frame {
+                if node.kind.is_frame_like() {
                     if props.contains_key("width") && !props.contains_key("layoutSizingHorizontal") && node.layout_sizing_horizontal == flexma_doc::SizingMode::Hug {
                         props.insert("layoutSizingHorizontal".into(), json!("FIXED"));
                     }
@@ -880,6 +899,92 @@ impl Ctx {
         Ok(text_result(svg))
     }
 
+    async fn list_components(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let room = self.room(&fid, Role::Viewer).await?;
+        let out = room
+            .read(|doc, _| {
+                let mut out = String::new();
+                doc.walk(ROOT_ID, &mut |n| {
+                    if n.kind == NodeType::Component {
+                        let page = doc.page_of(&n.id).and_then(|p| doc.get(&p)).map(|p| p.name.clone()).unwrap_or_default();
+                        let count = flexma_doc::components::instances_of(doc, &n.id).len();
+                        out.push_str(&format!(
+                            "COMPONENT \"{}\" [{}] {}×{} on page \"{}\" — {} instance(s){}\n",
+                            n.name,
+                            n.id,
+                            fmt_num(n.width),
+                            fmt_num(n.height),
+                            page,
+                            count,
+                            if n.description.is_empty() { String::new() } else { format!(" — {}", n.description) }
+                        ));
+                        for c in doc.children(&n.id) {
+                            if let Some(cn) = doc.get(c) {
+                                out.push_str(&format!("    layer {} \"{}\" [{}]\n", cn.kind.as_str(), cn.name, cn.id));
+                            }
+                        }
+                    }
+                });
+                if out.is_empty() {
+                    "No components yet. Make one with create_component (from a frame) or create_nodes {type:'component', …}.".to_string()
+                } else {
+                    out
+                }
+            })
+            .await
+            .map_err(err_msg)?;
+        Ok(text_result(out))
+    }
+
+    async fn create_component(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let node = s(args, "node_id")?.to_string();
+        let name = opt_s(args, "name").map(str::to_string);
+        let room = self.room(&fid, Role::Editor).await?;
+        let new_id = format!("a{}:1", random_string(6));
+        room.mutate(self.agent(), move |tx| {
+            let mut ops = flexma_doc::components::convert_to_component_ops(tx.doc, &node, &new_id)?;
+            if let (Some(name), Some(Op::Create { node: c })) = (name, ops.first_mut()) {
+                c.name = name;
+            }
+            let errs = tx.apply_all(ops);
+            if !errs.is_empty() {
+                return Err(format!("{errs:?}"));
+            }
+            tx.relayout();
+            let name = tx.doc.get(&new_id).map(|n| n.name.clone()).unwrap_or_default();
+            Ok(json!(format!("Created component \"{name}\" [{new_id}] (replaces {node}). Place it with create_nodes {{type:'instance', component:'{name}'}}.")))
+        })
+        .await
+        .map_err(err_msg)?
+        .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
+    async fn detach_instance(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let node = s(args, "node_id")?.to_string();
+        let room = self.room(&fid, Role::Editor).await?;
+        let prefix = format!("a{}", random_string(5));
+        room.mutate(self.agent(), move |tx| {
+            let mut n = 0u32;
+            let mut gen = || {
+                n += 1;
+                format!("{prefix}:{n}")
+            };
+            let (ops, frame) = flexma_doc::components::detach_ops(tx.doc, &node, &mut gen)?;
+            let errs = tx.apply_all(ops);
+            if !errs.is_empty() {
+                return Err(format!("{errs:?}"));
+            }
+            tx.relayout();
+            Ok(json!(format!("Detached into frame [{frame}].")))
+        })
+        .await
+        .map_err(err_msg)?
+        .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
     async fn list_comments(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
         let include = args.get("include_resolved").and_then(Value::as_bool).unwrap_or(false);
@@ -1104,8 +1209,16 @@ fn first_fill_hex(n: &Node) -> Option<String> {
     })
 }
 
-fn node_line(_doc: &Document, n: &Node) -> String {
+fn node_line(doc: &Document, n: &Node) -> String {
     let mut s = format!("{} \"{}\" [{}]", n.kind.as_str(), n.name.replace('"', "'"), n.id);
+    if n.kind == NodeType::Instance {
+        let comp = n.component_id.as_deref().and_then(|c| doc.get(c)).map(|c| c.name.clone()).unwrap_or_else(|| "missing component".into());
+        s.push_str(&format!(" of \"{comp}\""));
+        let count = n.overrides.len();
+        if count > 0 && !flexma_doc::node::is_derived_id(&n.id) {
+            s.push_str(&format!(" ({count} override(s))"));
+        }
+    }
     if n.kind.is_scene() {
         s.push_str(&format!(" @{},{} {}×{}", fmt_num(n.x), fmt_num(n.y), fmt_num(n.width), fmt_num(n.height)));
     }

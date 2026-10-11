@@ -330,6 +330,29 @@ impl FlexmaEditor {
     pub fn frame_selection(&mut self) {
         self.ed.wrap_selection(flexma_doc::NodeType::Frame, false);
     }
+    // ---------- components ----------
+
+    pub fn create_component(&mut self) -> Option<String> {
+        self.ed.create_component()
+    }
+    pub fn detach_instances(&mut self) {
+        self.ed.detach_instances();
+    }
+    pub fn insert_instance(&mut self, component_id: &str) -> Option<String> {
+        self.ed.insert_instance(component_id)
+    }
+    pub fn go_to_main_component(&mut self, instance_id: &str) {
+        self.ed.go_to_main_component(instance_id);
+    }
+    pub fn reset_overrides(&mut self, ids_json: &str) {
+        let ids = parse_ids(ids_json);
+        self.ed.reset_overrides(&ids);
+    }
+    /// Main components in the document (JSON array).
+    pub fn components(&self) -> String {
+        self.ed.components_json().to_string()
+    }
+
     pub fn add_auto_layout(&mut self) {
         self.ed.add_auto_layout();
     }
