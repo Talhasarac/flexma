@@ -143,6 +143,16 @@ Autosaves are taken at most every 15 minutes of editing; the newest 200 are kept
 - When `nodeId` is set, `x`/`y` are relative to that node's top-left corner. Otherwise they are page coordinates.
 - Open editors are notified with `{ t: "comments" }` over the socket.
 
+## Admin backups
+
+| Method | Path | Response |
+|---|---|---|
+| GET | `/api/admin/backup/info` | `{ databaseBytes, assetsFiles, assetsBytes, fontsFiles, fontsBytes }` |
+| GET | `/api/admin/backup` | a .zip download: `flexma.db` (a consistent `VACUUM INTO` snapshot), `assets/`, `fonts/`, `README.txt` |
+
+Admins only, and only with a browser session: API and agent tokens get 403. Restore with
+`flexma restore <file.zip>` while the server is stopped.
+
 ## API tokens & AI agents
 
 | Method | Path | Body | Response |

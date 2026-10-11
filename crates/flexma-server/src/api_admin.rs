@@ -1,10 +1,13 @@
-//! Instance administration (admins only): users and instance settings.
+//! Instance administration (admins only): users, instance settings and backups.
 
 use crate::auth::{hash_password, AuthUser};
 use crate::db::{now, random_string, ts};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::header;
+use axum::response::Response;
 use axum::Json;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
@@ -189,4 +192,26 @@ pub async fn update_settings(State(st): State<AppState>, user: AuthUser, Json(re
             .await?;
     }
     get_settings(State(st), user).await
+}
+
+/// What a full backup contains (sizes), for the Admin page.
+pub async fn backup_info(State(st): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    require_admin(&user)?;
+    Ok(Json(crate::backup::info(&st).await?))
+}
+
+/// Download a full-server backup (.zip). Browser sessions only: API and agent
+/// tokens can't fetch it, since it holds everyone's data.
+pub async fn backup(State(st): State<AppState>, user: AuthUser) -> AppResult<Response> {
+    require_admin(&user)?;
+    let (file, size, filename) = crate::backup::create(&st).await?;
+    tracing::info!("{} downloaded a full backup ({size} bytes)", user.email);
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(file)));
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::CONTENT_LENGTH, size)
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(body)
+        .map_err(AppError::internal)
 }

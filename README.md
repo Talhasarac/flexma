@@ -42,6 +42,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 **Self-hosting**
 - A single Rust binary with an SQLite database.
 - `docker compose up` with automatic HTTPS.
+- One-click full backups for admins (Admin → Backups) and `flexma restore` to bring one back.
 - See [Deploy on DigitalOcean](docs/deploy-digitalocean.md).
 
 ## Quick start (Docker)

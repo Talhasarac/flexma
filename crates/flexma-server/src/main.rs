@@ -14,6 +14,7 @@ mod api_tokens;
 mod api_versions;
 mod api_workspaces;
 mod auth;
+mod backup;
 mod config;
 mod db;
 mod error;
@@ -38,7 +39,7 @@ use tower_http::trace::TraceLayer;
 
 fn usage() -> ! {
     eprintln!(
-        "flexma {}\n\nUSAGE:\n  flexma                       run the server\n  flexma reset-password EMAIL  set a new password for a user (prompts on stdin)\n\nENVIRONMENT:\n  FLEXMA_ADDR            listen address (default 0.0.0.0:8080)\n  FLEXMA_DATA_DIR        database + uploads (default ./data)\n  FLEXMA_WEB_DIR         built web app (default ./web/dist)\n  FLEXMA_PUBLIC_URL      public base URL, e.g. https://design.example.com\n  FLEXMA_ALLOW_SIGNUP    allow open sign-up (default false: invite-only after the first admin)\n  FLEXMA_INSTANCE_NAME   name shown on the login page\n  FLEXMA_MAX_UPLOAD_MB   image upload limit (default 25)\n  FLEXMA_FONTS_DIR       extra fonts for server-side PNG rendering",
+        "flexma {}\n\nUSAGE:\n  flexma                       run the server\n  flexma reset-password EMAIL  set a new password for a user (prompts on stdin)\n  flexma restore FILE.zip      replace the data with a backup from the Admin page (stop the server first)\n\nENVIRONMENT:\n  FLEXMA_ADDR            listen address (default 0.0.0.0:8080)\n  FLEXMA_DATA_DIR        database + uploads (default ./data)\n  FLEXMA_WEB_DIR         built web app (default ./web/dist)\n  FLEXMA_PUBLIC_URL      public base URL, e.g. https://design.example.com\n  FLEXMA_ALLOW_SIGNUP    allow open sign-up (default false: invite-only after the first admin)\n  FLEXMA_INSTANCE_NAME   name shown on the login page\n  FLEXMA_MAX_UPLOAD_MB   image upload limit (default 25)\n  FLEXMA_FONTS_DIR       extra fonts for server-side PNG rendering",
         env!("CARGO_PKG_VERSION")
     );
     std::process::exit(2)
@@ -69,10 +70,24 @@ async fn main() {
         .init();
 
     let cfg = config::Config::from_env();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Restore before opening the database it replaces.
+    if args.first().map(String::as_str) == Some("restore") {
+        let zip = args.get(1).cloned().unwrap_or_else(|| usage());
+        match backup::restore(&cfg.data_dir, std::path::Path::new(&zip), &cfg.addr) {
+            Ok(msg) => {
+                println!("{msg}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("restore failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     std::fs::create_dir_all(cfg.data_dir.join("assets")).expect("cannot create data directory");
     let db = db::Db::open(&cfg.data_dir.join("flexma.db")).expect("cannot open database");
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => {}
         Some("reset-password") => {
@@ -177,6 +192,8 @@ async fn main() {
         .route("/admin/users/{id}", patch(api_admin::update_user).delete(api_admin::delete_user))
         .route("/admin/users/{id}/reset-password", post(api_admin::reset_password))
         .route("/admin/settings", get(api_admin::get_settings).patch(api_admin::update_settings))
+        .route("/admin/backup", get(api_admin::backup))
+        .route("/admin/backup/info", get(api_admin::backup_info))
         .route("/health", get(|| async { "ok" }))
         .fallback(|| async { error::AppError::not_found("endpoint") })
         .layer(DefaultBodyLimit::max(cfg.max_upload_bytes + 1024 * 1024));

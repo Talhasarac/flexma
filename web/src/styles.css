@@ -2760,3 +2760,13 @@ kbd {
   justify-content: flex-start;
   margin: 8px 0 4px;
 }
+
+/* ---------- admin backups ---------- */
+.backup-restore summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+.backup-restore[open] summary {
+  margin-bottom: 10px;
+}

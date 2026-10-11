@@ -12,6 +12,7 @@ import { SettingsSection } from '../../components/SettingsSection';
 import { useDialogs } from '../../components/Dialogs';
 import { useToast } from '../../components/Toast';
 import { PageHeader } from '../../components/dashboard/PageHeader';
+import { BackupSection } from './BackupSection';
 
 /** Instance administration: users and sign-up policy (admins only). */
 export default function AdminPage() {
@@ -138,6 +139,7 @@ export default function AdminPage() {
             </ul>
           )}
         </SettingsSection>
+        <BackupSection />
       </div>
       <Modal
         open={tempPassword !== null}

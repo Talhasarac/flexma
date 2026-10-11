@@ -30,3 +30,5 @@ imagesize = "0.13"
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 ureq = "3"
 ttf-parser = "0.25"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+tokio-util = { version = "0.7.20", features = ["io"] }

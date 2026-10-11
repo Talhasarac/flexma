@@ -290,6 +290,14 @@ impl Rooms {
     }
 
     /// Flush all rooms (graceful shutdown).
+    /// Save every open document now (e.g. right before a backup).
+    pub async fn flush_all(&self) {
+        let handles: Vec<RoomHandle> = self.rooms.lock().unwrap().values().cloned().collect();
+        for h in handles {
+            let _ = h.flush().await;
+        }
+    }
+
     pub async fn shutdown_all(&self) {
         let handles: Vec<RoomHandle> = self.rooms.lock().unwrap().drain().map(|(_, h)| h).collect();
         for h in handles {

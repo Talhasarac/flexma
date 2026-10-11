@@ -94,13 +94,24 @@ docker compose logs -f flexma
 git pull && docker compose up -d --build
 ```
 
-**Back up.** Everything lives in the `flexma-data` volume (a SQLite database plus uploaded images):
+**Back up.** Admins can download a full backup from **Admin → Backups**: one .zip with a consistent copy
+of the database (accounts, workspaces, designs, version history, comments), uploaded images and fonts.
+It's made while the server runs, from a signed-in browser only (API and agent tokens can't fetch it).
+
+Restore it with the `flexma restore` command. Stop the server first; the data it replaces is moved to a
+`pre-restore-*` folder, not deleted:
 
 ```bash
-docker compose stop flexma
-docker run --rm -v flexma_flexma-data:/data -v "$PWD":/backup alpine tar czf /backup/flexma-$(date +%F).tgz -C / data
-docker compose start flexma
+systemctl stop flexma
+FLEXMA_DATA_DIR=/var/lib/flexma /opt/flexma/flexma restore /root/flexma-backup-….zip
+systemctl start flexma
 ```
+
+With Docker, copy the zip into the volume and run `docker compose run --rm flexma flexma restore /data/<file>.zip`.
+
+Don't copy `flexma.db` on its own while the server runs: recent changes live in `flexma.db-wal` until
+SQLite merges them. To snapshot from the shell, use `sqlite3 flexma.db ".backup copy.db"` and also copy
+`assets/` and `fonts/`.
 
 **Reset a password:**
 

@@ -155,6 +155,14 @@ export interface CreatedApiToken {
 }
 
 /** Setup snippets for AI agents. */
+export interface BackupInfo {
+  databaseBytes: number;
+  assetsFiles: number;
+  assetsBytes: number;
+  fontsFiles: number;
+  fontsBytes: number;
+}
+
 export interface AgentSetup {
   mcpUrl: string;
   skillInstallCommand: string;
@@ -596,6 +604,10 @@ const admin = {
   resetPassword: (id: string) => request<{ password: string }>('POST', `/api/admin/users/${enc(id)}/reset-password`),
   settings: () => request<InstanceSettings>('GET', '/api/admin/settings'),
   updateSettings: (patch: { allowSignup?: boolean }) => request<InstanceSettings>('PATCH', '/api/admin/settings', { body: patch }),
+  /** Sizes of what a full backup contains. */
+  backupInfo: () => request<BackupInfo>('GET', '/api/admin/backup/info'),
+  /** Download URL for a full-server backup (.zip); needs a browser session. */
+  backupUrl: '/api/admin/backup',
 };
 
 const tokens = {
