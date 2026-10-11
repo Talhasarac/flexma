@@ -60,7 +60,13 @@ fn id_list(v: &Value) -> Option<Vec<String>> {
         Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
         Value::String(s) => match serde_json::from_str::<Vec<String>>(s) {
             Ok(list) => list,
-            Err(_) => s.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(str::to_string).collect(),
+            // Stray quotes and brackets around the list or its ids are dropped.
+            Err(_) => s
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .map(|t| t.trim_matches(|c: char| matches!(c, '"' | '\'' | '[' | ']' | '`')))
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect(),
         },
         _ => return None,
     };
@@ -2759,6 +2765,8 @@ mod arg_tests {
         // Clients without the schema sometimes stringify arrays.
         assert_eq!(id_list(&json!("[\"a:1\",\"b:2\"]")), Some(vec!["a:1".into(), "b:2".into()]));
         assert_eq!(id_list(&json!("a:1, b:2")), Some(vec!["a:1".into(), "b:2".into()]));
+        assert_eq!(id_list(&json!("\"a:1, b:2\"")), Some(vec!["a:1".into(), "b:2".into()]));
+        assert_eq!(id_list(&json!("['a:1', 'b:2']")), Some(vec!["a:1".into(), "b:2".into()]));
         assert_eq!(id_list(&json!([])), None);
     }
 
