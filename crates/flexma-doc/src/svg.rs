@@ -102,6 +102,15 @@ fn visual_bounds(doc: &Document, n: &Node) -> Rect {
             _ => {}
         }
     }
+    // Text outlines reach past the text box (plus a little for glyph overhang).
+    if n.kind == NodeType::Text && n.has_visible_stroke() {
+        let reach = match n.stroke_align {
+            crate::paint::StrokeAlign::Outside => n.stroke_weight,
+            crate::paint::StrokeAlign::Center => n.stroke_weight / 2.0,
+            crate::paint::StrokeAlign::Inside => 0.0,
+        };
+        grow = grow.max(reach + n.font_size * 0.1);
+    }
     if grow > 0.0 { b.inflate(grow.ceil()) } else { b }
 }
 
@@ -529,26 +538,57 @@ impl Writer<'_> {
         } else {
             String::new()
         };
-        let _ = write!(
-            self.body,
-            r#"<text font-family="'{}', Inter, Helvetica, Arial, sans-serif" font-size="{}" font-weight="{}" text-anchor="{anchor}"{style}{deco}{ls}{fill_attr}>"#,
+        let font = format!(
+            r#"font-family="'{}', Inter, Helvetica, Arial, sans-serif" font-size="{}" font-weight="{}" text-anchor="{anchor}"{style}{deco}{ls}"#,
             // Quoted: names like "Exo 2" aren't valid unquoted CSS identifiers.
             escape(&n.font_family.replace(['\'', '"', '\\'], "")),
             fmt_num(n.font_size),
             n.font_weight,
         );
+        let mut spans = String::new();
         for (i, line) in lines.iter().enumerate() {
             // Baseline: center the em box in the line box, ascent ≈ 0.8em.
             let baseline = y0 + lh * i as f64 + (lh - n.font_size) / 2.0 + n.font_size * 0.8;
             let _ = write!(
-                self.body,
+                spans,
                 r#"<tspan x="{}" y="{}" xml:space="preserve">{}</tspan>"#,
                 fmt_num(x),
                 fmt_num(baseline),
                 escape(line)
             );
         }
-        self.body.push_str("</text>");
+        // Text outline (stroke): drawn from separate copies so it renders the
+        // same everywhere. OUTSIDE sits behind the fill, CENTER on top of it,
+        // INSIDE on top but clipped to the letters.
+        let stroke = if n.stroke_weight > 0.0 {
+            n.strokes.iter().rev().find(|p| p.is_visible()).cloned().and_then(|p| self.paint_attr(&p, n.width, n.height, "stroke"))
+        } else {
+            None
+        };
+        let outline = |width: f64, attr: &str| {
+            format!(
+                r#"<text {font} fill="none"{attr} stroke-width="{}" stroke-linejoin="round" stroke-linecap="round">{spans}</text>"#,
+                fmt_num(width)
+            )
+        };
+        let filled = format!(r#"<text {font}{fill_attr}>{spans}</text>"#);
+        match (stroke, n.stroke_align) {
+            (None, _) => self.body.push_str(&filled),
+            (Some(attr), crate::paint::StrokeAlign::Outside) => {
+                self.body.push_str(&outline(n.stroke_weight * 2.0, &attr));
+                self.body.push_str(&filled);
+            }
+            (Some(attr), crate::paint::StrokeAlign::Center) => {
+                self.body.push_str(&filled);
+                self.body.push_str(&outline(n.stroke_weight, &attr));
+            }
+            (Some(attr), crate::paint::StrokeAlign::Inside) => {
+                let clip = self.id("tc");
+                let _ = write!(self.defs, r#"<clipPath id="{clip}"><text {font}>{spans}</text></clipPath>"#);
+                self.body.push_str(&filled);
+                let _ = write!(self.body, r#"<g clip-path="url(#{clip})">{}</g>"#, outline(n.stroke_weight * 2.0, &attr));
+            }
+        }
     }
 }
 

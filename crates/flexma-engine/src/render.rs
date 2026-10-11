@@ -261,6 +261,10 @@ fn text_content_hash(n: &Node) -> u64 {
     f(n.letter_spacing).hash(&mut h);
     let c = text_color(n);
     (c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()).hash(&mut h);
+    if let Some((c, w, align)) = crate::text::text_stroke(n) {
+        (c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits(), f(w)).hash(&mut h);
+        format!("{align:?}").hash(&mut h);
+    }
     h.finish()
 }
 

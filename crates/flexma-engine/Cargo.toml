@@ -28,6 +28,7 @@ features = [
   "HtmlCanvasElement",
   "HtmlImageElement",
   "CanvasRenderingContext2d",
+  "ImageData",
   "TextMetrics",
   "WebGl2RenderingContext",
   "WebGlProgram",

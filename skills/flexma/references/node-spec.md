@@ -123,6 +123,7 @@ Sizing rules:
 | `letterSpacing` | px |
 | `italic` | bool |
 | `textDecoration` | `UNDERLINE`, `STRIKETHROUGH` or `null` |
+| `stroke`, `strokeWeight`, `strokeAlign` | Text outline. `OUTSIDE` (fill stays intact), `CENTER` (like TextMeshPro) or `INSIDE`. |
 | `textStyle` | Link to a shared text style by name or id (sets font, size, weight, line height, letter spacing); null detaches. |
 | `textAutoResize` | `WIDTH_AND_HEIGHT` (default: grows with the text), `HEIGHT` (fixed width, wraps; the default once you give a width), `NONE` (fixed box) |
 

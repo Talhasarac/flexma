@@ -2,7 +2,7 @@
 //! is shared with the server (`flexma_doc::text::wrap_lines`) so both agree on
 //! where lines wrap; only the metrics differ (real fonts here).
 
-use flexma_doc::paint::{TextAlign, TextAlignVertical, TextAutoResize};
+use flexma_doc::paint::{StrokeAlign, TextAlign, TextAlignVertical, TextAutoResize};
 use flexma_doc::{Color, Node, Paint};
 use std::collections::HashMap;
 use wasm_bindgen::{JsCast, JsValue};
@@ -54,6 +54,27 @@ pub fn text_color(n: &Node) -> Color {
             other => other.approx_color(),
         })
         .unwrap_or(Color::BLACK)
+}
+
+/// A text outline: color, width and alignment (from the top visible stroke).
+pub fn text_stroke(n: &Node) -> Option<(Color, f64, StrokeAlign)> {
+    if n.stroke_weight <= 0.0 {
+        return None;
+    }
+    let color = n.strokes.iter().rev().find(|p| p.is_visible()).map(|p| match p {
+        Paint::Solid { color, opacity, .. } => color.with_alpha(color.a * opacity),
+        other => other.approx_color(),
+    })?;
+    (color.a > 0.0).then_some((color, n.stroke_weight, n.stroke_align))
+}
+
+/// How far an outline reaches past the glyphs.
+fn stroke_reach(stroke: Option<(Color, f64, StrokeAlign)>) -> f64 {
+    match stroke {
+        Some((_, w, StrokeAlign::Outside)) => w,
+        Some((_, w, StrokeAlign::Center)) => w / 2.0,
+        _ => 0.0,
+    }
 }
 
 impl TextEngine {
@@ -155,7 +176,8 @@ impl TextEngine {
     pub fn rasterize(&mut self, n: &Node, mut scale: f64, max_px: u32) -> Option<Raster> {
         let w = n.width.max(1.0);
         let h = n.height.max(1.0);
-        let margin = (n.font_size * 0.35).ceil().max(2.0);
+        let stroke = text_stroke(n);
+        let margin = (n.font_size * 0.35 + stroke_reach(stroke)).ceil().max(2.0);
         let lw = w + margin * 2.0;
         let lh_box = h + margin * 2.0;
         let longest = lw.max(lh_box) * scale;
@@ -191,6 +213,11 @@ impl TextEngine {
             TextAlignVertical::Center => (n.height - total) / 2.0,
             TextAlignVertical::Bottom => n.height - total,
         };
+        // Outlined text is drawn as an opaque coverage mask first, then colored
+        // from a distance field (see `outline_from_mask`).
+        if stroke.is_some() {
+            ctx.set_fill_style_str("#000");
+        }
         for (i, line) in lines.iter().enumerate() {
             let top = y0 + lh * i as f64;
             let baseline = top + (lh - (asc + desc)) / 2.0 + asc;
@@ -210,6 +237,9 @@ impl TextEngine {
                 };
                 ctx.fill_rect(x0, yy, lw, thickness);
             }
+        }
+        if let Some((color, sw, align)) = stroke {
+            let _ = outline_from_mask(&ctx, px_w, px_h, text_color(n), color, sw * scale, align);
         }
         Some(Raster { px_w, px_h, rect: [-margin, -margin, lw, lh_box] })
     }
@@ -243,5 +273,143 @@ impl TextEngine {
         ctx.set_text_align("left");
         let _ = ctx.fill_text(text, padx, h / 2.0 + 0.5);
         (px_w, px_h)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text outlines from a distance field
+// ---------------------------------------------------------------------------
+
+/// Color a text mask (opaque glyphs on transparent) as fill + outline, like
+/// TextMeshPro: from the distance to the glyph edge rather than canvas
+/// strokeText, which draws seams where a font's contours overlap (common in
+/// variable fonts, including Inter). `width` is in device pixels.
+fn outline_from_mask(ctx: &CanvasRenderingContext2d, w: u32, h: u32, fill: Color, stroke: Color, width: f64, align: StrokeAlign) -> Result<(), JsValue> {
+    let img = ctx.get_image_data(0.0, 0.0, w as f64, h as f64)?;
+    let mut px = img.data().0;
+    let n = (w * h) as usize;
+    let cov: Vec<f32> = (0..n).map(|i| px[i * 4 + 3] as f32 / 255.0).collect();
+    // Squared distances to the nearest inside / outside pixel.
+    let inside = |c: f32| c >= 0.5;
+    let mut to_in: Vec<f32> = cov.iter().map(|&c| if inside(c) { 0.0 } else { f32::INFINITY }).collect();
+    let mut to_out: Vec<f32> = cov.iter().map(|&c| if inside(c) { f32::INFINITY } else { 0.0 }).collect();
+    edt(&mut to_in, w as usize, h as usize);
+    edt(&mut to_out, w as usize, h as usize);
+    let t = width.max(0.0) as f32;
+    // Base layer (outline color) reaches `base` px past the edge; the top
+    // layer (fill color) stops `top` px inside it. NaN = use the coverage.
+    let (base, top) = match align {
+        StrokeAlign::Outside => (t, f32::NAN),
+        StrokeAlign::Center => (t / 2.0, -t / 2.0),
+        StrokeAlign::Inside => (f32::NAN, -t),
+    };
+    let ramp = |edge: f32, sd: f32| (edge - sd + 0.5).clamp(0.0, 1.0);
+    for i in 0..n {
+        // Signed distance in px: negative inside the glyph.
+        let sd = if inside(cov[i]) { 0.5 - to_out[i].sqrt() } else { to_in[i].sqrt() - 0.5 };
+        let sa = if base.is_nan() { cov[i] } else { ramp(base, sd) } * stroke.a;
+        let fa = if top.is_nan() { cov[i] } else { ramp(top, sd) } * fill.a;
+        let a = fa + sa * (1.0 - fa);
+        let o = i * 4;
+        if a <= 0.0 {
+            px[o..o + 4].copy_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        let mix = |f: f32, s: f32| ((f * fa + s * sa * (1.0 - fa)) / a * 255.0).round().clamp(0.0, 255.0) as u8;
+        px[o] = mix(fill.r, stroke.r);
+        px[o + 1] = mix(fill.g, stroke.g);
+        px[o + 2] = mix(fill.b, stroke.b);
+        px[o + 3] = (a * 255.0).round() as u8;
+    }
+    let out = web_sys::ImageData::new_with_u8_clamped_array_and_sh(wasm_bindgen::Clamped(&px), w, h)?;
+    ctx.put_image_data(&out, 0.0, 0.0)
+}
+
+/// In-place 2D squared Euclidean distance transform (Felzenszwalb &
+/// Huttenlocher): 0 at feature pixels, infinity elsewhere on input.
+fn edt(grid: &mut [f32], w: usize, h: usize) {
+    let len = w.max(h);
+    let (mut f, mut d, mut v, mut z) = (vec![0.0f32; len], vec![0.0f32; len], vec![0usize; len], vec![0.0f32; len + 1]);
+    for x in 0..w {
+        for y in 0..h {
+            f[y] = grid[y * w + x];
+        }
+        edt_1d(&f[..h], &mut d[..h], &mut v, &mut z);
+        for y in 0..h {
+            grid[y * w + x] = d[y];
+        }
+    }
+    for y in 0..h {
+        f[..w].copy_from_slice(&grid[y * w..(y + 1) * w]);
+        edt_1d(&f[..w], &mut d[..w], &mut v, &mut z);
+        grid[y * w..(y + 1) * w].copy_from_slice(&d[..w]);
+    }
+}
+
+fn edt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    for q in 1..n {
+        if f[q].is_infinite() && f[v[k]].is_infinite() {
+            continue;
+        }
+        loop {
+            let p = v[k];
+            let s = if f[p].is_infinite() {
+                f32::NEG_INFINITY
+            } else {
+                ((f[q] + (q * q) as f32) - (f[p] + (p * p) as f32)) / (2.0 * q as f32 - 2.0 * p as f32)
+            };
+            if s <= z[k] && k > 0 {
+                k -= 1;
+                continue;
+            }
+            if s <= z[k] {
+                // First parabola: replace it.
+                v[k] = q;
+                z[k + 1] = f32::INFINITY;
+                break;
+            }
+            k += 1;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = f32::INFINITY;
+            break;
+        }
+    }
+    let mut j = 0usize;
+    for q in 0..n {
+        while z[j + 1] < q as f32 {
+            j += 1;
+        }
+        let p = v[j];
+        d[q] = if f[p].is_infinite() { f32::INFINITY } else { (q as f32 - p as f32).powi(2) + f[p] };
+    }
+}
+
+#[cfg(test)]
+mod edt_tests {
+    use super::edt;
+
+    #[test]
+    fn distances_to_the_nearest_feature() {
+        // A 7×1 row with one feature at x=2.
+        let mut g = vec![f32::INFINITY; 7];
+        g[2] = 0.0;
+        edt(&mut g, 7, 1);
+        assert_eq!(g, vec![4.0, 1.0, 0.0, 1.0, 4.0, 9.0, 16.0]);
+        // 2D: feature at the center of a 5×5 grid.
+        let mut g = vec![f32::INFINITY; 25];
+        g[12] = 0.0;
+        edt(&mut g, 5, 5);
+        assert_eq!(g[0], 8.0);
+        assert_eq!(g[7], 1.0);
+        assert_eq!(g[24], 8.0);
     }
 }
