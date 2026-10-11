@@ -76,7 +76,11 @@ export type Paint =
   | {
       type: 'IMAGE';
       asset: string;
-      fit?: 'FILL' | 'FIT' | 'STRETCH';
+      fit?: 'FILL' | 'FIT' | 'STRETCH' | 'TILE';
+      /** TILE: layer px per image px. */
+      tileScale?: number;
+      /** A region of the image in image px (a sprite in an atlas). */
+      crop?: { x: number; y: number; width: number; height: number } | null;
       /** Multiply color (Unity's Image.color). */
       tint?: string | null;
       slice?: NineSlice | null;

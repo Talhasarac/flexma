@@ -78,7 +78,7 @@ Shared color and text styles keep a design consistent: change a style once and e
 - **Upload:** call `upload_image` (say how many with `files`) and run the `curl` command it returns once per image. Each upload prints an asset id and a ready-made node.
 - **Place:** put `{ "type": "image", "asset": "<id>" }` in `create_nodes`.
   - Leave out width and height to keep the picture's proportions (longest side up to 1200), or give one side and the other follows.
-  - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`.
+  - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox), `STRETCH` or `TILE` (repeats at `tileScale`).
   - It's a rectangle with an image fill, so `radius`, `stroke`, `shadow` and `opacity` work, and it can sit inside auto layout.
 - **As a background:** any frame or shape can take `fill: { "type": "IMAGE", "asset": "<id>", "fit": "FILL" }`, e.g. a hero frame with text on top.
 - **Game UI:** `slice` gives 9-slice scaling (a sliced Unity sprite), `tint` multiplies the color (Unity's `Image.color`), and `filled` shows part of the image like a Filled image (bars and radial wheels), and `crop` picks a sprite out of an atlas, on the image shorthand or any `IMAGE` paint.

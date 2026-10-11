@@ -30,6 +30,10 @@ pub enum ImageFit {
     Fill,
     Fit,
     Stretch,
+    /// Repeat the image at `tileScale` from the bottom-left corner, like
+    /// Unity's Tiled image type.
+    #[serde(alias = "REPEAT", alias = "TILED")]
+    Tile,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,6 +75,9 @@ pub enum Paint {
         /// pixels. Fit, slice and filled then work on the region.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crop: Option<ImageCrop>,
+        /// `TILE`: layer pixels per image pixel for each tile.
+        #[serde(default = "one", skip_serializing_if = "is_one", rename = "tileScale")]
+        tile_scale: f32,
         #[serde(default = "one", skip_serializing_if = "is_one")]
         opacity: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]

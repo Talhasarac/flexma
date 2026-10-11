@@ -293,7 +293,7 @@ impl Writer<'_> {
     /// tile first and cut off very large ones.
     fn image_content(&mut self, p: &Paint, w: f64, h: f64) -> Option<String> {
         match p {
-            Paint::Image { asset, fit, opacity, tint, slice, crop, .. } => {
+            Paint::Image { asset, fit, opacity, tint, slice, crop, tile_scale, .. } => {
                 let mut href = escape(&(self.opts.resolve_asset)(asset)?);
                 // A crop makes the region the image. Viewports below point
                 // their viewBox at the region inside the full image (offset by
@@ -333,6 +333,25 @@ impl Writer<'_> {
                 let content = match sliced {
                     Some((s, (iw, ih), full)) => self.nine_slice(&href, &s, origin, full, iw, ih, w, h),
                     None => match (fit, slice, size) {
+                        // Tiles from the bottom-left corner, like Unity.
+                        (ImageFit::Tile, None, Some((iw, ih))) if iw > 0.0 && ih > 0.0 => {
+                            let k = tile_scale.max(0.01) as f64;
+                            let (tw, th) = (iw * k, ih * k);
+                            let pid = self.id("p");
+                            let _ = write!(
+                                self.defs,
+                                r#"<pattern id="{pid}" patternUnits="userSpaceOnUse" x="0" y="{}" width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none">{}</pattern>"#,
+                                fmt_num(h),
+                                fmt_num(tw),
+                                fmt_num(th),
+                                fmt_num(origin.0),
+                                fmt_num(origin.1),
+                                fmt_num(iw),
+                                fmt_num(ih),
+                                full_image.clone().unwrap_or_default()
+                            );
+                            format!(r#"<rect width="{}" height="{}" fill="url(#{pid})"/>"#, fmt_num(w), fmt_num(h))
+                        }
                         // Cover: show just the centered crop through a viewport, so
                         // nothing spills outside the box (and no clip is needed).
                         (ImageFit::Fill, None, Some((iw, ih))) if iw > 0.0 && ih > 0.0 && w > 0.0 && h > 0.0 => {
@@ -350,7 +369,7 @@ impl Writer<'_> {
                         }
                         _ => {
                             let par = match (fit, slice) {
-                                (_, Some(_)) | (ImageFit::Stretch, _) => "none",
+                                (_, Some(_)) | (ImageFit::Stretch | ImageFit::Tile, _) => "none",
                                 (ImageFit::Fill, _) => "xMidYMid slice",
                                 (ImageFit::Fit, _) => "xMidYMid meet",
                             };

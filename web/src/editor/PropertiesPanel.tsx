@@ -707,6 +707,7 @@ function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProp
                       { value: 'FILL', label: 'Fill' },
                       { value: 'FIT', label: 'Fit' },
                       { value: 'STRETCH', label: 'Stretch' },
+                      { value: 'TILE', label: 'Tile' },
                     ]}
                     onChange={(v) => update(paints.map((q, j) => (j === i ? { ...p, fit: v } : q)))}
                   />
@@ -830,6 +831,21 @@ function ImageOptions({ paint, onChange, store, begin, end }: { paint: ImagePain
           onPickEnd={end}
         />
       </div>
+      {paint.fit === 'TILE' && !s && (
+        <div className="grid2">
+          <NumberInput
+            label="Tile"
+            title="Tile scale: layer px per image px"
+            value={paint.tileScale ?? 1}
+            min={0.01}
+            step={0.05}
+            precision={2}
+            onChange={(v) => onChange({ ...paint, tileScale: v })}
+            onScrubStart={begin}
+            onScrubEnd={end}
+          />
+        </div>
+      )}
       <label className="check">
         <input type="checkbox" checked={!!s} onChange={(e) => toggleSlice(e.target.checked)} />
         9-slice

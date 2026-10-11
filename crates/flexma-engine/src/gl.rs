@@ -306,13 +306,20 @@ void main() {
       if (v_c3.y > 0.5 || !center) fill = sampleImage(tuv, dlx * f, dly * f) * v_c0 * v_c1.w;
     } else {
       float fit = v_c1.z;
-      vec2 scale;
-      if (fit < 0.5) { float s = max(sz.x / img.x, sz.y / img.y); scale = img * s; }
-      else if (fit < 1.5) { float s = min(sz.x / img.x, sz.y / img.y); scale = img * s; }
-      else { scale = sz; }
-      vec2 off = (sz - scale) * 0.5;
-      vec2 tuv = (v_local - off) / scale;
-      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = sampleImage(tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
+      if (fit > 2.5) {
+        // Tile: repeat at v_c3.w layer px per image px from the bottom-left, like Unity.
+        vec2 t = img * max(v_c3.w, 1e-4);
+        vec2 q = vec2(v_local.x, sz.y - v_local.y) / t;
+        fill = sampleImage(vec2(fract(q.x), 1.0 - fract(q.y)), dlx / t, dly / t) * v_c0 * v_c1.w;
+      } else {
+        vec2 scale;
+        if (fit < 0.5) { float s = max(sz.x / img.x, sz.y / img.y); scale = img * s; }
+        else if (fit < 1.5) { float s = min(sz.x / img.x, sz.y / img.y); scale = img * s; }
+        else { scale = sz; }
+        vec2 off = (sz - scale) * 0.5;
+        vec2 tuv = (v_local - off) / scale;
+        if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = sampleImage(tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
+      }
     }
     fill *= filledCoverage(v_local, sz, aa);
   }

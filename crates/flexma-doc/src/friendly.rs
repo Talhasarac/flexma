@@ -457,16 +457,17 @@ pub fn expand_image(spec: &Value) -> Result<Option<Value>, String> {
         "FILL" | "COVER" => "FILL",
         "FIT" | "CONTAIN" => "FIT",
         "STRETCH" => "STRETCH",
-        other => return Err(format!("unknown image fit '{other}' (use FILL, FIT or STRETCH)")),
+        "TILE" | "TILED" | "REPEAT" => "TILE",
+        other => return Err(format!("unknown image fit '{other}' (use FILL, FIT, STRETCH or TILE)")),
     };
     let mut paint = json!({ "type": "IMAGE", "asset": asset, "fit": fit });
-    for k in ["tint", "slice", "filled", "crop"] {
+    for k in ["tint", "slice", "filled", "crop", "tileScale"] {
         if let Some(v) = obj.get(k) {
             paint[k] = v.clone();
         }
     }
     let mut out = obj.clone();
-    for k in ["asset", "src", "image", "fit", "tint", "slice", "filled", "crop", "fill", "fills", "background"] {
+    for k in ["asset", "src", "image", "fit", "tint", "slice", "filled", "crop", "tileScale", "fill", "fills", "background"] {
         out.remove(k);
     }
     out.insert("type".into(), json!("RECTANGLE"));

@@ -286,7 +286,7 @@ mod large_fill_tests {
             dim.y = -2500.0;
             dim.width = 6000.0;
             dim.height = 6000.0;
-            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop: None, opacity: 1.0, visible: true }];
+            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: dim }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((64.0, 40.0));
@@ -335,7 +335,7 @@ mod alpha_mask_tests {
             mask.clips_content = true;
             mask.clip_alpha = true;
             mask.hide_fill = hide;
-            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop: None, opacity: 1.0, visible: true }];
+            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: mask }).unwrap();
             let mut red = Node::new("r:1", NodeType::Rectangle);
             red.parent = Some("f:1".into());
@@ -397,7 +397,7 @@ mod filled_image_tests {
             let mut r = Node::new("r:1", NodeType::Rectangle);
             r.parent = Some("f:0".into());
             (r.width, r.height) = (100.0, 100.0);
-            r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: Some(filled), crop: None, opacity: 1.0, visible: true }];
+            r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: Some(filled), crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: r }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((10.0, 10.0));
@@ -489,7 +489,7 @@ mod crop_tests {
             let mut r = Node::new("r:1", NodeType::Rectangle);
             r.parent = Some("f:0".into());
             (r.width, r.height) = (w, h);
-            r.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop, opacity: 1.0, visible: true }];
+            r.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop, tile_scale: 1.0, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: r }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((20.0, 10.0));
@@ -510,5 +510,68 @@ mod crop_tests {
                 assert_eq!(at(x, y), (255, 255, 255), "{fit:?}: ({x},{y}) is letterbox, not the atlas");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+    use flexma_doc::{ImageCrop, ImageFit, Node, NodeType, Op, Paint};
+
+    fn render(img: &resvg::tiny_skia::Pixmap, size: (f64, f64), crop: Option<ImageCrop>, scale: f32) -> resvg::tiny_skia::Pixmap {
+        use base64::Engine;
+        let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(img.encode_png().unwrap()));
+        let (iw, ih) = (img.width() as f64, img.height() as f64);
+        let mut doc = Document::new_empty();
+        let mut bg = Node::new("f:0", NodeType::Frame);
+        bg.parent = Some("0:1".into());
+        (bg.width, bg.height) = size;
+        doc.apply(&Op::Create { node: bg }).unwrap();
+        let mut r = Node::new("r:1", NodeType::Rectangle);
+        r.parent = Some("f:0".into());
+        (r.width, r.height) = size;
+        r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Tile, tint: None, slice: None, filled: None, crop, tile_scale: scale, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: r }).unwrap();
+        let resolve = |_: &str| Some(uri.clone());
+        let isize = |_: &str| Some((iw, ih));
+        let opts = SvgOptions { resolve_asset: &resolve, image_size: &isize, ..SvgOptions::default() };
+        let (svg, _) = export(&doc, &["f:0".to_string()], &opts).unwrap();
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(size.0 as u32, size.1 as u32).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+        pm
+    }
+
+    fn two_tone(w: u32, h: u32, split: impl Fn(u32, u32) -> bool) -> resvg::tiny_skia::Pixmap {
+        let mut img = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+        for (i, px) in img.pixels_mut().iter_mut().enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let c = if split(x, y) { (255, 0, 0) } else { (0, 0, 255) };
+            *px = resvg::tiny_skia::ColorU8::from_rgba(c.0, c.1, c.2, 255).premultiply();
+        }
+        img
+    }
+
+    fn red(pm: &resvg::tiny_skia::Pixmap, x: u32, y: u32) -> bool {
+        let p = pm.pixel(x, y).unwrap().demultiply();
+        p.red() > 200 && p.blue() < 60
+    }
+
+    /// Tiled images repeat from the bottom-left corner, like Unity.
+    #[test]
+    fn tiles_repeat_from_the_bottom_left() {
+        // Red top half, blue bottom half, in a 10×30 box: from the bottom,
+        // a full tile at 10..30 and the lower (blue) half of one above it.
+        let img = two_tone(10, 20, |_, y| y < 10);
+        let pm = render(&img, (10.0, 30.0), None, 1.0);
+        assert!(!red(&pm, 5, 5) && red(&pm, 5, 15) && !red(&pm, 5, 25), "anchored at the bottom");
+        // Columns: the red|blue atlas cropped to its red half, tiled at 2×:
+        // 20 px red tiles all the way across.
+        let atlas = two_tone(20, 10, |x, _| x < 10);
+        let pm = render(&atlas, (50.0, 20.0), Some(ImageCrop { x: 0.0, y: 0.0, width: 10.0, height: 10.0 }), 2.0);
+        assert!(red(&pm, 5, 10) && red(&pm, 25, 10) && red(&pm, 45, 10), "only the cropped sprite repeats");
+        // Uncropped at 1×: red, blue, red, blue, red every 10 px.
+        let pm = render(&atlas, (50.0, 10.0), None, 1.0);
+        assert!(red(&pm, 5, 5) && !red(&pm, 15, 5) && red(&pm, 25, 5) && !red(&pm, 35, 5) && red(&pm, 45, 5));
     }
 }

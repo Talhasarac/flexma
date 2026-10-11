@@ -48,7 +48,7 @@ Type defaults:
 { "type": "SOLID", "color": "#6d5dfc", "opacity": 0.8, "visible": true }
 { "type": "LINEAR_GRADIENT", "angle": 90, "stops": [
     { "position": 0, "color": "#6d5dfc" }, { "position": 1, "color": "#e9488d" } ] }
-{ "type": "IMAGE", "asset": "<asset id>", "fit": "FILL" }   // FILL | FIT | STRETCH
+{ "type": "IMAGE", "asset": "<asset id>", "fit": "FILL" }   // FILL | FIT | STRETCH | TILE
 { "type": "IMAGE", "asset": "<asset id>", "tint": "#ffd166", "slice": 12 }   // tinted 9-slice, see IMAGE
 { "type": "IMAGE", "asset": "<asset id>", "filled": { "method": "RADIAL_360", "amount": 0.4, "origin": "TOP" } }   // cooldown wheel
 ```
@@ -170,7 +170,8 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
 `{ "type": "image", "asset": "<id>", "fit": "FILL", "radius": 12 }`
 
 - `asset` (alias `src`): an id from `upload_image` or `list_images`. Required.
-- `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`; `cover` and `contain` work too.
+- `fit`: `FILL` (default, crops to cover), `FIT` (letterbox), `STRETCH` or `TILE`; `cover` and `contain` work too.
+  - `TILE` repeats the image from the bottom-left corner, like Unity's Tiled image type, at `tileScale` layer px per image px (default 1, 0.5 for @2x art).
 - Width and height default to the image's own size, scaled so the longest side is at most 1200. Give one side and the other keeps the proportions.
 - It becomes a `RECTANGLE` named "Image" with an `IMAGE` fill, so every rectangle prop works. To put an image behind content, give a frame an `IMAGE` fill instead.
 - `tint`: a multiply color, like Unity's `Image.color`. `#ffffff` leaves the image unchanged; alpha fades it.
