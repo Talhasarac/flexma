@@ -56,7 +56,7 @@ Roles: `owner` > `editor` > `viewer`. Viewers can open files read-only.
 | PATCH | `/api/files/:id` | `{ name?, projectId? }` | file |
 | DELETE | `/api/files/:id` | – | `{}` |
 | POST | `/api/files/:id/duplicate` | – | file |
-| GET | `/api/files/:id/thumbnail.svg` | – | SVG preview of the first page |
+| GET | `/api/files/:id/thumbnail.png` | – | PNG preview of the first page, rendered with the workspace's fonts and cached per file version |
 | GET | `/api/files/:id/export.svg?node=<id>&page=<id>` | – | SVG export |
 | GET | `/api/files/:id/export.png?node=<id>&page=<id>&scale=2` | – | PNG export |
 | POST | `/api/files/:id/assets` | raw image bytes, `Content-Type: image/*` | `{ id, url, width, height }` |
@@ -88,11 +88,35 @@ Public endpoints (no sign-in; `:token` is the 32-character link token):
 | GET | `/api/share/:token` | `{ fileId, name, workspaceName, sharedBy, updatedAt, expiresAt }` |
 | GET (WS) | `/api/share/:token/ws` | the multiplayer socket, joined as a read-only `Guest` peer (`isGuest: true`) |
 | GET | `/api/share/:token/export.svg`, `/export.png` | same query parameters as the file exports |
-| GET | `/api/share/:token/thumbnail.svg` | preview of the first page (cacheable for 60 s) |
+| GET | `/api/share/:token/thumbnail.png` | preview of the first page (cacheable for 60 s) |
+| GET | `/api/share/:token/fonts`, `/fonts/:fontId` | the workspace's fonts and font files, so guests see the right fonts |
 | GET | `/api/share/:token/assets/:assetId` | image bytes for the file's workspace |
 
 A dead, expired or unknown token returns 404. The web app serves the viewer at `/s/:token`
 and sends signed-in workspace members on to the full editor.
+
+## Fonts
+
+Fonts belong to a workspace: everyone in it gets them in every file, and so do
+share-link guests, PNG exports, thumbnails and agent screenshots. Google Fonts
+are downloaded once by the server and served from it, so browsers never
+contact Google.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/workspaces/:id/fonts` | – | `[font]` (members) |
+| POST | `/api/workspaces/:id/fonts` | raw `.ttf`/`.otf` bytes | `font`; replaces a face with the same family, weight and style (editors) |
+| POST | `/api/workspaces/:id/fonts/google` | `{ family }` | `{ family, styles }`: every style of a Google Fonts family (editors) |
+| DELETE | `/api/workspaces/:id/fonts?family=…` | – | `{}`: removes all styles of a family (editors) |
+| GET | `/api/fonts/:fontId` | – | font file (members of its workspace) |
+| GET | `/api/google-fonts` | – | `[{ family, category, styles, popularity }]`, most popular first, cached by the server for a week |
+| GET | `/api/google-fonts/preview?family=…` | – | a tiny font with just the family name's glyphs, for pickers |
+
+`font = { id, family, weight, weightMax, italic, source: "upload" | "google", format, size, createdBy, createdAt }`.
+`weightMax` differs from `weight` only for variable fonts. WOFF/WOFF2 and `.ttc`
+collections are rejected because the server renderer can't read them.
+
+Open editors get `{ t: "fonts" }` over the socket when a workspace's fonts change.
 
 ## Version history
 
@@ -100,7 +124,7 @@ and sends signed-in workspace members on to the full editor.
 |---|---|---|---|
 | GET | `/api/files/:id/versions` | – | `[{ id, label, version, createdAt, createdBy }]` (`label` is null for autosaves) |
 | POST | `/api/files/:id/versions` | `{ label }` | `{ id }`: saves the current state as a named version |
-| GET | `/api/files/:id/versions/:vid/preview.svg` | – | SVG preview |
+| GET | `/api/files/:id/versions/:vid/preview.png` | – | PNG preview |
 | POST | `/api/files/:id/versions/:vid/restore` | – | `{ restored }`: the current state is saved first, and open editors reload |
 
 Autosaves are taken at most every 15 minutes of editing; the newest 200 are kept.

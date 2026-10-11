@@ -204,26 +204,67 @@ pub async fn get_document(State(st): State<AppState>, user: AuthUser, Path(id): 
 const EMPTY_THUMB: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200"><rect width="320" height="200" fill="#f5f5f5"/></svg>"##;
 
 pub async fn thumbnail(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Response> {
-    let thumb: Option<String> = st
+    let fid = id.clone();
+    st.db.call(move |c| file_access(c, &user.id, &fid, Role::Viewer).map(|_| ())).await?;
+    thumbnail_response(&st, &id).await
+}
+
+/// PNG thumbnail of a file's first page, rendered with its workspace's fonts
+/// and cached until the file or the workspace's fonts change.
+pub async fn thumbnail_response(st: &AppState, file_id: &str) -> AppResult<Response> {
+    let fid = file_id.to_string();
+    let (cached, cached_version, version, ws): (Option<Vec<u8>>, Option<i64>, i64, String) = st
         .db
         .call(move |c| {
-            file_access(c, &user.id, &id, Role::Viewer)?;
-            let (thumb, doc): (Option<String>, String) =
-                c.query_row("SELECT thumbnail, document FROM files WHERE id = ?1", params![id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?;
-            Ok(thumb.or_else(|| render::load_document(&doc).and_then(|d| render::thumbnail_svg(&d))))
+            Ok(c.query_row(
+                "SELECT f.thumbnail_png, f.thumbnail_version, f.version, p.workspace_id
+                 FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ?1",
+                params![fid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
         })
         .await?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "private, max-age=5"),
-            (header::CONTENT_SECURITY_POLICY, SVG_CSP),
-        ],
-        thumb.unwrap_or_else(|| EMPTY_THUMB.to_string()),
-    )
-        .into_response())
+    if cached_version == Some(version) {
+        return Ok(thumbnail_image(cached));
+    }
+    let fid = file_id.to_string();
+    let doc: String = st.db.call(move |c| Ok(c.query_row("SELECT document FROM files WHERE id = ?1", params![fid], |r| r.get(0))?)).await?;
+    let png = render_thumbnail(st, &ws, doc).await?;
+    let (fid, stored) = (file_id.to_string(), png.clone());
+    st.db
+        .call(move |c| {
+            Ok(c.execute(
+                "UPDATE files SET thumbnail_png = ?1, thumbnail_version = ?2 WHERE id = ?3 AND version = ?2",
+                params![stored, version, fid],
+            )?)
+        })
+        .await?;
+    Ok(thumbnail_image(png))
+}
+
+/// Rasterize a stored document's first page (None when it's empty).
+pub async fn render_thumbnail(st: &AppState, workspace_id: &str, doc_json: String) -> AppResult<Option<Vec<u8>>> {
+    let fonts = crate::fonts::fontdb_for(st, workspace_id).await;
+    let data_dir = st.cfg.data_dir.clone();
+    let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
+    tokio::task::spawn_blocking(move || render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, fonts)))
+        .await
+        .map_err(AppError::internal)
+}
+
+pub fn thumbnail_image(png: Option<Vec<u8>>) -> Response {
+    match png {
+        Some(png) => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=5")], png).into_response(),
+        None => (
+            [
+                (header::CONTENT_TYPE, "image/svg+xml"),
+                (header::CACHE_CONTROL, "private, max-age=5"),
+                (header::CONTENT_SECURITY_POLICY, SVG_CSP),
+            ],
+            EMPTY_THUMB,
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -307,6 +348,9 @@ static PNG_RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2
 pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_dim: u32) -> AppResult<Response> {
     let room = st.rooms.get(id).await?;
     let data_dir = st.cfg.data_dir.clone();
+    let fid = id.to_string();
+    let ws = st.db.call(move |c| crate::fonts::file_workspace(c, &fid)).await?;
+    let fonts = crate::fonts::fontdb_for(st, &ws).await;
     let scale = q.scale.unwrap_or(2.0);
     let with_bg = q.background.unwrap_or(true);
     let svg = room
@@ -319,7 +363,7 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
         .await?
         .map_err(AppError::bad_request)?;
     let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
-    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, max_dim))
+    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, max_dim, fonts))
         .await
         .map_err(AppError::internal)?
         .map_err(AppError::bad_request)?;

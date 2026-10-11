@@ -36,7 +36,7 @@ export default function EditorPage() {
         if (cancelled) return;
         setFile(info);
         const engine = new FlexmaEditor(canvas);
-        created = new EditorStore(engine, fileId);
+        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId });
         created.onFatal = (m) => setFatal(m);
         created.connect(api.files.socketUrl(fileId));
         // Handy for debugging and profiling from the console.

@@ -159,6 +159,19 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
+        tool("list_fonts", "List the fonts available in a file's workspace (uploaded files and Google Fonts added to it) with their styles. Inter is always available. To use another Google Fonts family, add it first with add_font so everyone sees it and exports use it.", json!({
+            "type": "object",
+            "properties": { "file_id": file_id },
+            "required": ["file_id"]
+        })),
+        tool("add_font", "Add a Google Fonts family (every weight and italic) to the file's workspace. The server downloads it once and serves it to everyone. Then set fontFamily to the family name.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "family": { "type": "string", "description": "Exact Google Fonts family name, e.g. 'Poppins' or 'DM Serif Display'" }
+            },
+            "required": ["file_id", "family"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -374,6 +387,8 @@ impl Ctx {
             "list_comments" => self.list_comments(args).await,
             "list_components" => self.list_components(args).await,
             "share_file" => self.share_file(args).await,
+            "list_fonts" => self.list_fonts(args).await,
+            "add_font" => self.add_font(args).await,
             "create_component" => self.create_component(args).await,
             "detach_instance" => self.detach_instance(args).await,
             "add_comment" => self.add_comment(args).await,
@@ -583,6 +598,7 @@ impl Ctx {
         let parent = opt_s(args, "parent_id").map(str::to_string);
         let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
         let room = self.room(&fid, Role::Editor).await?;
+        let note = self.font_note(&fid, args).await;
         let prefix = format!("a{}", random_string(5));
         room.mutate(self.agent(), move |tx| {
             let parent = match parent {
@@ -607,6 +623,7 @@ impl Ctx {
             for id in &top {
                 outline(tx.doc, id, 0, 6, &mut out);
             }
+            out.push_str(&note);
             Ok(json!(out))
         })
         .await
@@ -618,6 +635,7 @@ impl Ctx {
         let fid = s(args, "file_id")?.to_string();
         let updates = args.get("updates").and_then(Value::as_array).cloned().ok_or("missing required array 'updates'")?;
         let room = self.room(&fid, Role::Editor).await?;
+        let note = self.font_note(&fid, args).await;
         room.mutate(self.agent(), move |tx| {
             let mut ops = Vec::new();
             for (i, u) in updates.iter().enumerate() {
@@ -648,9 +666,9 @@ impl Ctx {
             let errs = tx.apply_all(ops);
             tx.relayout();
             if errs.is_empty() {
-                Ok(json!(format!("Updated {n} node(s).")))
+                Ok(json!(format!("Updated {n} node(s).{note}")))
             } else {
-                Ok(json!(format!("Updated {} of {n} node(s). Errors: {errs:?}", n - errs.len())))
+                Ok(json!(format!("Updated {} of {n} node(s). Errors: {errs:?}{note}", n - errs.len())))
             }
         })
         .await
@@ -868,7 +886,10 @@ impl Ctx {
             })
             .await
             .map_err(err_msg)??;
-        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 1600))
+        let f2 = fid.clone();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
+        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
+        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 1600, fonts))
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;
@@ -877,7 +898,7 @@ impl Ctx {
             "content": [
                 { "type": "image", "data": data, "mimeType": "image/png" },
                 { "type": "text", "text": format!(
-                    "Rendered {}×{} px of canvas area x={} y={} w={} h={}. Text is rendered with approximate fonts; the browser editor is the source of truth.",
+                    "Rendered {}×{} px of canvas area x={} y={} w={} h={}, with the workspace's fonts. Line breaks can differ slightly from the browser editor, which is the source of truth.",
                     w, h, fmt_num(bounds.x), fmt_num(bounds.y), fmt_num(bounds.width), fmt_num(bounds.height)
                 ) }
             ]
@@ -932,6 +953,107 @@ impl Ctx {
             ),
             None => "Public link turned off.".to_string(),
         }))
+    }
+
+    /// A warning for fonts used in a create/update call that the workspace
+    /// doesn't have (people would see Inter instead).
+    async fn font_note(&self, file_id: &str, args: &Value) -> String {
+        fn collect(v: &Value, out: &mut std::collections::BTreeSet<String>) {
+            match v {
+                Value::Object(m) => {
+                    for (k, v) in m {
+                        match (k.as_str(), v.as_str()) {
+                            ("font" | "fontFamily", Some(f)) => {
+                                out.insert(f.trim().to_string());
+                            }
+                            _ => collect(v, out),
+                        }
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|v| collect(v, out)),
+                _ => {}
+            }
+        }
+        let mut used = std::collections::BTreeSet::new();
+        collect(args, &mut used);
+        let known = |f: &str| crate::fonts::BUILTIN.iter().chain(crate::fonts::WEB_SAFE).any(|b| b.eq_ignore_ascii_case(f));
+        used.retain(|f| !f.is_empty() && !known(f));
+        if used.is_empty() {
+            return String::new();
+        }
+        let fid = file_id.to_string();
+        let available = self
+            .st
+            .db
+            .call(move |c| crate::fonts::families(c, &crate::fonts::file_workspace(c, &fid)?))
+            .await
+            .unwrap_or_default();
+        let missing: Vec<String> = used.into_iter().filter(|f| !available.iter().any(|a| a.eq_ignore_ascii_case(f))).collect();
+        if missing.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\n\nNote: {} isn't in this workspace's fonts, so most people (and exports) will see Inter instead. Add it from Google Fonts with add_font, or pick one from list_fonts.",
+            missing.join(", ")
+        )
+    }
+
+    async fn list_fonts(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let uid = self.user.id.clone();
+        let rows = self
+            .st
+            .db
+            .call(move |c| {
+                let (ws, _, _) = file_access(c, &uid, &fid, Role::Viewer)?;
+                crate::fonts::list_json(c, &ws)
+            })
+            .await
+            .map_err(err_msg)?;
+        let mut families: Vec<(String, String, Vec<String>)> = Vec::new();
+        for r in rows {
+            let family = r["family"].as_str().unwrap_or_default().to_string();
+            let style = format!("{}{}", r["weight"], if r["italic"].as_bool().unwrap_or(false) { "i" } else { "" });
+            match families.iter_mut().find(|(f, _, _)| *f == family) {
+                Some((_, _, styles)) => styles.push(style),
+                None => families.push((family, r["source"].as_str().unwrap_or_default().to_string(), vec![style])),
+            }
+        }
+        let mut out = String::from("Workspace fonts:\n");
+        if families.is_empty() {
+            out.push_str("- (none yet)\n");
+        }
+        for (f, source, styles) in &families {
+            let from = if source == "google" { "Google Fonts" } else { "uploaded" };
+            out.push_str(&format!("- {f} ({from}): {}\n", styles.join(", ")));
+        }
+        out.push_str(
+            "Always available: Inter (100–900, italics).\n\
+             Common system fonts (Arial, Georgia, …) work on most computers but render as Inter in exports.\n\
+             To use any other Google Fonts family, call add_font first.",
+        );
+        Ok(text_result(&out))
+    }
+
+    async fn add_font(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let family = s(args, "family")?.to_string();
+        let uid = self.user.id.clone();
+        let ws = self
+            .st
+            .db
+            .call(move |c| Ok(file_access(c, &uid, &fid, Role::Editor)?.0))
+            .await
+            .map_err(err_msg)?;
+        let added = crate::api_fonts::add_google_family(&self.st, &ws, &self.user.id, &family).await.map_err(err_msg)?;
+        let name = added["family"].as_str().unwrap_or(&family).to_string();
+        let styles: Vec<&str> = added["styles"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        Ok(text_result(&format!(
+            "Added {name} to the workspace ({} {}: {}). Use it with fontFamily: \"{name}\" and a matching fontWeight.",
+            styles.len(),
+            if styles.len() == 1 { "style" } else { "styles" },
+            styles.join(", ")
+        )))
     }
 
     async fn list_components(&self, args: &Value) -> ToolResult {

@@ -5,6 +5,7 @@ import { useSyncExternalStore } from 'react';
 import type { FlexmaEditor } from '../engine';
 import { api, exportPngUrl, exportSvgUrl, shareUrls, type CommentThread, type ExportOptions, type PngExportOptions } from '../lib/api';
 import type { ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, Tool } from './types';
+import { FontManager } from './fonts';
 
 type Listener = () => void;
 
@@ -31,6 +32,9 @@ export class EditorStore {
   readonly fileId: string;
   /** Set when the file was opened through a public view-only link. */
   readonly shareToken: string | null;
+  /** The file's workspace (members only), for its fonts. */
+  readonly workspaceId: string | null;
+  readonly fonts: FontManager;
   private listeners = new Set<Listener>();
   private socket: WebSocket | null = null;
   private retry = 0;
@@ -72,10 +76,13 @@ export class EditorStore {
   private notifyQueued = false;
   private flushTimer = 0;
 
-  constructor(engine: FlexmaEditor, fileId: string, shareToken: string | null = null) {
+  constructor(engine: FlexmaEditor, fileId: string, opts: { shareToken?: string | null; workspaceId?: string | null } = {}) {
+    const shareToken = opts.shareToken ?? null;
     this.engine = engine;
     this.fileId = fileId;
     this.shareToken = shareToken;
+    this.workspaceId = opts.workspaceId ?? null;
+    this.fonts = new FontManager(this);
     // Guests have no session cookie, so images load through the link instead.
     if (shareToken) engine.set_asset_base(shareUrls.assetBase(shareToken));
   }
@@ -111,6 +118,7 @@ export class EditorStore {
       this.layers = JSON.parse(e.layers()) as LayerNode[];
       this.components = JSON.parse(e.components()) as ComponentInfo[];
       this.pages = JSON.parse(e.pages()) as { pages: PageInfo[]; current: string };
+      this.fonts.schedule();
       changed = true;
     }
     const sel = e.selection_version();
@@ -245,6 +253,7 @@ export class EditorStore {
         this.status = 'online';
         this.presenceDirty = true;
         void this.refreshComments();
+        void this.fonts.refresh();
         if (!this.loadedOnce) {
           this.loadedOnce = true;
           this.engine.zoom_to_fit_initial();
@@ -277,6 +286,10 @@ export class EditorStore {
       }
       case 'comments':
         void this.refreshComments();
+        break;
+      case 'fonts':
+        // Someone added or removed workspace fonts.
+        void this.fonts.refresh();
         break;
       case 'reload':
         // The document was replaced (version restore); the socket closes and we
@@ -355,6 +368,9 @@ export function useCommentMode(s: EditorStore) {
 }
 export function useOpenThread(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getOpenThread);
+}
+export function useFontState(s: EditorStore) {
+  return useSyncExternalStore(s.subscribe, s.fonts.getState);
 }
 export function useStatus(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getStatus);

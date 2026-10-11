@@ -52,7 +52,7 @@ export default function SharePage() {
         if (cancelled) return;
         setInfo(shared);
         const engine = new FlexmaEditor(canvas);
-        created = new EditorStore(engine, shared.fileId, token);
+        created = new EditorStore(engine, shared.fileId, { shareToken: token });
         created.onFatal = (m) => setFatal(m);
         created.connect(api.share.urls.socket(token));
         // Handy for debugging and profiling from the console.

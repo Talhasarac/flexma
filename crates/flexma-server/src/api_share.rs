@@ -10,7 +10,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Json;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
@@ -204,7 +204,7 @@ pub async fn export_png(State(st): State<AppState>, Path(token): Path<String>, Q
 pub async fn thumbnail(State(st): State<AppState>, Path(token): Path<String>) -> AppResult<Response> {
     let t = token.clone();
     let (file_id, _) = st.db.call(move |c| resolve(c, &t)).await?;
-    let mut res = export_svg_response(&st, &file_id, ExportQuery::default(), Some(token)).await?;
+    let mut res = crate::api_files::thumbnail_response(&st, &file_id).await?;
     res.headers_mut().insert(header::CACHE_CONTROL, "public, max-age=60".parse().unwrap());
-    Ok(res.into_response())
+    Ok(res)
 }

@@ -7,7 +7,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::header;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Json;
 use flexma_doc::Document;
 use rusqlite::{params, OptionalExtension};
@@ -75,27 +75,21 @@ pub async fn create(
 }
 
 pub async fn preview(State(st): State<AppState>, user: AuthUser, Path((id, vid)): Path<(String, String)>) -> AppResult<Response> {
-    let doc: String = st
+    let (doc, ws): (String, String) = st
         .db
         .call(move |c| {
-            file_access(c, &user.id, &id, Role::Viewer)?;
-            c.query_row("SELECT document FROM file_versions WHERE id = ?1 AND file_id = ?2", params![vid, id], |r| r.get(0))
+            let (ws, _, _) = file_access(c, &user.id, &id, Role::Viewer)?;
+            let doc = c
+                .query_row("SELECT document FROM file_versions WHERE id = ?1 AND file_id = ?2", params![vid, id], |r| r.get(0))
                 .optional()?
-                .ok_or_else(|| AppError::not_found("version"))
+                .ok_or_else(|| AppError::not_found("version"))?;
+            Ok((doc, ws))
         })
         .await?;
-    let svg = crate::render::load_document(&doc)
-        .and_then(|d| crate::render::thumbnail_svg(&d))
-        .unwrap_or_else(|| r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><rect width="320" height="200" fill="#f5f5f5"/></svg>"##.into());
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "private, max-age=3600"),
-            (header::CONTENT_SECURITY_POLICY, "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'"),
-        ],
-        svg,
-    )
-        .into_response())
+    let png = crate::api_files::render_thumbnail(&st, &ws, doc).await?;
+    let mut res = crate::api_files::thumbnail_image(png);
+    res.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());
+    Ok(res)
 }
 
 /// Restore a version. The current state is saved as a version first, so a

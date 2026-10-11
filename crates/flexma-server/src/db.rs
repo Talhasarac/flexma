@@ -174,6 +174,28 @@ const MIGRATIONS: &[&str] = &[
         expires_at INTEGER
     );
     "#,
+    // 7: workspace fonts (uploaded files and Google Fonts), and PNG
+    // thumbnails rendered on demand with those fonts.
+    r#"
+    CREATE TABLE fonts (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        family TEXT NOT NULL,
+        weight INTEGER NOT NULL,
+        weight_max INTEGER NOT NULL,
+        italic INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        format TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (workspace_id, family, weight, italic)
+    );
+    CREATE INDEX fonts_workspace ON fonts(workspace_id);
+    ALTER TABLE files ADD COLUMN thumbnail_png BLOB;
+    ALTER TABLE files ADD COLUMN thumbnail_version INTEGER;
+    UPDATE files SET thumbnail = NULL;
+    "#,
 ];
 
 impl Db {

@@ -25,6 +25,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Version history: automatic snapshots and named versions, with one-click restore.
 - Comments pinned to the canvas or to layers, with threads, replies and resolve. Agents can read and resolve them too.
 - Components and instances, with overrides, nested instances, an Assets panel, detach, and "go to main component". Edits to a main component update every instance live, for people and agents alike.
+- Workspace fonts: upload .ttf/.otf files or add any of the ~1,950 Google Fonts families (served by your own server, not Google). Everyone in the workspace, share-link viewers and exports get the same fonts, and missing fonts are flagged with one-click fixes.
 - Export to PNG and SVG.
 
 **Collaboration**

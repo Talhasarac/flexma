@@ -779,6 +779,56 @@ impl Editor {
     }
 
     /// Main components in the document, for the Assets panel.
+    /// Font families used by text in the file (instances included), with the
+    /// styles used and how many layers use each:
+    /// `[{ family, styles: [[weight, italic], …], count }]`.
+    pub fn used_fonts_json(&self) -> Value {
+        let mut map: std::collections::BTreeMap<&str, (std::collections::BTreeSet<(u16, bool)>, usize)> = Default::default();
+        for n in self.doc.nodes() {
+            if n.kind == NodeType::Text && n.visible {
+                let e = map.entry(n.font_family.as_str()).or_default();
+                e.0.insert((n.font_weight, n.italic));
+                e.1 += 1;
+            }
+        }
+        Value::Array(
+            map.into_iter()
+                .map(|(family, (styles, count))| {
+                    let styles: Vec<Value> = styles.into_iter().map(|(w, i)| json!([w, i])).collect();
+                    json!({ "family": family, "styles": styles, "count": count })
+                })
+                .collect(),
+        )
+    }
+
+    /// Swap one font family for another everywhere in the file, as one undo
+    /// step. Returns how many text layers changed.
+    pub fn replace_font(&mut self, from: &str, to: &str) -> usize {
+        if !self.can_edit || from == to || to.trim().is_empty() {
+            return 0;
+        }
+        let ids: Vec<NodeId> = self
+            .doc
+            .nodes()
+            .filter(|n| n.kind == NodeType::Text && n.font_family == from)
+            .filter(|n| {
+                // A layer inside an instance follows its main component unless it
+                // overrides the font; changing the component is enough then.
+                match n.id.rsplit_once('~') {
+                    Some((_, source)) => self.doc.get(source).map(|s| s.font_family != from).unwrap_or(true),
+                    None => true,
+                }
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        let count = ids.len();
+        if count > 0 {
+            let ops = ids.into_iter().map(|id| Op::update1(id, "fontFamily", json!(to))).collect();
+            self.apply_local(ops);
+        }
+        count
+    }
+
     pub fn components_json(&self) -> Value {
         let mut out = Vec::new();
         self.doc.walk(flexma_doc::ROOT_ID, &mut |n| {
@@ -861,5 +911,56 @@ impl Editor {
 
     pub fn _unused(&self) -> Affine {
         Affine::IDENTITY
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use crate::editor::Editor;
+    use flexma_doc::{Document, Node, NodeType, Op};
+
+    fn editor() -> Editor {
+        let mut doc = Document::new_empty();
+        let node = |id: &str, kind, parent: &str| {
+            let mut n = Node::new(id, kind);
+            n.parent = Some(parent.into());
+            n
+        };
+        doc.apply(&Op::Create { node: node("c:1", NodeType::Component, "0:1") }).unwrap();
+        let mut label = node("c:2", NodeType::Text, "c:1");
+        label.font_family = "Poppins".into();
+        doc.apply(&Op::Create { node: label }).unwrap();
+        let mut inst = node("i:1", NodeType::Instance, "0:1");
+        inst.component_id = Some("c:1".into());
+        doc.apply(&Op::Create { node: inst }).unwrap();
+        let mut other = node("t:1", NodeType::Text, "0:1");
+        other.font_family = "Poppins".into();
+        other.font_weight = 700;
+        doc.apply(&Op::Create { node: other }).unwrap();
+        let mut ed = Editor::new(None, None);
+        ed.load(&doc.to_json(), "c1", true).unwrap();
+        ed
+    }
+
+    #[test]
+    fn lists_used_fonts() {
+        let ed = editor();
+        let used = ed.used_fonts_json();
+        let poppins = used.as_array().unwrap().iter().find(|f| f["family"] == "Poppins").unwrap();
+        // Main component label, its instance copy, and the plain text layer.
+        assert_eq!(poppins["count"], 3);
+        assert_eq!(poppins["styles"], serde_json::json!([[400, false], [700, false]]));
+    }
+
+    #[test]
+    fn replaces_fonts_through_components() {
+        let mut ed = editor();
+        // The instance copy follows the component, so only two layers change.
+        assert_eq!(ed.replace_font("Poppins", "Lato"), 2);
+        assert_eq!(ed.doc.get("i:1~c:2").unwrap().font_family, "Lato");
+        assert!(ed.doc.get("i:1").unwrap().overrides.is_empty(), "no override needed");
+        ed.undo();
+        assert_eq!(ed.doc.get("t:1").unwrap().font_family, "Poppins");
+        assert_eq!(ed.doc.get("i:1~c:2").unwrap().font_family, "Poppins");
     }
 }

@@ -629,15 +629,14 @@ impl Room {
 
     async fn save(&mut self) {
         let json = self.doc.to_json();
-        let thumb = crate::render::thumbnail_svg(&self.doc);
         let version = self.version as i64;
         let fid = self.file_id.clone();
         let res = self
             .db
             .call(move |c| {
                 c.execute(
-                    "UPDATE files SET document = ?1, version = ?2, thumbnail = ?3, updated_at = ?4 WHERE id = ?5",
-                    params![json, version, thumb, now(), fid],
+                    "UPDATE files SET document = ?1, version = ?2, updated_at = ?3 WHERE id = ?4",
+                    params![json, version, now(), fid],
                 )?;
                 // Automatic version history: keep a snapshot at most every 15 minutes of editing.
                 let last: Option<i64> = c

@@ -9,6 +9,7 @@ import { useDialogs } from '../../components/Dialogs';
 import { SettingsSection } from '../../components/SettingsSection';
 import { useToast } from '../../components/Toast';
 import { PageHeader } from '../../components/dashboard/PageHeader';
+import { FontsSection } from './FontsSection';
 import { GeneralSection } from './GeneralSection';
 import { InvitesSection } from './InvitesSection';
 import { MembersSection } from './MembersSection';
@@ -25,6 +26,7 @@ export default function WorkspaceSettingsPage() {
         <GeneralSection workspace={workspace} />
         <MembersSection workspace={workspace} />
         {isOwner && <InvitesSection workspace={workspace} />}
+        <FontsSection workspace={workspace} />
         <DangerZone />
       </div>
     </div>

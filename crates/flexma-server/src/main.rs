@@ -8,6 +8,7 @@ mod api_admin;
 mod api_auth;
 mod api_comments;
 mod api_files;
+mod api_fonts;
 mod api_share;
 mod api_tokens;
 mod api_versions;
@@ -16,6 +17,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod fonts;
 mod mcp;
 mod oauth;
 mod render;
@@ -143,7 +145,7 @@ async fn main() {
         )
         .route("/files/{id}/duplicate", post(api_files::duplicate_file))
         .route("/files/{id}/document", get(api_files::get_document))
-        .route("/files/{id}/thumbnail.svg", get(api_files::thumbnail))
+        .route("/files/{id}/thumbnail.png", get(api_files::thumbnail))
         .route("/files/{id}/export.svg", get(api_files::export_svg))
         .route("/files/{id}/export.png", get(api_files::export_png))
         .route("/files/{id}/assets", post(api_files::upload_asset))
@@ -156,9 +158,16 @@ async fn main() {
         .route("/share/{token}/assets/{aid}", get(api_share::asset))
         .route("/share/{token}/export.svg", get(api_share::export_svg))
         .route("/share/{token}/export.png", get(api_share::export_png))
-        .route("/share/{token}/thumbnail.svg", get(api_share::thumbnail))
+        .route("/share/{token}/thumbnail.png", get(api_share::thumbnail))
+        .route("/share/{token}/fonts", get(api_fonts::share_list))
+        .route("/share/{token}/fonts/{fid}", get(api_fonts::share_file))
+        .route("/workspaces/{id}/fonts", get(api_fonts::list).post(api_fonts::upload).delete(api_fonts::delete_family))
+        .route("/workspaces/{id}/fonts/google", post(api_fonts::add_google))
+        .route("/fonts/{id}", get(api_fonts::file))
+        .route("/google-fonts", get(api_fonts::google_catalogue))
+        .route("/google-fonts/preview", get(api_fonts::google_preview))
         .route("/comments/{id}", patch(api_comments::update).delete(api_comments::delete))
-        .route("/files/{id}/versions/{vid}/preview.svg", get(api_versions::preview))
+        .route("/files/{id}/versions/{vid}/preview.png", get(api_versions::preview))
         .route("/files/{id}/versions/{vid}/restore", post(api_versions::restore))
         .route("/assets/{id}", get(api_files::get_asset))
         .route("/tokens", get(api_tokens::list).post(api_tokens::create))

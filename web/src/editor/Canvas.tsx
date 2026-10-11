@@ -302,8 +302,8 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
     canvas.addEventListener('webglcontextrestored', onContextRestored);
 
     // ---- fonts ----
-    document.fonts?.ready.then(() => engine.fonts_ready());
-    const onFonts = () => engine.fonts_ready();
+    void document.fonts?.ready.then(() => store.fonts.browserFontsLoaded());
+    const onFonts = () => store.fonts.browserFontsLoaded();
     document.fonts?.addEventListener?.('loadingdone', onFonts);
 
     // ---- render loop ----

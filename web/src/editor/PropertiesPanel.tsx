@@ -1,8 +1,9 @@
 // Right-hand "Design" panel. Reads the selection snapshot from the store and
 // writes canonical node props back through the engine (one undo step per edit;
 // scrubs and color drags are wrapped in begin/end).
-import { useMemo, useRef, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
+  AlertTriangle,
   AlignCenterHorizontal,
   AlignCenterVertical,
   AlignEndHorizontal,
@@ -16,15 +17,18 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   ImageIcon,
+  Loader2,
   Minus,
   Plus,
   RotateCw,
   Scan,
   Spline,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, type GoogleFontFamily } from '../lib/api';
+import { familyWeights, findGoogleFamily, googleCatalogue, WEIGHTS, weightName } from '../lib/fonts';
+import { FontPicker } from './FontPicker';
 import { useToast } from '../components/Toast';
-import { usePages, useSelection, useUi, type EditorStore } from './store';
+import { useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
 import type { EffectValue, NodeData, Paint } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
 
@@ -37,32 +41,7 @@ function common<T>(nodes: NodeData[], get: (n: NodeData) => T): T | 'mixed' {
   return get(nodes[0]);
 }
 
-const FONTS = [
-  'Inter',
-  'system-ui',
-  'Arial',
-  'Helvetica',
-  'Georgia',
-  'Times New Roman',
-  'Courier New',
-  'Menlo',
-  'Verdana',
-  'Trebuchet MS',
-  'Tahoma',
-  'Impact',
-];
 
-const WEIGHTS = [
-  { value: '100', label: 'Thin' },
-  { value: '200', label: 'Extra Light' },
-  { value: '300', label: 'Light' },
-  { value: '400', label: 'Regular' },
-  { value: '500', label: 'Medium' },
-  { value: '600', label: 'Semi Bold' },
-  { value: '700', label: 'Bold' },
-  { value: '800', label: 'Extra Bold' },
-  { value: '900', label: 'Black' },
-];
 
 export function PropertiesPanel({ store }: Props) {
   const sel = useSelection(store);
@@ -235,7 +214,7 @@ export function PropertiesPanel({ store }: Props) {
         </div>
       </Section>
 
-      {isText && <TextSection sel={sel} set={set} begin={begin} end={end} />}
+      {isText && <TextSection sel={sel} set={set} begin={begin} end={end} store={store} readOnly={readOnly} />}
 
       <PaintsSection title="Fill" kind="fills" sel={sel} set={set} begin={begin} end={end} store={store} />
       <PaintsSection title="Stroke" kind="strokes" sel={sel} set={set} begin={begin} end={end} store={store} />
@@ -427,29 +406,35 @@ function AutoLayoutSection({ sel, set, begin, end, store }: SectionProps & { sto
   );
 }
 
-function TextSection({ sel, set, begin, end }: SectionProps) {
+function TextSection({ sel, set, begin, end, store, readOnly }: SectionProps & { store: EditorStore; readOnly: boolean }) {
+  useFontState(store); // re-render as fonts load
   const family = common(sel, (n) => n.fontFamily);
   const lh = common(sel, (n) => n.lineHeight);
   const deco = common(sel, (n) => n.textDecoration);
+  const weight = common(sel, (n) => String(n.fontWeight));
+  const styles = sel.map((n) => [n.fontWeight, n.italic] as [number, boolean]);
+  const faces = family === 'mixed' ? undefined : store.fonts.family(family);
+  const offered = faces ? familyWeights(faces) : WEIGHTS;
+  const weights = weight !== 'mixed' && !offered.includes(Number(weight)) ? [...offered, Number(weight)].sort((a, b) => a - b) : offered;
+  const missing = family !== 'mixed' && !store.fonts.isAvailable(family);
+
+  // Load the face before applying a style, so text is measured with it.
+  const applyStyle = async (props: { fontWeight?: number; italic?: boolean }) => {
+    if (family !== 'mixed') {
+      await store.fonts.prepare(family, sel.map((n) => [props.fontWeight ?? n.fontWeight, props.italic ?? n.italic]));
+    }
+    set(props);
+  };
+
   return (
     <Section title="Text">
-      <input
-        className="prop-text"
-        list="flexma-fonts"
-        value={family === 'mixed' ? '' : family}
-        placeholder="Mixed"
-        onChange={(e) => e.target.value && set({ fontFamily: e.target.value })}
-      />
-      <datalist id="flexma-fonts">
-        {FONTS.map((f) => (
-          <option key={f} value={f} />
-        ))}
-      </datalist>
+      <FontPicker store={store} value={family === 'mixed' ? '' : family} styles={styles} disabled={readOnly} onPick={(f) => set({ fontFamily: f })} />
+      {missing && <MissingFontNote store={store} family={family} />}
       <div className="grid2">
         <Select
-          value={common(sel, (n) => String(n.fontWeight))}
-          options={WEIGHTS}
-          onChange={(v) => set({ fontWeight: Number(v) })}
+          value={weight}
+          options={weights.map((w) => ({ value: String(w), label: weightName(w) }))}
+          onChange={(v) => void applyStyle({ fontWeight: Number(v) })}
           title="Weight"
         />
         <NumberInput label="Size" value={common(sel, (n) => n.fontSize)} min={1} max={2000} onChange={(v) => set({ fontSize: v })} onScrubStart={begin} onScrubEnd={end} />
@@ -480,7 +465,7 @@ function TextSection({ sel, set, begin, end }: SectionProps) {
           ))}
         </div>
         <div className="segmented-mini">
-          <button type="button" className={common(sel, (n) => n.italic) === true ? 'on' : ''} onClick={() => set({ italic: !(common(sel, (n) => n.italic) === true) })} title="Italic">
+          <button type="button" className={common(sel, (n) => n.italic) === true ? 'on' : ''} onClick={() => void applyStyle({ italic: !(common(sel, (n) => n.italic) === true) })} title="Italic">
             <i>I</i>
           </button>
           <button type="button" className={deco === 'UNDERLINE' ? 'on' : ''} onClick={() => set({ textDecoration: deco === 'UNDERLINE' ? null : 'UNDERLINE' })} title="Underline">
@@ -918,6 +903,53 @@ function PagePanel({ store }: { store: EditorStore }) {
           <Tip k="Shift 1">Zoom to fit</Tip>
         </ul>
       </Section>
+    </div>
+  );
+}
+
+/** Shown when the selected text's font can't be displayed here. */
+function MissingFontNote({ store, family }: { store: EditorStore; family: string }) {
+  const ui = useUi(store);
+  const toast = useToast();
+  const [google, setGoogle] = useState<GoogleFontFamily | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const canAdd = ui.canEdit && !!store.workspaceId;
+  useEffect(() => {
+    let live = true;
+    googleCatalogue().then(
+      (list) => live && setGoogle(findGoogleFamily(list, family) ?? null),
+      () => live && setGoogle(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [family]);
+  const add = async () => {
+    if (!google || !store.workspaceId) return;
+    setBusy(true);
+    try {
+      await api.fonts.addGoogle(store.workspaceId, google.family);
+      await store.fonts.refresh();
+      toast.success(`Added ${google.family} to the workspace`, { id: 'font-added' });
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="font-missing" role="status">
+      <AlertTriangle size={13} />
+      <div>
+        <b>{family}</b> isn't available here, so a fallback font is shown.
+        {canAdd && google && (
+          <button type="button" className="btn btn-xs" disabled={busy} onClick={() => void add()}>
+            {busy && <Loader2 size={11} className="spin" />} Add from Google Fonts
+          </button>
+        )}
+        {canAdd && google === null && <span className="font-missing-hint"> Upload it from the font menu, or pick another font.</span>}
+        {!canAdd && <span className="font-missing-hint"> Ask an editor to add it to the workspace.</span>}
+      </div>
     </div>
   );
 }

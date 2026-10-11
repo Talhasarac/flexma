@@ -353,6 +353,16 @@ impl FlexmaEditor {
         self.ed.components_json().to_string()
     }
 
+    /// `[{ family, styles: [[weight, italic], …], count }]` for text in the file.
+    pub fn used_fonts(&self) -> String {
+        self.ed.used_fonts_json().to_string()
+    }
+
+    /// Replace a font family everywhere in the file (one undo step).
+    pub fn replace_font(&mut self, from: &str, to: &str) -> u32 {
+        self.ed.replace_font(from, to) as u32
+    }
+
     pub fn add_auto_layout(&mut self) {
         self.ed.add_auto_layout();
     }
@@ -535,6 +545,32 @@ impl FlexmaEditor {
     }
 
     /// Web fonts finished loading: re-measure and re-rasterize text.
+    /// Web fonts are loading: hold off measuring text until `fonts_ready`, so
+    /// boxes aren't sized for a fallback font.
+    pub fn fonts_loading(&mut self) {
+        self.ed.fonts_ready = false;
+    }
+
+    /// Re-measure auto-sized text in these families (JSON array), e.g. after
+    /// their font files loaded. Only real size changes become edits.
+    pub fn remeasure_fonts(&mut self, families_json: &str) {
+        let families: Vec<String> = serde_json::from_str(families_json).unwrap_or_default();
+        let ids: Vec<NodeId> = self
+            .ed
+            .doc
+            .nodes()
+            .filter(|n| {
+                n.kind == flexma_doc::NodeType::Text
+                    && n.text_auto_resize != flexma_doc::TextAutoResize::None
+                    && !flexma_doc::node::is_derived_id(&n.id)
+                    && families.iter().any(|f| f.eq_ignore_ascii_case(&n.font_family))
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        self.ed.needs_measure.extend(ids);
+        self.ed.dirty = true;
+    }
+
     pub fn fonts_ready(&mut self) {
         self.ed.fonts_ready = true;
         if let Some(t) = self.ed.text.as_mut() {

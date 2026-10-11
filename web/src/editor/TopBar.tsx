@@ -11,6 +11,7 @@ import { usePeers, useSaving, useStatus, useUi, type EditorStore } from './store
 import { AgentDialog } from './AgentDialog';
 import { ShareDialog } from '../components/ShareDialog';
 import { VersionsDialog } from './VersionsDialog';
+import { MissingFontsButton } from './MissingFonts';
 import { useAuth } from '../lib/auth';
 
 interface Props {
@@ -94,6 +95,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
         <button type="button" className="icon-btn" title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!ui.canRedo} onClick={act(() => e.redo())}>
           <Redo2 size={15} />
         </button>
+        <MissingFontsButton store={store} />
         <Presence store={store} self={user ? { name: user.name, color: user.color } : null} />
         <button type="button" className="btn btn-sm tb-ai" onClick={() => setAgentsOpen(true)} title="Connect Claude Code or Codex">
           <Sparkles size={14} /> AI

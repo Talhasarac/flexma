@@ -86,6 +86,30 @@ export interface FileInfo {
   createdBy: string;
 }
 
+/** A font file in a workspace (one face: family + weight + style). */
+export interface WorkspaceFont {
+  id: string;
+  family: string;
+  weight: number;
+  /** Equal to `weight` unless it's a variable font with a weight range. */
+  weightMax: number;
+  italic: boolean;
+  source: 'upload' | 'google';
+  format: 'ttf' | 'otf';
+  size: number;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+/** One family in the Google Fonts catalogue (served by Flexma, most popular first). */
+export interface GoogleFontFamily {
+  family: string;
+  category: string;
+  /** e.g. "400", "700", "400i". */
+  styles: string[];
+  popularity: number;
+}
+
 /** A file's public view-only link (`GET/PUT /api/files/:id/share`). */
 export interface ShareLink {
   enabled: boolean;
@@ -379,7 +403,7 @@ function withQuery(path: string, params: Record<string, string | number | undefi
 
 /** SVG preview of a file's first page. Pass `version` (e.g. `updatedAt`) to bust caches. */
 export function thumbnailUrl(fileId: string, version?: string): string {
-  return withQuery(`/api/files/${enc(fileId)}/thumbnail.svg`, { v: version });
+  return withQuery(`/api/files/${enc(fileId)}/thumbnail.png`, { v: version });
 }
 
 export function exportPngUrl(fileId: string, opts: PngExportOptions = {}): string {
@@ -511,7 +535,32 @@ const files = {
     request<{ id: string }>('POST', `/api/files/${enc(id)}/versions`, { body: { label } }),
   restoreVersion: (id: string, versionId: string) =>
     request<{ restored: string }>('POST', `/api/files/${enc(id)}/versions/${enc(versionId)}/restore`),
-  versionPreviewUrl: (id: string, versionId: string) => `/api/files/${enc(id)}/versions/${enc(versionId)}/preview.svg`,
+  versionPreviewUrl: (id: string, versionId: string) => `/api/files/${enc(id)}/versions/${enc(versionId)}/preview.png`,
+};
+
+const fonts = {
+  /** Every face in a workspace, sorted by family. */
+  list: (workspaceId: string) => request<WorkspaceFont[]>('GET', `/api/workspaces/${enc(workspaceId)}/fonts`),
+  /** Upload one .ttf/.otf file (editors). Replaces a face with the same family, weight and style. */
+  upload: (workspaceId: string, file: Blob) =>
+    request<WorkspaceFont>('POST', `/api/workspaces/${enc(workspaceId)}/fonts`, {
+      rawBody: file,
+      contentType: 'application/octet-stream',
+    }),
+  /** Add every style of a Google Fonts family (editors). The server downloads and serves it. */
+  addGoogle: (workspaceId: string, family: string) =>
+    request<{ family: string; styles: string[] }>('POST', `/api/workspaces/${enc(workspaceId)}/fonts/google`, {
+      body: { family },
+    }),
+  deleteFamily: (workspaceId: string, family: string) =>
+    request<Record<string, never>>('DELETE', withQuery(`/api/workspaces/${enc(workspaceId)}/fonts`, { family })),
+  fileUrl: (fontId: string) => `/api/fonts/${enc(fontId)}`,
+  googleCatalogue: () => request<GoogleFontFamily[]>('GET', '/api/google-fonts'),
+  /** A tiny font with just the family name's glyphs, for previews. */
+  googlePreviewUrl: (family: string) => withQuery('/api/google-fonts/preview', { family }),
+  /** For share-link guests. */
+  shareList: (token: string) => request<WorkspaceFont[]>('GET', `/api/share/${enc(token)}/fonts`, { reportUnauthorized: false }),
+  shareFileUrl: (token: string, fontId: string) => `/api/share/${enc(token)}/fonts/${enc(fontId)}`,
 };
 
 const share = {
@@ -562,6 +611,7 @@ export const api = {
   files,
   tokens,
   comments,
+  fonts,
   share,
   admin,
   assets: { url: assetUrl },
