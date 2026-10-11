@@ -2,7 +2,7 @@
 //! is shared with the server (`flexma_doc::text::wrap_lines`) so both agree on
 //! where lines wrap; only the metrics differ (real fonts here).
 
-use flexma_doc::paint::{StrokeAlign, TextAlign, TextAlignVertical, TextAutoResize};
+use flexma_doc::paint::{StrokeAlign, TextAlign, TextAlignVertical, TextAutoResize, TextOverflow};
 use flexma_doc::{Color, Node, Paint};
 use std::collections::HashMap;
 use wasm_bindgen::{JsCast, JsValue};
@@ -149,12 +149,8 @@ impl TextEngine {
     }
 
     pub fn lines(&mut self, n: &Node) -> Vec<String> {
-        let max_w = match n.text_auto_resize {
-            TextAutoResize::WidthAndHeight => None,
-            _ => Some(n.width + 0.01),
-        };
         let mut measure = |s: &str| self.measure(n, s);
-        flexma_doc::text::wrap_lines(&n.characters, max_w, &mut measure)
+        flexma_doc::text::layout_lines(n, &mut measure)
     }
 
     /// Box size the node should have given its auto-resize mode.
@@ -178,15 +174,39 @@ impl TextEngine {
         let h = n.height.max(1.0);
         let stroke = text_stroke(n);
         let margin = (n.font_size * 0.35 + stroke_reach(stroke)).ceil().max(2.0);
-        let lw = w + margin * 2.0;
-        let lh_box = h + margin * 2.0;
+        let lines = self.lines(n);
+        let lh = n.effective_line_height();
+        let total = lh * lines.len() as f64;
+        let y0 = match n.text_align_vertical {
+            TextAlignVertical::Top => 0.0,
+            TextAlignVertical::Center => (n.height - total) / 2.0,
+            TextAlignVertical::Bottom => n.height - total,
+        };
+        // The raster covers the box, plus any text that overflows it visibly.
+        let (mut x_min, mut y_min, mut x_max, mut y_max) = (0.0, 0.0, w, h);
+        if n.text_overflow == TextOverflow::Visible {
+            for line in &lines {
+                let lw = self.measure(n, line);
+                let x0 = match n.text_align {
+                    TextAlign::Left => 0.0,
+                    TextAlign::Center => (n.width - lw) / 2.0,
+                    TextAlign::Right => n.width - lw,
+                };
+                x_min = f64::min(x_min, x0);
+                x_max = f64::max(x_max, x0 + lw);
+            }
+            y_min = f64::min(y_min, y0);
+            y_max = f64::max(y_max, y0 + total);
+        }
+        let (x_min, y_min) = (x_min.floor() - margin, y_min.floor() - margin);
+        let lw = x_max.ceil() + margin - x_min;
+        let lh_box = y_max.ceil() + margin - y_min;
         let longest = lw.max(lh_box) * scale;
         if longest > max_px as f64 {
             scale *= max_px as f64 / longest;
         }
         let px_w = ((lw * scale).ceil() as u32).max(1);
         let px_h = ((lh_box * scale).ceil() as u32).max(1);
-        let lines = self.lines(n);
         let (asc, desc) = self.font_metrics(n);
         self.canvas.set_width(px_w);
         self.canvas.set_height(px_h);
@@ -194,7 +214,7 @@ impl TextEngine {
         self.current_font.clear();
         self.current_ls = f64::NAN;
         let ctx = self.ctx.clone();
-        let _ = ctx.set_transform(scale, 0.0, 0.0, scale, margin * scale, margin * scale);
+        let _ = ctx.set_transform(scale, 0.0, 0.0, scale, -x_min * scale, -y_min * scale);
         self.set_font(&font_css(n, n.font_size), n.letter_spacing);
         let color = css_color(text_color(n));
         ctx.set_fill_style_str(&color);
@@ -206,13 +226,6 @@ impl TextEngine {
             TextAlign::Right => ("right", n.width),
         };
         ctx.set_text_align(align);
-        let lh = n.effective_line_height();
-        let total = lh * lines.len() as f64;
-        let y0 = match n.text_align_vertical {
-            TextAlignVertical::Top => 0.0,
-            TextAlignVertical::Center => (n.height - total) / 2.0,
-            TextAlignVertical::Bottom => n.height - total,
-        };
         // Outlined text is drawn as an opaque coverage mask first, then colored
         // from a distance field (see `outline_from_mask`).
         if stroke.is_some() {
@@ -241,7 +254,15 @@ impl TextEngine {
         if let Some((color, sw, align)) = stroke {
             let _ = outline_from_mask(&ctx, px_w, px_h, text_color(n), color, sw * scale, align);
         }
-        Some(Raster { px_w, px_h, rect: [-margin, -margin, lw, lh_box] })
+        if n.text_overflow == TextOverflow::Clip {
+            // Keep only what's inside the box (outlines included).
+            let _ = ctx.set_transform(scale, 0.0, 0.0, scale, -x_min * scale, -y_min * scale);
+            let _ = ctx.set_global_composite_operation("destination-in");
+            ctx.set_fill_style_str("#000");
+            ctx.fill_rect(0.0, 0.0, n.width, n.height);
+            let _ = ctx.set_global_composite_operation("source-over");
+        }
+        Some(Raster { px_w, px_h, rect: [x_min, y_min, lw, lh_box] })
     }
 
     /// Small UI label (frame names, size badges) rendered at device scale.

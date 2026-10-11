@@ -222,6 +222,10 @@ define_node! {
     line_height: Option<f64> = None => "lineHeight",
     letter_spacing: f64 = 0.0 => "letterSpacing",
     text_auto_resize: TextAutoResize = TextAutoResize::WidthAndHeight => "textAutoResize",
+    /// Wrap lines at the box width (fixed-width text). Off: only newlines break.
+    text_wrap: bool = true => "textWrap",
+    /// What happens to text that doesn't fit a fixed box.
+    text_overflow: TextOverflow = TextOverflow::Visible => "textOverflow",
     text_decoration: Option<String> = None => "textDecoration",
     /// Set when the text box size is an estimate (e.g. created via MCP); the first
     /// editor that renders it measures it properly and clears the flag.

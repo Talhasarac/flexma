@@ -141,6 +141,8 @@ export interface NodeData {
   clipsContent: boolean;
   clipAlpha: boolean;
   hideFill: boolean;
+  textWrap: boolean;
+  textOverflow: 'VISIBLE' | 'CLIP' | 'ELLIPSIS' | 'TRUNCATE';
   characters: string;
   fontFamily: string;
   fontSize: number;
@@ -208,6 +210,7 @@ export interface EditingText {
   letterSpacing: number;
   textAlign: 'LEFT' | 'CENTER' | 'RIGHT';
   autoResize: 'WIDTH_AND_HEIGHT' | 'HEIGHT' | 'NONE';
+  wrap: boolean;
   color: string;
 }
 

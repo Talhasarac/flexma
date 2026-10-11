@@ -266,7 +266,8 @@ fn text_content_hash(n: &Node) -> u64 {
     n.italic.hash(&mut h);
     f(n.width).hash(&mut h);
     f(n.height).hash(&mut h);
-    format!("{:?}{:?}{:?}{:?}", n.text_align, n.text_align_vertical, n.text_auto_resize, n.text_decoration).hash(&mut h);
+    format!("{:?}{:?}{:?}{:?}{:?}", n.text_align, n.text_align_vertical, n.text_auto_resize, n.text_decoration, n.text_overflow).hash(&mut h);
+    n.text_wrap.hash(&mut h);
     n.line_height.map(f).hash(&mut h);
     f(n.letter_spacing).hash(&mut h);
     let c = text_color(n);
@@ -1187,7 +1188,9 @@ impl Renderer {
                 Cmd::Text { id, opacity } => {
                     let Some(n) = doc.get(id) else { continue };
                     let world = scene.world_of(id);
-                    let b = world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height)).inflate(n.font_size);
+                    // The last raster's extent covers text overflowing its box.
+                    let r = self.texts.get(id).map(|e| e.rect).unwrap_or([0.0, 0.0, n.width, n.height]);
+                    let b = world.map_rect(&flexma_doc::Rect::new(r[0], r[1], r[2], r[3])).union(&world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height))).inflate(n.font_size);
                     if !b.intersects(&visible) {
                         continue;
                     }

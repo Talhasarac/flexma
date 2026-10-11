@@ -521,13 +521,7 @@ impl Writer<'_> {
 
     fn text(&mut self, n: &Node) {
         let lines = match self.opts.measure_text {
-            Some(m) => {
-                let max_w = match n.text_auto_resize {
-                    crate::paint::TextAutoResize::WidthAndHeight => None,
-                    _ => Some(n.width),
-                };
-                crate::text::wrap_lines(&n.characters, max_w, &mut |s| m(n, s))
-            }
+            Some(m) => crate::text::layout_lines(n, &mut |s| m(n, s)),
             None => crate::text::estimate_layout(n).0,
         };
         let lh = n.effective_line_height();
@@ -594,22 +588,22 @@ impl Writer<'_> {
             )
         };
         let filled = format!(r#"<text {font}{fill_attr}>{spans}</text>"#);
-        match (stroke, n.stroke_align) {
-            (None, _) => self.body.push_str(&filled),
-            (Some(attr), crate::paint::StrokeAlign::Outside) => {
-                self.body.push_str(&outline(n.stroke_weight * 2.0, &attr));
-                self.body.push_str(&filled);
-            }
-            (Some(attr), crate::paint::StrokeAlign::Center) => {
-                self.body.push_str(&filled);
-                self.body.push_str(&outline(n.stroke_weight, &attr));
-            }
+        let markup = match (stroke, n.stroke_align) {
+            (None, _) => filled,
+            (Some(attr), crate::paint::StrokeAlign::Outside) => outline(n.stroke_weight * 2.0, &attr) + &filled,
+            (Some(attr), crate::paint::StrokeAlign::Center) => filled + &outline(n.stroke_weight, &attr),
             (Some(attr), crate::paint::StrokeAlign::Inside) => {
                 let clip = self.id("tc");
                 let _ = write!(self.defs, r#"<clipPath id="{clip}"><text {font}>{spans}</text></clipPath>"#);
-                self.body.push_str(&filled);
-                let _ = write!(self.body, r#"<g clip-path="url(#{clip})">{}</g>"#, outline(n.stroke_weight * 2.0, &attr));
+                format!(r#"{filled}<g clip-path="url(#{clip})">{}</g>"#, outline(n.stroke_weight * 2.0, &attr))
             }
+        };
+        if n.text_overflow == crate::paint::TextOverflow::Clip {
+            let clip = self.id("c");
+            let _ = write!(self.defs, r#"<clipPath id="{clip}"><rect width="{}" height="{}"/></clipPath>"#, fmt_num(n.width), fmt_num(n.height));
+            let _ = write!(self.body, r#"<g clip-path="url(#{clip})">{markup}</g>"#);
+        } else {
+            self.body.push_str(&markup);
         }
     }
 }

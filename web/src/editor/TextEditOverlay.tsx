@@ -47,7 +47,7 @@ export function TextEditOverlay({ store }: { store: EditorStore }) {
         textAlign: t.textAlign.toLowerCase() as 'left' | 'center' | 'right',
         color: t.color,
         caretColor: t.color,
-        whiteSpace: fixedWidth ? 'pre-wrap' : 'pre',
+        whiteSpace: fixedWidth && t.wrap !== false ? 'pre-wrap' : 'pre',
       }}
       onInput={(e) => {
         store.engine.set_editing_text(e.currentTarget.value);

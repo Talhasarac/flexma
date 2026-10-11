@@ -2,7 +2,7 @@
 //! (estimated metrics, used for SVG/PNG export and MCP-created text).
 
 use crate::node::Node;
-use crate::paint::TextAutoResize;
+use crate::paint::{TextAutoResize, TextOverflow};
 
 /// Break `text` into lines. Hard newlines always break; when `max_width` is set,
 /// words wrap greedily (very long words are split by character).
@@ -41,6 +41,51 @@ pub fn wrap_lines(text: &str, max_width: Option<f64>, measure: &mut dyn FnMut(&s
         out.push(line.trim_end().to_string());
     }
     out
+}
+
+/// The lines a text node shows, measured with `measure`: wrapped at its width
+/// (fixed-width text with `textWrap`), then cut to its box for the ELLIPSIS and
+/// TRUNCATE overflow modes.
+pub fn layout_lines(n: &Node, measure: &mut dyn FnMut(&str) -> f64) -> Vec<String> {
+    let fixed_w = n.text_auto_resize != TextAutoResize::WidthAndHeight;
+    // A hair of slack so text measured to exactly the box width doesn't wrap.
+    let max_w = n.width + 0.01;
+    let mut lines = wrap_lines(&n.characters, (fixed_w && n.text_wrap).then_some(max_w), measure);
+    let mark = match n.text_overflow {
+        TextOverflow::Ellipsis => "…",
+        TextOverflow::Truncate => "",
+        TextOverflow::Visible | TextOverflow::Clip => return lines,
+    };
+    let mut cut = false;
+    if n.text_auto_resize == TextAutoResize::None {
+        // At least one line, like TextMeshPro.
+        let fit = (((n.height + 0.01) / n.effective_line_height()).floor() as usize).max(1);
+        if lines.len() > fit {
+            lines.truncate(fit);
+            cut = true;
+        }
+    }
+    let last = lines.len().saturating_sub(1);
+    for (i, line) in lines.iter_mut().enumerate() {
+        let too_wide = fixed_w && measure(line) > max_w;
+        if too_wide || (i == last && cut) {
+            *line = shorten(line, if fixed_w { Some(max_w) } else { None }, mark, measure);
+        }
+    }
+    lines
+}
+
+/// Drop characters from the end of `line` until it fits `max_w` with `mark`
+/// (e.g. "…") appended.
+fn shorten(line: &str, max_w: Option<f64>, mark: &str, measure: &mut dyn FnMut(&str) -> f64) -> String {
+    let mut chars: Vec<char> = line.chars().collect();
+    loop {
+        let s: String = chars.iter().collect::<String>().trim_end().to_string() + mark;
+        if chars.is_empty() || max_w.is_none_or(|w| measure(&s) <= w) {
+            return if chars.is_empty() && max_w.is_some_and(|w| measure(mark) > w) { String::new() } else { s };
+        }
+        chars.pop();
+    }
 }
 
 /// Split into words keeping their trailing spaces attached.
@@ -103,11 +148,7 @@ pub fn fit_box(n: &mut Node) {
 
 pub fn estimate_layout(n: &Node) -> (Vec<String>, f64, f64) {
     let mut measure = |s: &str| estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);
-    let max_w = match n.text_auto_resize {
-        TextAutoResize::WidthAndHeight => None,
-        _ => Some(n.width),
-    };
-    let lines = wrap_lines(&n.characters, max_w, &mut measure);
+    let lines = layout_lines(n, &mut measure);
     let lh = n.effective_line_height();
     let w = match n.text_auto_resize {
         TextAutoResize::WidthAndHeight => lines.iter().map(|l| measure(l)).fold(0.0, f64::max).ceil(),
@@ -133,5 +174,34 @@ mod tests {
         assert_eq!(lines, vec!["a", "", "b"]);
         let lines = wrap_lines("abcdefgh", Some(3.0), &mut m);
         assert_eq!(lines, vec!["abc", "def", "gh"]);
+    }
+
+    #[test]
+    fn wrap_and_overflow_modes() {
+        // 1 unit per char ("…" counts as 1), box 11 wide and 2 lines tall.
+        let mut m = |s: &str| s.chars().count() as f64;
+        let mut n = Node { characters: "hello world foo bar".into(), width: 11.0, height: 2.0, line_height: Some(1.0), ..Node::default() };
+        n.text_auto_resize = TextAutoResize::None;
+        assert_eq!(layout_lines(&n, &mut m), vec!["hello world", "foo bar"]);
+        n.characters = "hello world foo bar baz qux".into();
+        assert_eq!(layout_lines(&n, &mut m), vec!["hello world", "foo bar baz", "qux"], "VISIBLE keeps every line");
+        n.text_overflow = TextOverflow::Ellipsis;
+        assert_eq!(layout_lines(&n, &mut m), vec!["hello world", "foo bar ba…"]);
+        n.text_overflow = TextOverflow::Truncate;
+        assert_eq!(layout_lines(&n, &mut m), vec!["hello world", "foo bar baz"]);
+        // No wrapping: only newlines break, and long lines are cut at the width.
+        n.text_wrap = false;
+        n.characters = "a long line of text\nshort".into();
+        n.text_overflow = TextOverflow::Visible;
+        assert_eq!(layout_lines(&n, &mut m), vec!["a long line of text", "short"]);
+        n.text_overflow = TextOverflow::Ellipsis;
+        assert_eq!(layout_lines(&n, &mut m), vec!["a long lin…", "short"]);
+        // Fits: untouched.
+        n.characters = "ok".into();
+        assert_eq!(layout_lines(&n, &mut m), vec!["ok"]);
+        // Hug-width text never overflows.
+        n.text_auto_resize = TextAutoResize::WidthAndHeight;
+        n.characters = "a long line of text".into();
+        assert_eq!(layout_lines(&n, &mut m), vec!["a long line of text"]);
     }
 }

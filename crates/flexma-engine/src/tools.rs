@@ -1453,6 +1453,7 @@ impl Editor {
             "letterSpacing": n.letter_spacing,
             "textAlign": n.text_align,
             "autoResize": n.text_auto_resize,
+            "wrap": n.text_wrap,
             "color": crate::text::css_color(c),
         })
     }

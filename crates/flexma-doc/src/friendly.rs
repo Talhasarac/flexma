@@ -222,6 +222,28 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                     out.insert("clipsContent".into(), v.clone());
                 }
             },
+            "wrap" | "textWrap" | "wordWrap" => {
+                out.insert("textWrap".into(), v.clone());
+            }
+            "overflow" if kind.is_frame_like() => match v.as_str().map(|s| s.to_ascii_lowercase()).as_deref() {
+                Some("hidden" | "clip") => {
+                    out.insert("clipsContent".into(), Value::Bool(true));
+                }
+                Some("visible") => {
+                    out.insert("clipsContent".into(), Value::Bool(false));
+                }
+                _ => return Err(format!("'{k}' on a frame must be \"hidden\" or \"visible\"")),
+            },
+            "overflow" | "textOverflow" | "overflowMode" => {
+                let mode = match v.as_str().map(|s| s.to_ascii_lowercase()).as_deref() {
+                    Some("visible" | "overflow") => "VISIBLE",
+                    Some("clip" | "hidden" | "masking") => "CLIP",
+                    Some("ellipsis") => "ELLIPSIS",
+                    Some("truncate") => "TRUNCATE",
+                    _ => return Err(format!("'{k}' must be VISIBLE, CLIP, ELLIPSIS or TRUNCATE")),
+                };
+                out.insert("textOverflow".into(), Value::String(mode.into()));
+            }
             "clipAlpha" | "alphaMask" => {
                 if v.as_bool() == Some(true) && !input.contains_key("clip") && !input.contains_key("clipsContent") {
                     out.insert("clipsContent".into(), Value::Bool(true));
@@ -570,6 +592,11 @@ fn build_one(
         if node.layout_sizing_horizontal == crate::paint::SizingMode::Fill && !obj.contains_key("textAutoResize") {
             node.text_auto_resize = crate::paint::TextAutoResize::Height;
         }
+        // An overflow mode with a given height means a fixed box.
+        let given_h = obj.contains_key("height") || obj.contains_key("h");
+        if node.text_overflow != crate::paint::TextOverflow::Visible && given_h && !obj.contains_key("textAutoResize") {
+            node.text_auto_resize = crate::paint::TextAutoResize::None;
+        }
         let (_, w, h) = crate::text::estimate_layout(&node);
         if node.text_auto_resize == crate::paint::TextAutoResize::WidthAndHeight {
             node.width = w;
@@ -661,6 +688,22 @@ mod tests {
         let m = norm(json!({ "clip": "shape" }));
         assert_eq!((m["clipsContent"].clone(), m["clipAlpha"].clone()), (json!(true), json!(false)));
         assert!(normalize_props(NodeType::Frame, json!({ "clip": "sprite" }).as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn text_wrap_and_overflow() {
+        let mut doc = Document::new_empty();
+        let mut gen = || "t:1".to_string();
+        let spec = json!([{ "type": "text", "text": "A long item name", "width": 60, "height": 20, "wrap": false, "overflow": "ellipsis" }]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        let n = doc.get(&top[0]).unwrap();
+        assert_eq!((n.text_wrap, n.text_overflow, n.text_auto_resize, n.height), (false, crate::paint::TextOverflow::Ellipsis, crate::paint::TextAutoResize::None, 20.0));
+        let norm = |kind, v: Value| normalize_props(kind, v.as_object().unwrap());
+        assert_eq!(norm(NodeType::Text, json!({ "overflow": "masking" })).unwrap()["textOverflow"], json!("CLIP"));
+        assert_eq!(norm(NodeType::Frame, json!({ "overflow": "hidden" })).unwrap()["clipsContent"], json!(true));
+        assert!(norm(NodeType::Text, json!({ "overflow": "scroll" })).is_err());
     }
 
     #[test]

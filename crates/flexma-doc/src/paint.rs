@@ -362,6 +362,23 @@ pub enum TextAutoResize {
     None,
 }
 
+/// What a text node does with text that doesn't fit its box (TextMeshPro's
+/// overflow modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TextOverflow {
+    /// Draw it past the box.
+    #[default]
+    Visible,
+    /// Cut it off at the box edges.
+    Clip,
+    /// Drop the lines (and, without wrapping, the characters) that don't fit,
+    /// ending the last shown one with "…".
+    Ellipsis,
+    /// Like `Ellipsis`, without the "…".
+    Truncate,
+}
+
 /// What a STYLE node holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

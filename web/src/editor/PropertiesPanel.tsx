@@ -573,6 +573,25 @@ function TextSection({ sel, set, begin, end, store, readOnly }: SectionProps & {
         ]}
         onChange={(v) => set({ textAutoResize: v })}
       />
+      {common(sel, (n) => n.textAutoResize) !== 'WIDTH_AND_HEIGHT' && (
+        <div className="grid2">
+          <Select
+            value={common(sel, (n) => n.textOverflow ?? 'VISIBLE')}
+            title="Overflow: what happens to text that doesn't fit the box"
+            options={[
+              { value: 'VISIBLE', label: 'Overflow' },
+              { value: 'CLIP', label: 'Clip' },
+              { value: 'ELLIPSIS', label: 'Ellipsis…' },
+              { value: 'TRUNCATE', label: 'Truncate' },
+            ]}
+            onChange={(v) => set({ textOverflow: v })}
+          />
+          <label className="check" title="Wrap lines at the box width">
+            <input type="checkbox" checked={common(sel, (n) => n.textWrap ?? true) !== false} onChange={(e) => set({ textWrap: e.target.checked })} disabled={readOnly} />
+            Wrap
+          </label>
+        </div>
+      )}
     </Section>
   );
 }
