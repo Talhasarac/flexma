@@ -1,6 +1,7 @@
 //! Pointer interaction: tools, gestures, handles, snapping, drawing and the pen.
 
 use crate::editor::{Editor, Guide};
+use flexma_doc::constraints::Subtree;
 use flexma_doc::geom::local_transform;
 use flexma_doc::path::Seg;
 use flexma_doc::{Affine, Color, LayoutMode, Node, NodeId, NodeType, Op, Paint, Rect, Vec2};
@@ -95,8 +96,8 @@ pub struct MoveItem {
 pub struct ResizeItem {
     id: NodeId,
     node0: Node,
-    /// Direct children at gesture start (groups scale them).
-    children0: Vec<Node>,
+    /// Frames and groups: the descendants that follow the resize, as they were at gesture start.
+    tree: Option<Subtree>,
     world0: Affine,
     parent_inv: Affine,
     aabb0: Rect,
@@ -432,17 +433,13 @@ impl Editor {
                     return None;
                 }
                 let parent_inv = n.parent.as_deref().map(|p| self.doc.world_transform(p)).unwrap_or_default().invert().unwrap_or_default();
-                let children0 = if n.kind == NodeType::Group {
-                    self.doc.children(&id).iter().filter_map(|c| self.doc.get(c).cloned()).collect()
-                } else {
-                    Vec::new()
-                };
+                let tree = (n.kind.is_frame_like() || n.kind == NodeType::Group).then(|| Subtree::capture(&self.doc, &id));
                 Some(ResizeItem {
                     world0: self.scene.world_of(&id),
                     aabb0: self.scene.aabb.get(&id).copied().unwrap_or_default(),
                     id,
                     node0: n,
-                    children0,
+                    tree,
                     parent_inv,
                 })
             })
@@ -1026,7 +1023,10 @@ impl Editor {
             if (fy - 0.5).abs() > 0.1 || mods.shift {
                 props.insert("height".into(), json!(h));
             }
-            self.resize_extras(n0, &it.children0, &mut props, w, h, &mut ops);
+            self.resize_extras(n0, &mut props, w, h);
+            let fw = if props.contains_key("width") { w } else { n0.width };
+            let fh = if props.contains_key("height") { h } else { n0.height };
+            ops.extend(self.follow_gesture(it, fw, fh, mods));
             ops.insert(0, Op::Update { id: it.id.clone(), props });
             self.apply_local(ops);
             return;
@@ -1073,17 +1073,27 @@ impl Editor {
             props.insert("y".into(), json!(round_px(p.y - lb.y)));
             props.insert("width".into(), json!(w));
             props.insert("height".into(), json!(h));
-            let mut extra = Vec::new();
-            self.resize_extras(n0, &it.children0, &mut props, w, h, &mut extra);
+            self.resize_extras(n0, &mut props, w, h);
             ops.push(Op::Update { id: it.id.clone(), props });
-            ops.extend(extra);
+            ops.extend(self.follow_gesture(it, w, h, mods));
         }
         self.apply_local(ops);
     }
 
+    /// Children of a frame or group being resized to `w`×`h` follow their
+    /// constraints (group children scale). Hold Cmd/Ctrl to leave a frame's
+    /// children in place, as in Figma.
+    fn follow_gesture(&mut self, it: &ResizeItem, w: f64, h: f64, mods: Mods) -> Vec<Op> {
+        let Some(t) = &it.tree else { return Vec::new() };
+        let mut ops = if mods.meta && it.node0.kind != NodeType::Group { Vec::new() } else { self.follow_resize(t, w, h) };
+        let restore = t.restore_ops(&self.doc, &ops);
+        ops.extend(restore);
+        ops
+    }
+
     /// Type-specific side effects of a resize (text auto-resize, auto-layout
-    /// sizing, vector path scaling, group children scaling).
-    fn resize_extras(&mut self, n0: &Node, children0: &[Node], props: &mut Map<String, Value>, w: f64, h: f64, ops: &mut Vec<Op>) {
+    /// sizing, vector path scaling).
+    fn resize_extras(&mut self, n0: &Node, props: &mut Map<String, Value>, w: f64, h: f64) {
         match n0.kind {
             NodeType::Text => {
                 if props.contains_key("height") {
@@ -1111,28 +1121,6 @@ impl Editor {
                 if n0.width > 0.0 && n0.height > 0.0 {
                     let segs = flexma_doc::path::scale(&flexma_doc::path::parse(&n0.path_data), w / n0.width, h / n0.height.max(1e-6));
                     props.insert("pathData".into(), json!(flexma_doc::path::to_svg_d(&segs)));
-                }
-            }
-            NodeType::Group => {
-                // Groups scale their children (Figma's default "scale" behavior).
-                let sx = w / n0.width.max(1e-6);
-                let sy = h / n0.height.max(1e-6);
-                for c in children0 {
-                    let mut p = Map::new();
-                    p.insert("x".into(), json!(c.x * sx));
-                    p.insert("y".into(), json!(c.y * sy));
-                    p.insert("width".into(), json!((c.width * sx).max(0.01)));
-                    if c.kind != NodeType::Line {
-                        p.insert("height".into(), json!((c.height * sy).max(0.01)));
-                    }
-                    if c.kind == NodeType::Vector && c.width > 0.0 && c.height > 0.0 {
-                        let segs = flexma_doc::path::scale(&flexma_doc::path::parse(&c.path_data), sx, sy);
-                        p.insert("pathData".into(), json!(flexma_doc::path::to_svg_d(&segs)));
-                    }
-                    if c.kind == NodeType::Text {
-                        p.insert("textAutoResize".into(), json!("NONE"));
-                    }
-                    ops.push(Op::Update { id: c.id.clone(), props: p });
                 }
             }
             _ => {}
@@ -1467,5 +1455,65 @@ impl Editor {
             "autoResize": n.text_auto_resize,
             "color": crate::text::css_color(c),
         })
+    }
+}
+
+#[cfg(test)]
+mod constraint_tests {
+    use super::*;
+    use flexma_doc::{ConstraintType, Constraints, Document};
+
+    fn editor() -> Editor {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height) = (200.0, 100.0);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        for (id, x, w, h) in [("right", 170.0, 20.0, ConstraintType::Max), ("wide", 10.0, 180.0, ConstraintType::Stretch)] {
+            let mut r = Node::new(id, NodeType::Rectangle);
+            r.parent = Some("f".into());
+            (r.x, r.width, r.height) = (x, w, 20.0);
+            r.constraints = Constraints { horizontal: h, vertical: ConstraintType::Min };
+            doc.apply(&Op::Create { node: r }).unwrap();
+        }
+        let mut ed = Editor::new(None, None);
+        ed.load(&doc.to_json(), "c1", true).unwrap();
+        ed
+    }
+
+    fn xw(ed: &Editor, id: &str) -> (f64, f64) {
+        let n = ed.doc.get(id).unwrap();
+        (n.x, n.width)
+    }
+
+    #[test]
+    fn resize_handle_moves_children_by_constraints() {
+        let mut ed = editor();
+        ed.set_selection(vec!["f".into()]);
+        ed.ensure_scene();
+        ed.start_handle_drag(Handle::Box(1.0, 0.5), Vec2::ZERO);
+        let none = Mods::default();
+        ed.pointer_move(Vec2::new(300.0, 50.0), none);
+        assert_eq!(xw(&ed, "right"), (270.0, 20.0));
+        assert_eq!(xw(&ed, "wide"), (10.0, 280.0));
+        // Back to the start size: children return too.
+        ed.pointer_move(Vec2::new(200.0, 50.0), none);
+        assert_eq!(xw(&ed, "right"), (170.0, 20.0));
+        assert_eq!(xw(&ed, "wide"), (10.0, 180.0));
+        // Cmd/Ctrl resizes the frame alone.
+        ed.pointer_move(Vec2::new(260.0, 50.0), Mods { meta: true, ..none });
+        assert_eq!(ed.doc.get("f").unwrap().width, 260.0);
+        assert_eq!(xw(&ed, "right"), (170.0, 20.0));
+        ed.pointer_move(Vec2::new(260.0, 50.0), none);
+        assert_eq!(xw(&ed, "right"), (230.0, 20.0));
+        ed.pointer_up(Vec2::new(260.0, 50.0), none);
+        // One undo step restores the frame and its children.
+        ed.undo();
+        assert_eq!(ed.doc.get("f").unwrap().width, 200.0);
+        assert_eq!(xw(&ed, "right"), (170.0, 20.0));
+        // The properties panel follows constraints too.
+        ed.update_nodes(vec![("f".into(), Map::from_iter([("width".to_string(), json!(250))]))]);
+        assert_eq!(xw(&ed, "right"), (220.0, 20.0));
+        assert_eq!(xw(&ed, "wide"), (10.0, 230.0));
     }
 }

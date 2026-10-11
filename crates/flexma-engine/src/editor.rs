@@ -9,6 +9,7 @@ use crate::scene::Scene;
 use crate::sync::Sync;
 use crate::text::TextEngine;
 use crate::tools::{Gesture, Tool};
+use flexma_doc::constraints::{self, Subtree};
 use flexma_doc::{components, layout};
 use flexma_doc::{Document, Node, NodeId, NodeType, Op, OpEffect, Rect, Vec2};
 use serde_json::{json, Map, Value};
@@ -488,10 +489,33 @@ impl Editor {
         out
     }
 
+    /// Child updates that keep a captured frame's or group's descendants
+    /// following their constraints when it becomes `w`×`h`. Text boxes that
+    /// change width are measured for real.
+    pub fn follow_resize(&mut self, tree: &Subtree, w: f64, h: f64) -> Vec<Op> {
+        let mut ops = constraints::resize_ops(tree, w, h);
+        for op in &mut ops {
+            let Op::Update { id, props } = op else { continue };
+            if props.get("needsMeasure") != Some(&json!(true)) {
+                continue;
+            }
+            let Some(n) = tree.get(id).cloned() else { continue };
+            let exact = self.text_box_props(&n, props);
+            if exact.is_empty() {
+                // No text engine yet: measure once fonts are ready.
+                self.needs_measure.insert(id.clone());
+            }
+            props.extend(exact);
+        }
+        ops
+    }
+
     /// Update nodes from the properties panel: `[{id, props}]` with canonical
-    /// prop names. Text boxes are re-measured.
+    /// prop names. Text boxes are re-measured, and children of resized frames
+    /// follow their constraints.
     pub fn update_nodes(&mut self, updates: Vec<(NodeId, Map<String, Value>)>) -> Vec<String> {
         let mut ops = Vec::new();
+        let mut follow = Vec::new();
         for (id, mut props) in updates {
             let Some(n) = self.doc.get(&id).cloned() else { continue };
             // Resizing a hugging auto-layout frame makes that axis fixed.
@@ -523,9 +547,17 @@ impl Editor {
                     props.insert("pathData".into(), json!(flexma_doc::path::to_svg_d(&segs)));
                 }
             }
+            if props.contains_key("width") || props.contains_key("height") {
+                let w = props.get("width").and_then(Value::as_f64).unwrap_or(n.width);
+                let h = props.get("height").and_then(Value::as_f64).unwrap_or(n.height);
+                let tree = Subtree::capture(&self.doc, &id);
+                follow.extend(self.follow_resize(&tree, w, h));
+            }
             ops.push(Op::Update { id, props });
         }
-        self.apply_local(ops)
+        // Explicit edits go last so they win over constraint results.
+        follow.extend(ops);
+        self.apply_local(follow)
     }
 
     // ---------------- queries for the UI ----------------

@@ -29,6 +29,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `flipX`, `flipY` | bool | false | |
 | `description` | string | "" | Notes for collaborators and agents. |
 | `absolute` / `layoutAbsolute` | bool | false | Take the node out of its auto-layout parent's flow. |
+| `constraints` | `{horizontal, vertical}` \| string | `MIN` / `MIN` | How the node follows when its parent frame or instance is resized, like Unity anchors. See Constraints. |
 | `children` | spec[] | | `FRAME` and `GROUP` only. |
 
 Type defaults:
@@ -47,6 +48,7 @@ Type defaults:
 { "type": "LINEAR_GRADIENT", "angle": 90, "stops": [
     { "position": 0, "color": "#6d5dfc" }, { "position": 1, "color": "#e9488d" } ] }
 { "type": "IMAGE", "asset": "<asset id>", "fit": "FILL" }   // FILL | FIT | STRETCH
+{ "type": "IMAGE", "asset": "<asset id>", "tint": "#ffd166", "slice": 12 }   // tinted 9-slice, see IMAGE
 ```
 
 - Gradient `angle`: 0 runs left→right and 90 runs top→bottom. The canvas renders up to 4 stops.
@@ -82,6 +84,29 @@ Sizing rules:
 - Setting a number makes that axis `FIXED`.
 - A child with `width: "fill"` takes the remaining space along a horizontal parent, or the full inner width in a vertical parent.
 - If several children fill, they share the space equally.
+
+## Constraints
+
+`constraints` says how a node follows when its parent frame, component or instance changes size, like the anchors of a Unity RectTransform. Each axis takes one value:
+
+| Value | Also accepted | When the parent grows by Δ |
+|---|---|---|
+| `MIN` (default) | `LEFT`, `TOP` | Stays put: keeps its left (top) margin. |
+| `MAX` | `RIGHT`, `BOTTOM` | Moves by Δ: keeps its right (bottom) margin. |
+| `CENTER` | | Moves by Δ/2. |
+| `STRETCH` | `LEFT_RIGHT`, `TOP_BOTTOM` | Grows by Δ: keeps both margins. |
+| `SCALE` | | Position and size scale with the parent. |
+
+```json
+"constraints": { "horizontal": "STRETCH", "vertical": "MAX" }   // a bottom bar
+"constraints": "CENTER"                                         // both axes
+"constraints": { "anchorMin": [0, 0], "anchorMax": [1, 0] }     // the same bottom bar as Unity anchors
+```
+
+- Resizing a frame with `update_nodes` moves its children by their constraints, like dragging its handle in the editor. A child you also update in the same call keeps the values you give it.
+- Instances re-flow from their main component: resize an instance and its layers follow their constraints.
+- Children placed by auto layout ignore constraints; `absolute` children use them. Children of groups always scale.
+- Unity anchors use y-up fractions, which are converted for you: 0 becomes `MIN` (left/bottom → `MAX` vertically), 1 the opposite edge, 0.5 `CENTER`, 0 to 1 `STRETCH`, and anything else `SCALE`.
 
 ## TEXT
 
@@ -131,6 +156,12 @@ For paragraphs, give the text a width (a number, or `"fill"` inside auto layout)
 - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`; `cover` and `contain` work too.
 - Width and height default to the image's own size, scaled so the longest side is at most 1200. Give one side and the other keeps the proportions.
 - It becomes a `RECTANGLE` named "Image" with an `IMAGE` fill, so every rectangle prop works. To put an image behind content, give a frame an `IMAGE` fill instead.
+- `tint`: a multiply color, like Unity's `Image.color`. `#ffffff` leaves the image unchanged; alpha fades it.
+- `slice`: 9-slice scaling, so the corners keep their size while the edges and center stretch (buttons, panels, speech bubbles). Insets are image pixels: a number, `[v, h]`, `[top, right, bottom, left]` or `{top, right, bottom, left, scale, fillCenter}`.
+  - `scale` is layer px per image px for the border (default 1, 0.5 for @2x art).
+  - `fillCenter: false` keeps only the border.
+  - `fit` is ignored while an image is sliced.
+- Both also work on any `IMAGE` paint, e.g. a frame's background.
 
 ## LINE
 

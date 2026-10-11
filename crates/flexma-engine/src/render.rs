@@ -747,7 +747,7 @@ impl Renderer {
                         stops[k] = s.position;
                     }
                 }
-                Some(Paint::Image { asset, fit, opacity: po, .. }) => {
+                Some(Paint::Image { asset, fit, opacity: po, tint, slice, .. }) => {
                     ptype = 3.0;
                     let fit_v = match fit {
                         ImageFit::Fill => 0.0,
@@ -756,7 +756,15 @@ impl Renderer {
                     };
                     match self.image(asset).map(|(_, w, h)| (w, h)) {
                         Some((w, h)) => {
+                            // c0 = tint, c1 = (imgW, imgH, fit, alpha),
+                            // c2 = 9-slice source insets (top, right, bottom, left) in image px,
+                            // c3 = (layer px per image px, fill center, sliced, 0).
+                            colors[0] = premul(tint.unwrap_or(Color::WHITE), 1.0);
                             colors[1] = [w as f32, h as f32, fit_v, *po];
+                            if let Some(s) = slice {
+                                colors[2] = s.source_insets(w, h).map(|v| v as f32);
+                                colors[3] = [s.scale.max(0.0), if s.fill_center { 1.0 } else { 0.0 }, 1.0, 0.0];
+                            }
                             image = Some(asset.clone());
                         }
                         None => {

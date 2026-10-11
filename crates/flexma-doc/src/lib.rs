@@ -8,12 +8,14 @@
 //! - [`ops`]: create/update/delete operations with LWW-per-property semantics
 //! - [`fractional`]: fractional indexing for sibling order
 //! - [`layout`]: deterministic auto layout
+//! - [`constraints`]: how children follow a resized parent (Unity-style anchors)
 //! - [`svg`]: SVG export
 //! - [`friendly`]: forgiving node specs for AI agents (MCP)
 
 pub mod audit;
 pub mod color;
 pub mod components;
+pub mod constraints;
 pub mod doc;
 pub mod fractional;
 pub mod friendly;

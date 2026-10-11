@@ -81,6 +81,7 @@ Shared color and text styles keep a design consistent: change a style once and e
   - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`.
   - It's a rectangle with an image fill, so `radius`, `stroke`, `shadow` and `opacity` work, and it can sit inside auto layout.
 - **As a background:** any frame or shape can take `fill: { "type": "IMAGE", "asset": "<id>", "fit": "FILL" }`, e.g. a hero frame with text on top.
+- **Game UI:** `slice` gives 9-slice scaling (a sliced Unity sprite) and `tint` multiplies the color (Unity's `Image.color`), on the image shorthand or any `IMAGE` paint.
 - **Reuse:** `list_images` shows pictures already in the workspace and which ones this file uses.
 - **From the web:** download the picture first (`curl -L -o photo.jpg <url>`), then upload it. Only use images the user has the rights to. For placeholders, a solid color or gradient block is fine.
 
@@ -185,6 +186,7 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - Errors name the bad property and list the valid ones. Fix the spec and retry; don't drop the property silently.
 - Text boxes are sized by estimate on the server. The first browser that renders them re-measures them exactly, so screenshots can differ by a few pixels from what people see.
 - `x`/`y` on children of an auto-layout frame are ignored. To pin a child, set `absolute: true`.
+- Resizing a frame or instance moves children that have `constraints` (like Unity anchors). Children with the default `MIN`/`MIN` stay where they are.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
 - Images: image fills reference uploaded asset ids (`{ "type": "IMAGE", "asset": "<id>" }`). You can't upload binaries through MCP yet. Use a placeholder rectangle with a neutral fill and name it "Image: …".
 - Large files: outline with `depth: 2` first, then zoom into the frames you need with `node_id`.

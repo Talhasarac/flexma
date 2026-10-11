@@ -57,11 +57,112 @@ pub enum Paint {
         asset: String,
         #[serde(default)]
         fit: ImageFit,
+        /// Multiply color, like Unity's `Image.color`. White (or none) leaves the image unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tint: Option<Color>,
+        /// 9-slice scaling. When set, the image stretches by slices and `fit` is ignored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slice: Option<NineSlice>,
         #[serde(default = "one", skip_serializing_if = "is_one")]
         opacity: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]
         visible: bool,
     },
+}
+
+/// 9-slice scaling for image fills (Unity's sliced sprites, CSS `border-image`):
+/// the corners keep their size, the edges stretch along one axis and the
+/// center stretches both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NineSlice {
+    /// Insets from each image edge, in image pixels (Unity's sprite border).
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+    /// Layer pixels per image pixel for the border: 1 draws it at the image's
+    /// own size, 0.5 suits @2x art. From Unity: reference pixels per unit ÷
+    /// (sprite pixels per unit × pixels per unit multiplier).
+    #[serde(skip_serializing_if = "is_one")]
+    pub scale: f32,
+    /// Draw the center patch (Unity's Fill Center). Off leaves only the frame.
+    #[serde(skip_serializing_if = "is_true")]
+    pub fill_center: bool,
+}
+
+impl NineSlice {
+    pub fn uniform(v: f32) -> NineSlice {
+        NineSlice { top: v, right: v, bottom: v, left: v, scale: 1.0, fill_center: true }
+    }
+
+    /// Source insets `[top, right, bottom, left]` for an `iw`×`ih` image, shrunk
+    /// so opposite insets never overlap.
+    pub fn source_insets(&self, iw: f64, ih: f64) -> [f64; 4] {
+        let fit = |a: f32, b: f32, size: f64| {
+            let (a, b) = (a.max(0.0) as f64, b.max(0.0) as f64);
+            let k = if a + b > size && a + b > 0.0 { size / (a + b) } else { 1.0 };
+            (a * k, b * k)
+        };
+        let (l, r) = fit(self.left, self.right, iw);
+        let (t, b) = fit(self.top, self.bottom, ih);
+        [t, r, b, l]
+    }
+
+    /// Destination insets `[top, right, bottom, left]` in a `w`×`h` box for the
+    /// given source insets. Borders shrink proportionally when the box is
+    /// smaller than they are, as Unity does.
+    pub fn dest_insets(&self, src: [f64; 4], w: f64, h: f64) -> [f64; 4] {
+        let s = self.scale.max(0.0) as f64;
+        let fit = |a: f64, b: f64, size: f64| {
+            let (a, b) = (a * s, b * s);
+            let k = if a + b > size && a + b > 0.0 { size.max(0.0) / (a + b) } else { 1.0 };
+            (a * k, b * k)
+        };
+        let (l, r) = fit(src[3], src[1], w);
+        let (t, b) = fit(src[0], src[2], h);
+        [t, r, b, l]
+    }
+}
+
+/// Accepts a number (all sides), `[v, h]`, `[top, right, bottom, left]` or an
+/// object `{top, right, bottom, left, scale?, fillCenter?}`.
+impl<'de> Deserialize<'de> for NineSlice {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<NineSlice, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Obj {
+            #[serde(default)]
+            top: f32,
+            #[serde(default)]
+            right: f32,
+            #[serde(default)]
+            bottom: f32,
+            #[serde(default)]
+            left: f32,
+            #[serde(default = "one")]
+            scale: f32,
+            #[serde(default = "yes")]
+            fill_center: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Num(f32),
+            Arr(Vec<f32>),
+            Obj(Obj),
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Num(v) => NineSlice::uniform(v),
+            Repr::Obj(o) => NineSlice { top: o.top, right: o.right, bottom: o.bottom, left: o.left, scale: o.scale, fill_center: o.fill_center },
+            Repr::Arr(a) => match a.len() {
+                1 => NineSlice::uniform(a[0]),
+                2 => NineSlice { top: a[0], bottom: a[0], left: a[1], right: a[1], ..NineSlice::uniform(0.0) },
+                4 => NineSlice { top: a[0], right: a[1], bottom: a[2], left: a[3], ..NineSlice::uniform(0.0) },
+                _ => return Err(serde::de::Error::custom("slice array must have 1, 2 or 4 numbers")),
+            },
+        })
+    }
 }
 
 impl Paint {
@@ -93,7 +194,116 @@ impl Paint {
                 .first()
                 .map(|s| s.color.with_alpha(s.color.a * opacity))
                 .unwrap_or(Color::TRANSPARENT),
-            Paint::Image { .. } => Color::rgba(0.8, 0.8, 0.8, 1.0),
+            Paint::Image { tint, .. } => {
+                let t = tint.unwrap_or(Color::WHITE);
+                Color::rgba(0.8 * t.r, 0.8 * t.g, 0.8 * t.b, t.a)
+            }
+        }
+    }
+}
+
+/// How a node keeps its place along one axis when its parent frame is resized
+/// (Figma's constraints, Unity's anchors).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConstraintType {
+    /// Keep the distance to the left (or top) edge.
+    #[default]
+    Min,
+    /// Keep the distance to the right (or bottom) edge.
+    Max,
+    /// Keep the offset from the parent's center.
+    Center,
+    /// Keep the distances to both edges, so the node grows with its parent.
+    Stretch,
+    /// Keep position and size proportional to the parent.
+    Scale,
+}
+
+impl ConstraintType {
+    /// Also takes Figma's UI names (LEFT, RIGHT, LEFT_RIGHT, TOP_BOTTOM, ...), any case.
+    pub fn parse(s: &str) -> Option<ConstraintType> {
+        let k: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_uppercase();
+        Some(match k.as_str() {
+            "MIN" | "LEFT" | "TOP" | "START" => ConstraintType::Min,
+            "MAX" | "RIGHT" | "BOTTOM" | "END" => ConstraintType::Max,
+            "CENTER" | "CENTRE" | "MIDDLE" => ConstraintType::Center,
+            "STRETCH" | "LEFTRIGHT" | "TOPBOTTOM" | "BOTH" => ConstraintType::Stretch,
+            "SCALE" | "PROPORTIONAL" => ConstraintType::Scale,
+            _ => return None,
+        })
+    }
+
+    /// From one axis of a Unity RectTransform's anchors (fractions of the parent,
+    /// measured from the left or the top).
+    pub fn from_anchors(min: f64, max: f64) -> ConstraintType {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        if near(min, max) {
+            if near(min, 0.0) {
+                ConstraintType::Min
+            } else if near(min, 1.0) {
+                ConstraintType::Max
+            } else if near(min, 0.5) {
+                ConstraintType::Center
+            } else {
+                ConstraintType::Scale
+            }
+        } else if near(min, 0.0) && near(max, 1.0) {
+            ConstraintType::Stretch
+        } else {
+            ConstraintType::Scale
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConstraintType {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ConstraintType, D::Error> {
+        let s = String::deserialize(d)?;
+        ConstraintType::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("unknown constraint '{s}' (use MIN, MAX, CENTER, STRETCH or SCALE)")))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+pub struct Constraints {
+    pub horizontal: ConstraintType,
+    pub vertical: ConstraintType,
+}
+
+/// Accepts `{horizontal, vertical}` (a missing axis is MIN), one string for
+/// both axes, or Unity anchors `{anchorMin: [x, y], anchorMax: [x, y]}`. Unity
+/// measures y from the bottom, so they are flipped here.
+impl<'de> Deserialize<'de> for Constraints {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Constraints, D::Error> {
+        use serde::de::Error;
+        use serde_json::Value;
+        let kind = |v: &Value| -> Result<ConstraintType, D::Error> {
+            let s = v.as_str().ok_or_else(|| D::Error::custom("a constraint must be a string"))?;
+            ConstraintType::parse(s).ok_or_else(|| D::Error::custom(format!("unknown constraint '{s}' (use MIN, MAX, CENTER, STRETCH or SCALE)")))
+        };
+        let point = |v: &Value| -> Option<(f64, f64)> {
+            match v {
+                Value::Array(a) if a.len() == 2 => Some((a[0].as_f64()?, a[1].as_f64()?)),
+                Value::Object(o) => Some((o.get("x")?.as_f64()?, o.get("y")?.as_f64()?)),
+                _ => None,
+            }
+        };
+        let v = Value::deserialize(d)?;
+        match &v {
+            Value::String(_) => {
+                let c = kind(&v)?;
+                Ok(Constraints { horizontal: c, vertical: c })
+            }
+            Value::Object(o) if o.contains_key("anchorMin") || o.contains_key("anchorMax") => {
+                let bad = || D::Error::custom("Unity anchors need anchorMin and anchorMax as [x, y] or {x, y}");
+                let (x0, y0) = o.get("anchorMin").and_then(point).ok_or_else(bad)?;
+                let (x1, y1) = o.get("anchorMax").and_then(point).ok_or_else(bad)?;
+                Ok(Constraints { horizontal: ConstraintType::from_anchors(x0, x1), vertical: ConstraintType::from_anchors(1.0 - y1, 1.0 - y0) })
+            }
+            Value::Object(o) => Ok(Constraints {
+                horizontal: o.get("horizontal").map(kind).transpose()?.unwrap_or_default(),
+                vertical: o.get("vertical").map(kind).transpose()?.unwrap_or_default(),
+            }),
+            _ => Err(D::Error::custom("constraints must be {horizontal, vertical}, one string, or {anchorMin, anchorMax}")),
         }
     }
 }
@@ -283,5 +493,30 @@ impl<'de> Deserialize<'de> for Padding {
                 _ => return Err(serde::de::Error::custom("padding array must have 1, 2 or 4 numbers")),
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn image_paint_with_tint_and_slice() {
+        let p: Paint = serde_json::from_value(json!({ "type": "IMAGE", "asset": "a", "tint": "#ff8800", "slice": [4, 8] })).unwrap();
+        let Paint::Image { tint, slice: Some(s), .. } = &p else { panic!("{p:?}") };
+        assert_eq!(tint.unwrap().to_hex(), "#ff8800");
+        assert_eq!((s.top, s.right, s.bottom, s.left, s.scale, s.fill_center), (4.0, 8.0, 4.0, 8.0, 1.0, true));
+        // Round trip keeps defaults out.
+        assert_eq!(serde_json::to_value(&p).unwrap()["slice"], json!({ "top": 4.0, "right": 8.0, "bottom": 4.0, "left": 8.0 }));
+        let s: NineSlice = serde_json::from_value(json!({ "left": 10, "right": 10, "scale": 0.5, "fillCenter": false })).unwrap();
+        assert_eq!((s.top, s.left, s.scale, s.fill_center), (0.0, 10.0, 0.5, false));
+        // Insets never overlap: in the image, or in a box smaller than the borders.
+        let src = NineSlice::uniform(40.0).source_insets(60.0, 100.0);
+        assert_eq!(src, [40.0, 30.0, 40.0, 30.0]);
+        assert_eq!(NineSlice::uniform(10.0).dest_insets([10.0; 4], 10.0, 100.0), [10.0, 5.0, 10.0, 5.0]);
+        // Old documents without the new fields still load.
+        let old: Paint = serde_json::from_value(json!({ "type": "IMAGE", "asset": "a", "fit": "FIT" })).unwrap();
+        assert!(matches!(old, Paint::Image { tint: None, slice: None, fit: ImageFit::Fit, .. }));
     }
 }

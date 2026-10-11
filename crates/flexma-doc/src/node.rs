@@ -239,6 +239,9 @@ define_node! {
     layout_sizing_vertical: SizingMode = SizingMode::Fixed => "layoutSizingVertical",
     /// Children with absolute positioning are ignored by their parent's auto layout.
     layout_absolute: bool = false => "layoutAbsolute",
+    /// How the node follows when its parent frame (or instance) is resized,
+    /// like Unity's anchors. Children that auto layout places ignore it.
+    constraints: Constraints = Constraints::default() => "constraints",
 
     /// INSTANCE: the main component it shows.
     component_id: Option<NodeId> = None => "componentId",

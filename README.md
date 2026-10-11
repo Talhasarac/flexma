@@ -20,6 +20,8 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Smooth GPU rendering. The scene renderer is written in Rust, compiled to WebAssembly, and drawn with WebGL2.
 - Auto layout (flexbox-style frames) with hug, fill and fixed sizing, gap, padding and alignment.
 - Fills (solid, linear gradient, image), strokes, corner radii, drop shadows, opacity, rotation and flips.
+- Constraints, like Unity anchors: pin layers to edges, center them, stretch or scale them as their frame or instance resizes.
+- Game-UI image fills: 9-slice scaling (sliced sprites) and a multiply tint (Unity's `Image.color`).
 - Snapping and smart guides; resizing, rotating and multi-select; alt-drag to duplicate; drag layers into frames.
 - Undo and redo, copy and paste, keyboard shortcuts that match Figma's, and a layers panel with drag-to-reorder.
 - Version history: automatic snapshots and named versions, with one-click restore.

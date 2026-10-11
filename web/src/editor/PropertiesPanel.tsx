@@ -30,7 +30,7 @@ import { FontPicker } from './FontPicker';
 import { StyleChip, StylePickerButton } from './Styles';
 import { useToast } from '../components/Toast';
 import { useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
-import type { EffectValue, NodeData, Paint } from './types';
+import type { ConstraintType, Constraints, EffectValue, NineSlice, NodeData, Paint } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
 
 type Props = { store: EditorStore };
@@ -189,6 +189,8 @@ export function PropertiesPanel({ store }: Props) {
       </Section>
 
       {isFrame && <AutoLayoutSection sel={sel} set={set} begin={begin} end={end} store={store} />}
+
+      {sel.every(constrained) && <ConstraintsSection sel={sel} store={store} readOnly={readOnly} />}
 
       <Section title="Layer">
         <div className="grid2">
@@ -407,6 +409,74 @@ function AutoLayoutSection({ sel, set, begin, end, store }: SectionProps & { sto
   );
 }
 
+const FRAME_LIKE: NodeData['type'][] = ['FRAME', 'COMPONENT', 'INSTANCE'];
+
+/** Does the parent move this layer by its constraints (in a frame, not placed by auto layout)? */
+function constrained(n: NodeData) {
+  return n.parentType !== null && FRAME_LIKE.includes(n.parentType) && (n.parentLayout === 'NONE' || n.layoutAbsolute);
+}
+
+const H_OPTIONS: { value: ConstraintType; label: string }[] = [
+  { value: 'MIN', label: 'Left' },
+  { value: 'MAX', label: 'Right' },
+  { value: 'STRETCH', label: 'Left & right' },
+  { value: 'CENTER', label: 'Center' },
+  { value: 'SCALE', label: 'Scale' },
+];
+const V_OPTIONS: { value: ConstraintType; label: string }[] = [
+  { value: 'MIN', label: 'Top' },
+  { value: 'MAX', label: 'Bottom' },
+  { value: 'STRETCH', label: 'Top & bottom' },
+  { value: 'CENTER', label: 'Center' },
+  { value: 'SCALE', label: 'Scale' },
+];
+
+/** Clicking a side pins it; clicking the other side as well stretches, and clicking a stretched side unpins it. */
+function togglePin(cur: ConstraintType | 'mixed', side: 'MIN' | 'MAX'): ConstraintType {
+  const other = side === 'MIN' ? 'MAX' : 'MIN';
+  if (cur === other) return 'STRETCH';
+  if (cur === 'STRETCH') return other;
+  return side;
+}
+
+function ConstraintsSection({ sel, store, readOnly }: { sel: NodeData[]; store: EditorStore; readOnly: boolean }) {
+  const h = common(sel, (n) => n.constraints.horizontal);
+  const v = common(sel, (n) => n.constraints.vertical);
+  // Per layer, so a mixed selection keeps each layer's other axis.
+  const put = (axis: keyof Constraints, value: ConstraintType) => {
+    if (readOnly) return;
+    store.engine.update_nodes(JSON.stringify(sel.map((n) => ({ id: n.id, props: { constraints: { ...n.constraints, [axis]: value } } }))));
+    store.poll();
+  };
+  const on = (axis: ConstraintType | 'mixed', ...values: ConstraintType[]) => (values.includes(axis as ConstraintType) ? 'on' : '');
+  return (
+    <Section title="Constraints">
+      <div className="al-grid constraints-grid">
+        <div className="stack-tight">
+          <Select title="Horizontal constraint" value={h} options={H_OPTIONS} onChange={(c) => put('horizontal', c)} />
+          <Select title="Vertical constraint" value={v} options={V_OPTIONS} onChange={(c) => put('vertical', c)} />
+        </div>
+        <svg className={`constraint-box${readOnly ? ' readonly' : ''}`} viewBox="0 0 76 76" role="group" aria-label="Constraints">
+          <rect className="frame" x="6" y="6" width="64" height="64" rx="3" />
+          <rect className="layer" x="27" y="27" width="22" height="22" rx="2" />
+          <line className={on(h, 'MIN', 'STRETCH')} x1="10" y1="38" x2="23" y2="38" />
+          <line className={on(h, 'MAX', 'STRETCH')} x1="53" y1="38" x2="66" y2="38" />
+          <line className={on(v, 'MIN', 'STRETCH')} x1="38" y1="10" x2="38" y2="23" />
+          <line className={on(v, 'MAX', 'STRETCH')} x1="38" y1="53" x2="38" y2="66" />
+          <line className={on(h, 'CENTER')} x1="38" y1="31" x2="38" y2="45" />
+          <line className={on(v, 'CENTER')} x1="31" y1="38" x2="45" y2="38" />
+          <rect className="hit" x="6" y="30" width="20" height="16" onClick={() => put('horizontal', togglePin(h, 'MIN'))}><title>Left</title></rect>
+          <rect className="hit" x="50" y="30" width="20" height="16" onClick={() => put('horizontal', togglePin(h, 'MAX'))}><title>Right</title></rect>
+          <rect className="hit" x="30" y="6" width="16" height="20" onClick={() => put('vertical', togglePin(v, 'MIN'))}><title>Top</title></rect>
+          <rect className="hit" x="30" y="50" width="16" height="20" onClick={() => put('vertical', togglePin(v, 'MAX'))}><title>Bottom</title></rect>
+          <rect className="hit" x="34" y="27" width="8" height="22" onClick={() => put('horizontal', 'CENTER')}><title>Center horizontally</title></rect>
+          <rect className="hit" x="27" y="34" width="22" height="8" onClick={() => put('vertical', 'CENTER')}><title>Center vertically</title></rect>
+        </svg>
+      </div>
+    </Section>
+  );
+}
+
 function TextSection({ sel, set, begin, end, store, readOnly }: SectionProps & { store: EditorStore; readOnly: boolean }) {
   useFontState(store); // re-render as fonts load
   const family = common(sel, (n) => n.fontFamily);
@@ -566,15 +636,19 @@ function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProp
             {p.type === 'IMAGE' && (
               <div className="image-row">
                 <span className="image-thumb" style={{ backgroundImage: `url(${store.assetUrl(p.asset)})` }} />
-                <Select
-                  value={p.fit ?? 'FILL'}
-                  options={[
-                    { value: 'FILL', label: 'Fill' },
-                    { value: 'FIT', label: 'Fit' },
-                    { value: 'STRETCH', label: 'Stretch' },
-                  ]}
-                  onChange={(v) => update(paints.map((q, j) => (j === i ? { ...p, fit: v } : q)))}
-                />
+                {p.slice ? (
+                  <span className="image-mode" title="9-slice ignores the fit mode">9-slice</span>
+                ) : (
+                  <Select
+                    value={p.fit ?? 'FILL'}
+                    options={[
+                      { value: 'FILL', label: 'Fill' },
+                      { value: 'FIT', label: 'Fit' },
+                      { value: 'STRETCH', label: 'Stretch' },
+                    ]}
+                    onChange={(v) => update(paints.map((q, j) => (j === i ? { ...p, fit: v } : q)))}
+                  />
+                )}
                 <button
                   type="button"
                   className="btn btn-xs"
@@ -625,6 +699,9 @@ function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProp
                 <Minus size={13} />
               </IconButton>
             </div>
+            {p.type === 'IMAGE' && !stroke && (
+              <ImageOptions paint={p} onChange={(next) => update(paints.map((q, j) => (j === i ? next : q)))} store={store} begin={begin} end={end} />
+            )}
           </div>
         ))
       )}
@@ -662,6 +739,67 @@ function PaintsSection({ title, kind, sel, set, begin, end, store }: SectionProp
         </button>
       )}
     </Section>
+  );
+}
+
+type ImagePaint = Extract<Paint, { type: 'IMAGE' }>;
+
+/** Tint (multiply color) and 9-slice settings of an image fill, like Unity's Image component. */
+function ImageOptions({ paint, onChange, store, begin, end }: { paint: ImagePaint; onChange: (p: ImagePaint) => void; store: EditorStore; begin: () => void; end: () => void }) {
+  const s = paint.slice ?? null;
+  const setSlice = (next: Partial<NineSlice>) => s && onChange({ ...paint, slice: { ...s, ...next } });
+  const toggleSlice = (on: boolean) => {
+    if (!on) return onChange({ ...paint, slice: null });
+    // Start with a quarter of the image's short side on every edge.
+    const size = store.engine.image_size(paint.asset);
+    const v = size ? Math.max(1, Math.round(Math.min(size[0], size[1]) / 4)) : 8;
+    onChange({ ...paint, slice: { top: v, right: v, bottom: v, left: v } });
+  };
+  const inset = (key: 'top' | 'right' | 'bottom' | 'left', label: string, title: string) =>
+    s && <NumberInput label={label} title={`${title} inset (image px)`} value={s[key]} min={0} precision={0} onChange={(v) => setSlice({ [key]: v })} onScrubStart={begin} onScrubEnd={end} />;
+  return (
+    <div className="image-options">
+      <div className="image-tint">
+        <span>Tint</span>
+        <ColorInput
+          value={paint.tint ?? '#ffffff'}
+          onChange={(hex) => onChange({ ...paint, tint: hex.toLowerCase() === '#ffffff' ? null : hex })}
+          onPickStart={begin}
+          onPickEnd={end}
+        />
+      </div>
+      <label className="check">
+        <input type="checkbox" checked={!!s} onChange={(e) => toggleSlice(e.target.checked)} />
+        9-slice
+      </label>
+      {s && (
+        <>
+          <div className="grid4">
+            {inset('top', 'T', 'Top')}
+            {inset('right', 'R', 'Right')}
+            {inset('bottom', 'B', 'Bottom')}
+            {inset('left', 'L', 'Left')}
+          </div>
+          <div className="grid2">
+            <NumberInput
+              label="Scale"
+              title="Layer px per image px for the border (0.5 for @2x art)"
+              value={s.scale ?? 1}
+              min={0.01}
+              step={0.05}
+              precision={2}
+              onChange={(v) => setSlice({ scale: v })}
+              onScrubStart={begin}
+              onScrubEnd={end}
+            />
+            <label className="check">
+              <input type="checkbox" checked={s.fillCenter !== false} onChange={(e) => setSlice({ fillCenter: e.target.checked })} />
+              Fill center
+            </label>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

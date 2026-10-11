@@ -73,7 +73,36 @@ export interface GradientStop {
 export type Paint =
   | { type: 'SOLID'; color: string; opacity?: number; visible?: boolean }
   | { type: 'LINEAR_GRADIENT'; stops: GradientStop[]; angle?: number; opacity?: number; visible?: boolean }
-  | { type: 'IMAGE'; asset: string; fit?: 'FILL' | 'FIT' | 'STRETCH'; opacity?: number; visible?: boolean };
+  | {
+      type: 'IMAGE';
+      asset: string;
+      fit?: 'FILL' | 'FIT' | 'STRETCH';
+      /** Multiply color (Unity's Image.color). */
+      tint?: string | null;
+      slice?: NineSlice | null;
+      opacity?: number;
+      visible?: boolean;
+    };
+
+/** 9-slice insets in image pixels; corners keep their size. */
+export interface NineSlice {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+  /** Layer px per image px for the border (default 1). */
+  scale?: number;
+  /** Draw the center patch (default true). */
+  fillCenter?: boolean;
+}
+
+/** How a layer follows when its parent frame is resized (Unity's anchors). */
+export type ConstraintType = 'MIN' | 'MAX' | 'CENTER' | 'STRETCH' | 'SCALE';
+
+export interface Constraints {
+  horizontal: ConstraintType;
+  vertical: ConstraintType;
+}
 
 export type EffectValue =
   | { type: 'DROP_SHADOW'; color: string; x: number; y: number; blur: number; spread: number; visible?: boolean }
@@ -132,6 +161,7 @@ export interface NodeData {
   layoutSizingHorizontal: 'FIXED' | 'HUG' | 'FILL';
   layoutSizingVertical: 'FIXED' | 'HUG' | 'FILL';
   layoutAbsolute: boolean;
+  constraints: Constraints;
   description: string;
   componentId: string | null;
   fillStyleId: string | null;

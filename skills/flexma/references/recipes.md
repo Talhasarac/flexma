@@ -133,3 +133,28 @@ Recreate components top-down:
 3. Add the leaves: text, rectangles, vectors.
 
 Name layers after the components (for example `Button / Primary`). Then compare against the original with `get_screenshot`.
+
+## Unity UI to design
+
+To bring a Unity uGUI canvas into Flexma, read the hierarchy and components in Unity (for example through a Unity MCP server), upload the sprites, then rebuild each screen with one `create_nodes` call.
+
+| Unity | Flexma |
+|---|---|
+| Canvas | A top-level `FRAME` at the Canvas Scaler's reference resolution. |
+| RectTransform | `x`, `y`, `width`, `height` from the rect's corners in canvas units, relative to the parent's top-left corner. Unity's y grows upward, so `y = parentTop − childTop`. Copy the anchors as `constraints: { anchorMin, anchorMax }`. |
+| Image, Simple | `{ "type": "image", "asset", "fit": "STRETCH" }`. Use `FIT` when Preserve Aspect is on. |
+| Image, Sliced | Add `slice: { left, bottom, right, top }` from `sprite.border`, `scale: referencePixelsPerUnit ÷ (sprite.pixelsPerUnit × pixelsPerUnitMultiplier)` and `fillCenter`. |
+| Image.color, RawImage.color | `tint` (its alpha fades the image). |
+| Text, TextMeshProUGUI | `TEXT` with `text`, `size`, `color` and `align`. Upload the font asset's source .ttf/.otf with `upload_font`. |
+| Horizontal or Vertical Layout Group | `layout`, `gap` (spacing), `padding`, and `justify` / `alignItems` from Child Alignment. |
+| Content Size Fitter (Preferred Size) | `"hug"` on that axis. |
+| Layout Element with flexible size | `"fill"` on that axis. |
+| Grid Layout Group | A vertical frame of horizontal rows with fixed-size cells. |
+| Mask, RectMask2D | `clip: true` on the frame. |
+| CanvasGroup alpha | `opacity`. |
+| Shadow, Outline | `shadow`, `stroke`. |
+| Prefab, nested prefab | One `COMPONENT`, then instances. Per-instance changes go in `overrides`. |
+| Inactive GameObject | `hidden: true`. |
+
+- **Sprites:** export each sprite as a PNG, cropping atlas sprites to `sprite.textureRect`, and upload them with `upload_image` before building.
+- **Check:** compare `get_screenshot` with a Game view capture at the same resolution, then resize the top frame to make sure the anchors behave.

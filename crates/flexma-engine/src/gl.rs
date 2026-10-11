@@ -182,6 +182,13 @@ vec4 gradient(vec2 uv) {
   if (t <= v_stops.w) return mix(v_c2, v_c3, (t - v_stops.z) / max(v_stops.w - v_stops.z, 1e-5));
   return v_c3;
 }
+// One axis of a 9-slice: layer position x in [0, size] to a texture coordinate.
+// a, b = source insets (image px) at the start/end; da, db = the same in layer px.
+float slice1(float x, float size, float img, float a, float b, float da, float db) {
+  if (x <= da) return (da > 0.0 ? x / da : 0.0) * a / img;
+  if (x >= size - db) return 1.0 - (db > 0.0 ? (size - x) / db : 0.0) * b / img;
+  return (a + (x - da) / max(size - da - db, 1e-4) * (img - a - b)) / img;
+}
 void main() {
   vec2 hs = max(v_size.xy * 0.5, vec2(1e-4));
   vec2 p = v_local - hs;
@@ -208,17 +215,32 @@ void main() {
   if (ft == 1) fill = v_c0;
   else if (ft == 2) fill = gradient(uv);
   else if (ft == 3) {
-    // Image: v_c1 = (imgW, imgH, fit, alpha)
+    // Image: v_c0 = tint, v_c1 = (imgW, imgH, fit, alpha); 9-slice when v_c3.z is set.
     vec2 img = max(v_c1.xy, vec2(1.0));
     vec2 sz = max(v_size.xy, vec2(1e-4));
-    float fit = v_c1.z;
-    vec2 scale;
-    if (fit < 0.5) { float s = max(sz.x / img.x, sz.y / img.y); scale = img * s; }
-    else if (fit < 1.5) { float s = min(sz.x / img.x, sz.y / img.y); scale = img * s; }
-    else { scale = sz; }
-    vec2 off = (sz - scale) * 0.5;
-    vec2 tuv = (v_local - off) / scale;
-    if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = texture(u_tex, tuv) * v_c1.w;
+    if (v_c3.z > 0.5) {
+      // v_c2 = source insets (top, right, bottom, left) in image px, v_c3.x = layer px per image px.
+      vec2 a = v_c2.wx;
+      vec2 b = v_c2.yz;
+      vec2 da = a * v_c3.x;
+      vec2 db = b * v_c3.x;
+      vec2 k = min(vec2(1.0), sz / max(da + db, vec2(1e-4)));
+      da *= k;
+      db *= k;
+      vec2 p = clamp(v_local, vec2(0.0), sz);
+      vec2 tuv = vec2(slice1(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
+      bool center = all(greaterThan(p, da)) && all(lessThan(p, sz - db));
+      if (v_c3.y > 0.5 || !center) fill = texture(u_tex, tuv) * v_c0 * v_c1.w;
+    } else {
+      float fit = v_c1.z;
+      vec2 scale;
+      if (fit < 0.5) { float s = max(sz.x / img.x, sz.y / img.y); scale = img * s; }
+      else if (fit < 1.5) { float s = min(sz.x / img.x, sz.y / img.y); scale = img * s; }
+      else { scale = sz; }
+      vec2 off = (sz - scale) * 0.5;
+      vec2 tuv = (v_local - off) / scale;
+      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = texture(u_tex, tuv) * v_c0 * v_c1.w;
+    }
   }
   float cov = clamp(0.5 - d / aa, 0.0, 1.0);
   vec4 col = fill * cov;

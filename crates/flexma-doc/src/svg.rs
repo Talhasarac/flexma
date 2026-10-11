@@ -5,7 +5,7 @@ use crate::color::Color;
 use crate::doc::Document;
 use crate::geom::{fmt_num, Affine, Rect};
 use crate::node::{Node, NodeId, NodeType};
-use crate::paint::{Effect, FillRule, ImageFit, Paint, StrokeCap, StrokeJoin, TextAlign, TextAlignVertical};
+use crate::paint::{Effect, FillRule, ImageFit, NineSlice, Paint, StrokeCap, StrokeJoin, TextAlign, TextAlignVertical};
 use crate::path;
 use std::fmt::Write;
 
@@ -16,13 +16,16 @@ pub struct SvgOptions<'a> {
     pub background: Option<Color>,
     /// Resolve an image asset id to a URL or data URI.
     pub resolve_asset: &'a dyn Fn(&str) -> Option<String>,
+    /// Pixel size of an image asset, needed for 9-slice fills (which otherwise
+    /// export stretched).
+    pub image_size: &'a dyn Fn(&str) -> Option<(f64, f64)>,
     /// Text line breaking with real metrics if available.
     pub measure_text: Option<&'a dyn Fn(&Node, &str) -> f64>,
 }
 
 impl Default for SvgOptions<'_> {
     fn default() -> Self {
-        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, measure_text: None }
+        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None }
     }
 }
 
@@ -229,26 +232,86 @@ impl Writer<'_> {
                 self.defs.push_str("</linearGradient>");
                 Some(format!(r#" {attr}="url(#{id})""#))
             }
-            Paint::Image { asset, fit, opacity, .. } if attr == "fill" => {
-                let href = (self.opts.resolve_asset)(asset)?;
-                let id = self.id("p");
-                let par = match fit {
-                    ImageFit::Fill => "xMidYMid slice",
-                    ImageFit::Fit => "xMidYMid meet",
-                    ImageFit::Stretch => "none",
+            Paint::Image { asset, fit, opacity, tint, slice, .. } if attr == "fill" => {
+                let href = escape(&(self.opts.resolve_asset)(asset)?);
+                let filter = match tint {
+                    Some(t) if *t != Color::WHITE => {
+                        // Multiply each channel, like a GPU tint.
+                        let fid = self.id("t");
+                        let _ = write!(
+                            self.defs,
+                            r#"<filter id="{fid}" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="{} 0 0 0 0 0 {} 0 0 0 0 0 {} 0 0 0 0 0 {} 0"/></filter>"#,
+                            fmt_num(t.r as f64),
+                            fmt_num(t.g as f64),
+                            fmt_num(t.b as f64),
+                            fmt_num(t.a as f64)
+                        );
+                        format!(r#" filter="url(#{fid})""#)
+                    }
+                    _ => String::new(),
                 };
+                let sliced = slice.and_then(|s| (self.opts.image_size)(asset).map(|size| (s, size)));
+                let content = match sliced {
+                    Some((s, (iw, ih))) => self.nine_slice(&href, &s, iw, ih, w, h),
+                    None => {
+                        let par = match (fit, slice) {
+                            (_, Some(_)) | (ImageFit::Stretch, _) => "none",
+                            (ImageFit::Fill, _) => "xMidYMid slice",
+                            (ImageFit::Fit, _) => "xMidYMid meet",
+                        };
+                        format!(r#"<image href="{href}" width="{}" height="{}" preserveAspectRatio="{par}"/>"#, fmt_num(w), fmt_num(h))
+                    }
+                };
+                let id = self.id("p");
                 let _ = write!(
                     self.defs,
-                    r#"<pattern id="{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}"><image href="{href}" width="{w}" height="{h}" preserveAspectRatio="{par}" opacity="{op}"/></pattern>"#,
+                    r#"<pattern id="{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}"><g opacity="{op}"{filter}>{content}</g></pattern>"#,
                     w = fmt_num(w),
                     h = fmt_num(h),
-                    href = escape(&href),
                     op = fmt_num(*opacity as f64),
                 );
                 Some(format!(r#" {attr}="url(#{id})""#))
             }
             _ => None,
         }
+    }
+
+    /// A 9-slice image as nine cells, each a viewport onto one part of the image.
+    fn nine_slice(&mut self, href: &str, s: &NineSlice, iw: f64, ih: f64, w: f64, h: f64) -> String {
+        let src = s.source_insets(iw, ih);
+        let dst = s.dest_insets(src, w, h);
+        let img = self.id("i");
+        let _ = write!(self.defs, r#"<image id="{img}" href="{href}" width="{}" height="{}"/>"#, fmt_num(iw), fmt_num(ih));
+        let sx = [0.0, src[3], iw - src[1], iw];
+        let sy = [0.0, src[0], ih - src[2], ih];
+        let dx = [0.0, dst[3], w - dst[1], w];
+        let dy = [0.0, dst[0], h - dst[2], h];
+        let mut out = String::new();
+        for row in 0..3 {
+            for col in 0..3 {
+                if row == 1 && col == 1 && !s.fill_center {
+                    continue;
+                }
+                let (sw, sh) = (sx[col + 1] - sx[col], sy[row + 1] - sy[row]);
+                let (dw, dh) = (dx[col + 1] - dx[col], dy[row + 1] - dy[row]);
+                if sw <= 0.0 || sh <= 0.0 || dw <= 0.0 || dh <= 0.0 {
+                    continue;
+                }
+                let _ = write!(
+                    out,
+                    r##"<svg x="{}" y="{}" width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none"><use href="#{img}"/></svg>"##,
+                    fmt_num(dx[col]),
+                    fmt_num(dy[row]),
+                    fmt_num(dw),
+                    fmt_num(dh),
+                    fmt_num(sx[col]),
+                    fmt_num(sy[row]),
+                    fmt_num(sw),
+                    fmt_num(sh)
+                );
+            }
+        }
+        out
     }
 
     fn effects_filter(&mut self, n: &Node) -> Option<String> {
@@ -460,5 +523,31 @@ mod tests {
         assert!(svg.contains("Hello &lt;world&gt;"));
         assert!(svg.contains("clipPath"));
         assert_eq!(b.width, 100.0);
+    }
+
+    #[test]
+    fn exports_nine_slice_and_tint() {
+        let mut doc = Document::new_empty();
+        let mut r = Node::new("r:1", NodeType::Rectangle);
+        r.parent = Some("0:1".into());
+        r.width = 200.0;
+        r.height = 60.0;
+        r.set_prop(
+            "fills",
+            &serde_json::json!([{ "type": "IMAGE", "asset": "a1", "tint": "#ff000080", "slice": { "top": 8, "right": 12, "bottom": 8, "left": 12, "fillCenter": false } }]),
+        )
+        .unwrap();
+        doc.apply(&Op::Create { node: r }).unwrap();
+        let resolve = |id: &str| Some(format!("/api/assets/{id}"));
+        let size = |_: &str| Some((48.0, 32.0));
+        let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+        let (svg, _) = export(&doc, &["0:1".into()], &opts).unwrap();
+        // Eight cells (no center): corners keep their size, the right column starts at 200 - 12.
+        assert_eq!(svg.matches("<use href=").count(), 8);
+        assert!(svg.contains(r#"<svg x="188" y="0" width="12" height="8" viewBox="36 0 12 8""#), "{svg}");
+        assert!(svg.contains(r#"values="1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.502 0""#), "{svg}");
+        // Without the image size the image is stretched instead.
+        let (plain, _) = export(&doc, &["0:1".into()], &SvgOptions { resolve_asset: &resolve, ..SvgOptions::default() }).unwrap();
+        assert!(plain.contains(r#"preserveAspectRatio="none""#) && !plain.contains("<use"));
     }
 }

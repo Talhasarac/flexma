@@ -849,6 +849,61 @@
   height: 6px;
   background: var(--accent);
 }
+.constraint-box {
+  width: 76px;
+  height: 76px;
+  background: var(--bg-muted);
+  border-radius: var(--radius-sm);
+}
+.constraint-box .frame {
+  fill: none;
+  stroke: var(--border-strong);
+}
+.constraint-box .layer {
+  fill: var(--bg-elevated);
+  stroke: var(--text-subtle);
+}
+.constraint-box line {
+  stroke: var(--text-subtle);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.constraint-box line.on {
+  stroke: var(--accent);
+}
+.constraint-box .hit {
+  fill: var(--accent);
+  fill-opacity: 0;
+  cursor: pointer;
+}
+.constraint-box .hit:hover {
+  fill-opacity: 0.12;
+}
+.constraint-box.readonly .hit {
+  pointer-events: none;
+}
+.image-mode {
+  flex: 1;
+  color: var(--text-muted);
+}
+.paint-row > .image-options {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.image-tint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.image-tint > span {
+  color: var(--text-muted);
+}
+.image-tint > .color-input {
+  flex: 1;
+  min-width: 0;
+}
 .tips {
   list-style: none;
   margin: 0;

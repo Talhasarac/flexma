@@ -41,7 +41,7 @@ fn tools() -> Value {
     let file_id = json!({ "type": "string", "description": "File id" });
     let node_spec = json!({
         "type": "object",
-        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|NONE), gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip, children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing. LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT'}.",
+        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|NONE), gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip, children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing. LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT', tint?:'#hex' (multiply), slice?: 9-slice insets in image px}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors).",
         "properties": { "type": { "type": "string" }, "children": { "type": "array", "items": { "type": "object" } } },
         "required": ["type"],
         "additionalProperties": true
@@ -1078,6 +1078,8 @@ impl Ctx {
         let note = self.font_note(&fid, args).await;
         room.mutate(self.agent(), move |tx| {
             let mut ops = Vec::new();
+            // Children that follow a resized frame by their constraints.
+            let mut follow = Vec::new();
             for (i, u) in updates.iter().enumerate() {
                 let obj = u.as_object().ok_or(format!("updates[{i}] must be an object"))?;
                 let id = obj.get("id").and_then(Value::as_str).ok_or(format!("updates[{i}] needs an 'id'"))?;
@@ -1101,9 +1103,12 @@ impl Ctx {
                         props.insert("layoutSizingVertical".into(), json!("FIXED"));
                     }
                 }
+                follow.extend(flexma_doc::constraints::follow_resize(tx.doc, id, &props));
                 ops.push(Op::Update { id: id.to_string(), props });
             }
             let n = ops.len();
+            // Explicit updates go last so they win over constraint results.
+            tx.apply_all(follow);
             let errs = tx.apply_all(ops);
             tx.relayout();
             if errs.is_empty() {

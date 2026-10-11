@@ -89,6 +89,7 @@ async fn main() {
         }
     }
     std::fs::create_dir_all(cfg.data_dir.join("assets")).expect("cannot create data directory");
+    render::set_data_dir(&cfg.data_dir);
     let db = db::Db::open(&cfg.data_dir.join("flexma.db")).expect("cannot open database");
 
     match args.first().map(String::as_str) {

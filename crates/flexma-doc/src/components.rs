@@ -217,11 +217,37 @@ fn expand_instance(doc: &mut Document, iid: &str, out: &mut Vec<NodeId>) {
             let _ = next.set_prop(k, &v);
         }
     }
+    let fit = Fit::new(&comp, &next);
     if next != inst {
         doc.replace_unchecked(next);
     }
     let mut stack = vec![cid.clone()];
-    expand_children(doc, iid, &cid, &inst.overrides, &mut stack, out);
+    expand_children(doc, iid, &cid, &inst.overrides, fit, &mut stack, out);
+}
+
+/// How a derived container differs in size from its source, so its children
+/// follow their constraints (see `constraints`).
+#[derive(Clone, Copy)]
+struct Fit {
+    from: (f64, f64),
+    to: (f64, f64),
+    group: bool,
+    auto: bool,
+}
+
+impl Fit {
+    fn new(src: &Node, derived: &Node) -> Fit {
+        Fit {
+            from: (src.width, src.height),
+            to: (derived.width, derived.height),
+            group: derived.kind == NodeType::Group,
+            auto: derived.kind.is_frame_like() && derived.layout_mode != crate::paint::LayoutMode::None,
+        }
+    }
+
+    fn resized(&self) -> bool {
+        (self.from.0 - self.to.0).abs() > 1e-9 || (self.from.1 - self.to.1).abs() > 1e-9
+    }
 }
 
 fn expand_children(
@@ -229,21 +255,65 @@ fn expand_children(
     base: &str,
     comp_id: &str,
     ov: &Map<String, Value>,
+    fit: Fit,
     stack: &mut Vec<NodeId>,
     out: &mut Vec<NodeId>,
 ) {
     let kids: Vec<NodeId> = doc.children(comp_id).iter().filter(|c| !is_derived_id(c)).cloned().collect();
     for k in kids {
-        clone_into(doc, &k, base, base, ov, stack, out);
+        clone_into(doc, &k, base, base, ov, fit, stack, out);
     }
 }
 
+/// Move and resize a derived node by its constraints when its parent is a
+/// different size than in the component. Geometry overrides win.
+fn follow_parent(n: &mut Node, src: &Node, o: Option<&Map<String, Value>>, fit: Fit) {
+    if !fit.resized() || (fit.auto && !n.layout_absolute) {
+        return;
+    }
+    let [x, y, w, h] = crate::constraints::constrain_rect([src.x, src.y, src.width, src.height], n.constraints, fit.from, fit.to, fit.group);
+    let set = |k: &str| !o.map(|o| o.contains_key(k)).unwrap_or(false);
+    if set("x") {
+        n.x = x;
+    }
+    if set("y") {
+        n.y = y;
+    }
+    if set("width") {
+        n.width = w;
+    }
+    if set("height") && n.kind != NodeType::Line {
+        n.height = h;
+    }
+    // Side effects only for the axes the constraints changed; overrides keep theirs.
+    let dw = set("width") && (w - src.width).abs() > 1e-9;
+    let dh = set("height") && n.kind != NodeType::Line && (h - src.height).abs() > 1e-9;
+    match n.kind {
+        // Same rules as resizing by ops, with the estimated height kept as derived state.
+        NodeType::Text if !set("textAutoResize") => {}
+        NodeType::Text if dh => n.text_auto_resize = crate::paint::TextAutoResize::None,
+        NodeType::Text if dw && n.text_auto_resize != crate::paint::TextAutoResize::None => {
+            n.text_auto_resize = crate::paint::TextAutoResize::Height;
+            if set("height") {
+                n.height = crate::text::estimate_layout(n).2;
+            }
+        }
+        NodeType::Vector if (dw || dh) && set("pathData") && src.width > 0.0 && src.height > 0.0 => {
+            let segs = crate::path::scale(&crate::path::parse(&n.path_data), n.width / src.width, n.height / src.height);
+            n.path_data = crate::path::to_svg_d(&segs);
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn clone_into(
     doc: &mut Document,
     src_id: &str,
     parent: &str,
     base: &str,
     ov: &Map<String, Value>,
+    fit: Fit,
     stack: &mut Vec<NodeId>,
     out: &mut Vec<NodeId>,
 ) {
@@ -252,13 +322,15 @@ fn clone_into(
     let mut n: Node = src.clone();
     n.id = new_id.clone();
     n.parent = Some(parent.to_string());
-    if let Some(Value::Object(o)) = ov.get(src_id) {
+    let own = ov.get(src_id).and_then(Value::as_object);
+    if let Some(o) = own {
         for (k, v) in o {
             if overridable(k) {
                 let _ = n.set_prop(k, v);
             }
         }
     }
+    follow_parent(&mut n, &src, own, fit);
     if src.kind == NodeType::Instance {
         // Nested instance: its own overrides, overlaid with the outer ones aimed inside it.
         let mut nested = src.overrides.clone();
@@ -269,22 +341,26 @@ fn clone_into(
             }
         }
         n.overrides = nested.clone();
+        let derived = n.clone();
         doc.insert_unchecked(n);
         out.push(new_id.clone());
-        if let Some(ncid) = doc.get(&new_id).and_then(|x| x.component_id.clone()) {
-            let ok = doc.get(&ncid).map(|c| c.kind == NodeType::Component).unwrap_or(false);
-            if ok && !stack.contains(&ncid) && stack.len() < MAX_NESTING {
-                stack.push(ncid.clone());
-                expand_children(doc, &new_id, &ncid, &nested, stack, out);
-                stack.pop();
+        if let Some(ncid) = derived.component_id.clone() {
+            let comp = doc.get(&ncid).filter(|c| c.kind == NodeType::Component).cloned();
+            if let Some(comp) = comp {
+                if !stack.contains(&ncid) && stack.len() < MAX_NESTING {
+                    stack.push(ncid.clone());
+                    expand_children(doc, &new_id, &ncid, &nested, Fit::new(&comp, &derived), stack, out);
+                    stack.pop();
+                }
             }
         }
     } else {
+        let fit = Fit::new(&src, &n);
         doc.insert_unchecked(n);
         out.push(new_id.clone());
         let kids: Vec<NodeId> = doc.children(src_id).iter().filter(|c| !is_derived_id(c)).cloned().collect();
         for k in kids {
-            clone_into(doc, &k, &new_id, base, ov, stack, out);
+            clone_into(doc, &k, &new_id, base, ov, fit, stack, out);
         }
     }
 }

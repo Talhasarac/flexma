@@ -432,6 +432,11 @@ impl FlexmaEditor {
         self.ed.paste_json(json)
     }
 
+    /// `[width, height]` of an image asset once it has loaded (for 9-slice insets).
+    pub fn image_size(&self, asset: &str) -> Option<Vec<f64>> {
+        self.ed.renderer.as_ref().and_then(|r| r.image_size(asset)).map(|(w, h)| vec![w, h])
+    }
+
     /// Insert an uploaded image. Pass has_pos=false to center it in view.
     pub fn insert_image(&mut self, asset: &str, w: f64, h: f64, x: f64, y: f64, has_pos: bool) -> Option<String> {
         let at = if has_pos { Some(self.ed.cam.to_world(Vec2::new(x, y))) } else { None };
@@ -625,7 +630,9 @@ impl FlexmaEditor {
         };
         let base = self.ed.renderer.as_ref().map(|r| r.asset_base.clone()).unwrap_or_default();
         let resolve = move |id: &str| Some(format!("{base}{id}"));
-        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, measure_text: Some(&measure) };
+        let renderer = self.ed.renderer.as_ref();
+        let image_size = |id: &str| renderer.and_then(|r| r.image_size(id));
+        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure) };
         let out = flexma_doc::svg::export(&self.ed.doc, &ids, &opts).map(|(s, _)| s);
         self.ed.text = text.into_inner();
         out

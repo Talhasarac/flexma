@@ -389,9 +389,9 @@ pub fn is_image_type(t: &str) -> bool {
     matches!(t.trim().to_ascii_lowercase().as_str(), "image" | "img" | "picture" | "photo")
 }
 
-/// `{type:"image", asset, fit?}` becomes a rectangle filled with the image
-/// (images are fills, like in Figma). `fit` is FILL (default, crops to cover),
-/// FIT (letterbox) or STRETCH; CSS-style `cover`/`contain` work too.
+/// `{type:"image", asset, fit?, tint?, slice?}` becomes a rectangle filled with
+/// the image (images are fills, like in Figma). `fit` is FILL (default, crops
+/// to cover), FIT (letterbox) or STRETCH; CSS-style `cover`/`contain` work too.
 pub fn expand_image(spec: &Value) -> Result<Option<Value>, String> {
     let Some(obj) = spec.as_object() else { return Ok(None) };
     if !obj.get("type").and_then(Value::as_str).map(is_image_type).unwrap_or(false) {
@@ -407,13 +407,19 @@ pub fn expand_image(spec: &Value) -> Result<Option<Value>, String> {
         "STRETCH" => "STRETCH",
         other => return Err(format!("unknown image fit '{other}' (use FILL, FIT or STRETCH)")),
     };
+    let mut paint = json!({ "type": "IMAGE", "asset": asset, "fit": fit });
+    for k in ["tint", "slice"] {
+        if let Some(v) = obj.get(k) {
+            paint[k] = v.clone();
+        }
+    }
     let mut out = obj.clone();
-    for k in ["asset", "src", "image", "fit", "fill", "fills", "background"] {
+    for k in ["asset", "src", "image", "fit", "tint", "slice", "fill", "fills", "background"] {
         out.remove(k);
     }
     out.insert("type".into(), json!("RECTANGLE"));
     out.entry("name").or_insert(json!("Image"));
-    out.insert("fills".into(), json!([{ "type": "IMAGE", "asset": asset, "fit": fit }]));
+    out.insert("fills".into(), json!([paint]));
     Ok(Some(Value::Object(out)))
 }
 
