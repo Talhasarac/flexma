@@ -313,6 +313,9 @@ pub async fn export_svg(
 pub async fn export_svg_response(st: &AppState, id: &str, q: ExportQuery, share_token: Option<String>) -> AppResult<Response> {
     let room = st.rooms.get(id).await?;
     let with_bg = q.background.unwrap_or(true);
+    let fid = id.to_string();
+    let ws = st.db.call(move |c| crate::fonts::file_workspace(c, &fid)).await?;
+    let fonts = crate::fonts::fontdb_for(st, &ws).await;
     let svg = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
@@ -320,7 +323,7 @@ pub async fn export_svg_response(st: &AppState, id: &str, q: ExportQuery, share_
                 Some(t) => render::AssetMode::Shared(t),
                 None => render::AssetMode::Url,
             };
-            render::export_svg(doc, &ids, if with_bg { bg } else { None }, mode)
+            render::export_svg(doc, &ids, if with_bg { bg } else { None }, mode, Some(&fonts))
                 .map(|(s, _)| s)
                 .ok_or_else(|| "nothing to export".to_string())
         })
@@ -353,10 +356,11 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
     let fonts = crate::fonts::fontdb_for(st, &ws).await;
     let scale = q.scale.unwrap_or(2.0);
     let with_bg = q.background.unwrap_or(true);
+    let measure_fonts = fonts.clone();
     let svg = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
-            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir))
+            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
                 .map(|(s, _)| s)
                 .ok_or_else(|| "nothing to export".to_string())
         })

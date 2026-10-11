@@ -1452,17 +1452,18 @@ impl Ctx {
         let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
         let room = self.room(&fid, Role::Viewer).await?;
         let data_dir = self.st.cfg.data_dir.clone();
+        let f2 = fid.clone();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
+        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
+        let measure_fonts = fonts.clone();
         let (svg, bounds) = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
                 let bg = bg.or(Some(flexma_doc::Color::WHITE));
-                render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir)).ok_or_else(|| "nothing to render".to_string())
+                render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts)).ok_or_else(|| "nothing to render".to_string())
             })
             .await
             .map_err(err_msg)??;
-        let f2 = fid.clone();
-        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
-        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 1600, fonts))
             .await
             .map_err(|e| e.to_string())??;
@@ -1489,12 +1490,16 @@ impl Ctx {
         let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
         let room = self.room(&fid, Role::Viewer).await?;
         let data_dir = self.st.cfg.data_dir.clone();
+        let f2 = fid.clone();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
+        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
+        let measure_fonts = fonts.clone();
         let tiles: Vec<(String, String, String)> = room
             .read(move |doc, _| {
                 let mut out = Vec::new();
                 for id in &ids {
                     let n = doc.get(id).ok_or_else(|| format!("node '{id}' not found"))?;
-                    let (svg, _) = render::export_svg(doc, std::slice::from_ref(id), Some(flexma_doc::Color::WHITE), render::AssetMode::Inline(&data_dir))
+                    let (svg, _) = render::export_svg(doc, std::slice::from_ref(id), Some(flexma_doc::Color::WHITE), render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
                         .ok_or_else(|| format!("nothing to render for '{id}'"))?;
                     out.push((id.clone(), n.name.clone(), svg));
                 }
@@ -1502,9 +1507,6 @@ impl Ctx {
             })
             .await
             .map_err(err_msg)??;
-        let f2 = fid.clone();
-        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
-        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let labelled: Vec<(String, String)> = tiles.iter().map(|(id, name, svg)| (format!("{name} [{id}]"), svg.clone())).collect();
         let (png, w, h, rects) = tokio::task::spawn_blocking(move || render::contact_sheet(&labelled, scale, 2400, fonts))
             .await
@@ -1524,10 +1526,13 @@ impl Ctx {
         let page = opt_s(args, "page_id").map(str::to_string);
         let room = self.room(&fid, Role::Viewer).await?;
         let base = self.base.clone();
+        let f2 = fid.clone();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
+        let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let svg = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
-                render::export_svg(doc, &ids, bg, render::AssetMode::Url)
+                render::export_svg(doc, &ids, bg, render::AssetMode::Url, Some(&fonts))
                     .map(|(s, _)| s.replace("href=\"/api/assets/", &format!("href=\"{base}/api/assets/")))
                     .ok_or_else(|| "nothing to export".to_string())
             })

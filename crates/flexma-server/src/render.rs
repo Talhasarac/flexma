@@ -40,7 +40,9 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>) -> Opt
     let mode = AssetMode::Inline(data_dir);
     let resolve = |id: &str| resolve_asset(&mode, id);
     let crop = |id: &str, c: &ImageCrop| crop_asset(&mode, id, c);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: None, resolve_crop: &crop };
+    let measurer = TextMeasurer::new(fonts.clone());
+    let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_crop: &crop };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts).ok().map(|(png, _, _)| png)
 }
@@ -54,12 +56,94 @@ pub enum AssetMode<'a> {
     Inline(&'a Path),
 }
 
-/// Export nodes (or a whole page) to SVG.
-pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode) -> Option<(String, Rect)> {
+/// Export nodes (or a whole page) to SVG. With `fonts`, text breaks into
+/// lines by the real font metrics instead of estimates.
+pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>) -> Option<(String, Rect)> {
     let resolve = |id: &str| resolve_asset(&assets, id);
     let crop = |id: &str, c: &ImageCrop| crop_asset(&assets, id, c);
-    let opts = SvgOptions { padding: 0.0, background, resolve_asset: &resolve, image_size: &image_size, measure_text: None, resolve_crop: &crop };
+    let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
+    let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
+    let opts = SvgOptions {
+        padding: 0.0,
+        background,
+        resolve_asset: &resolve,
+        image_size: &image_size,
+        measure_text: if measurer.is_some() { Some(&measure) } else { None },
+        resolve_crop: &crop,
+    };
     export(doc, ids, &opts)
+}
+
+/// Text widths from the fonts the renderer will draw with: the node's family
+/// (or the SVG's fallbacks: Inter, Helvetica, Arial, sans-serif) at its
+/// weight and style, by glyph advances.
+pub struct TextMeasurer {
+    db: Arc<FontDb>,
+    faces: std::cell::RefCell<HashMap<(String, u16, bool), Option<resvg::usvg::fontdb::ID>>>,
+    /// Advance per character in em.
+    advances: std::cell::RefCell<HashMap<(resvg::usvg::fontdb::ID, char), f32>>,
+}
+
+impl TextMeasurer {
+    pub fn new(db: Arc<FontDb>) -> TextMeasurer {
+        TextMeasurer { db, faces: Default::default(), advances: Default::default() }
+    }
+
+    fn face(&self, n: &flexma_doc::Node) -> Option<resvg::usvg::fontdb::ID> {
+        use resvg::usvg::fontdb::{Family, Query, Stretch, Style, Weight};
+        let key = (n.font_family.clone(), n.font_weight, n.italic);
+        if let Some(id) = self.faces.borrow().get(&key) {
+            return *id;
+        }
+        let families = [Family::Name(&n.font_family), Family::Name("Inter"), Family::Name("Helvetica"), Family::Name("Arial"), Family::SansSerif];
+        let id = self.db.query(&Query {
+            families: &families,
+            weight: Weight(n.font_weight),
+            stretch: Stretch::Normal,
+            style: if n.italic { Style::Italic } else { Style::Normal },
+        });
+        self.faces.borrow_mut().insert(key, id);
+        id
+    }
+
+    pub fn measure(&self, n: &flexma_doc::Node, s: &str) -> f64 {
+        let Some(id) = self.face(n) else {
+            return flexma_doc::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);
+        };
+        let missing: Vec<char> = {
+            let adv = self.advances.borrow();
+            let mut m: Vec<char> = s.chars().filter(|c| !adv.contains_key(&(id, *c))).collect();
+            m.sort_unstable();
+            m.dedup();
+            m
+        };
+        if !missing.is_empty() {
+            let found: Vec<(char, f32)> = self
+                .db
+                .with_face_data(id, |data, index| {
+                    let face = ttf_parser::Face::parse(data, index).ok()?;
+                    let upem = face.units_per_em().max(1) as f32;
+                    Some(
+                        missing
+                            .iter()
+                            .map(|&c| {
+                                let a = face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).map(|a| a as f32 / upem);
+                                // Missing glyphs fall back to another font; guess like the estimate.
+                                (c, a.unwrap_or_else(|| (flexma_doc::text::estimate_width(&c.to_string(), 1.0, 0.0, 400)) as f32))
+                            })
+                            .collect(),
+                    )
+                })
+                .flatten()
+                .unwrap_or_default();
+            let mut adv = self.advances.borrow_mut();
+            for (c, a) in found {
+                adv.insert((id, c), a);
+            }
+        }
+        let adv = self.advances.borrow();
+        s.chars().map(|c| adv.get(&(id, c)).copied().unwrap_or(0.5) as f64 * n.font_size + n.letter_spacing).sum()
+    }
 }
 
 /// A sprite cut out of an inlined image as a PNG data URI (whole pixels,
@@ -680,5 +764,34 @@ mod nested_export_tests {
         let mut pm = resvg::tiny_skia::Pixmap::new(40, 30).unwrap();
         resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
         assert_eq!(pm.pixel(20, 15).unwrap().red(), 255, "the layer fills its own export");
+    }
+}
+
+#[cfg(test)]
+mod measure_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType};
+
+    /// Server renders break lines by real font metrics: "front std rear drag"
+    /// in Arial / Liberation Sans 24px is ~190px, which the Inter-like
+    /// estimate put just over a 200px box.
+    #[test]
+    fn real_metrics_keep_fitting_text_on_one_line() {
+        let db = base_fontdb();
+        let mut n = Node::new("t", NodeType::Text);
+        (n.font_family, n.font_size, n.width, n.height) = ("Arial".into(), 24.0, 200.0, 30.0);
+        n.text_auto_resize = flexma_doc::TextAutoResize::None;
+        n.characters = "front std rear drag".into();
+        let m = TextMeasurer::new(db.clone());
+        let Some(id) = m.face(&n) else { return };
+        let is_arial = db.face(id).is_some_and(|f| f.families.iter().any(|(name, _)| name.contains("Arial") || name.contains("Liberation Sans")));
+        if !is_arial {
+            return; // No Arial-metric font on this machine.
+        }
+        let w = m.measure(&n, &n.characters);
+        assert!((185.0..196.0).contains(&w), "{w}");
+        let lines = flexma_doc::text::layout_lines(&n, &mut |s| m.measure(&n, s));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(flexma_doc::text::estimate_width(&n.characters, 24.0, 0.0, 400) > 200.0, "the estimate alone would wrap");
     }
 }
