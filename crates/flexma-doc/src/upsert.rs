@@ -390,6 +390,39 @@ mod tests {
     }
 
     #[test]
+    fn keyed_components_and_instances_upsert_with_overrides_by_layer_key() {
+        let spec = |plate: &str| {
+            json!([
+                { "type": "component", "key": "unity:component/Contract", "name": "Contract", "width": 200, "height": 40, "children": [
+                    { "type": "text", "key": "k-name", "name": "Text (TMP)", "text": "Car", "x": 0, "y": 0 },
+                    { "type": "text", "key": "k-plate", "name": "Text (TMP)", "text": "PLATE", "x": 100, "y": 0 } ] },
+                { "type": "frame", "key": "screen/list", "name": "List", "x": 0, "y": 100, "width": 300, "height": 200, "children": [
+                    { "type": "instance", "key": "row/1", "component": "unity:component/Contract", "x": 0, "y": 0,
+                      "overrides": { "k-plate": { "text": plate } } } ] }
+            ])
+        };
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let first = run(&mut doc, spec("E30"), &mut n);
+        crate::components::sync_all(&mut doc);
+        let row = doc.children(&first.top[1])[0].clone();
+        let texts = |doc: &Document| -> Vec<String> {
+            doc.children(&row).iter().filter_map(|c| doc.get(c)).map(|c| c.characters.clone()).collect()
+        };
+        // The second "Text (TMP)" got the override, not the first one by name.
+        assert_eq!(texts(&doc), vec!["Car", "E30"]);
+        // Same push: no changes.
+        let again = run(&mut doc, spec("E30"), &mut n);
+        assert_eq!((again.created, again.updated, again.deleted), (0, 0, 0), "{:?}", again.ops);
+        // A changed override updates just the instance, keeping its id.
+        let changed = run(&mut doc, spec("M3"), &mut n);
+        crate::components::sync_all(&mut doc);
+        assert_eq!((changed.created, changed.updated, changed.deleted), (0, 1, 0), "{:?}", changed.ops);
+        assert_eq!(doc.children(&first.top[1])[0], row);
+        assert_eq!(texts(&doc), vec!["Car", "M3"]);
+    }
+
+    #[test]
     fn kind_changes_replace_and_unkeyed_specs_create() {
         let mut doc = Document::new_empty();
         let mut n = 0;

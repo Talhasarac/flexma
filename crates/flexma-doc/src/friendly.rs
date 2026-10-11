@@ -432,18 +432,23 @@ impl BuildCtx<'_> {
     }
 }
 
-/// Find a main component by id or name.
+/// Find a main component by id, `key` or name.
 pub fn find_component(doc: &Document, key: &str) -> Option<NodeId> {
     if doc.get(key).map(|n| n.kind == NodeType::Component).unwrap_or(false) {
         return Some(key.to_string());
     }
-    let mut found = None;
+    let (mut by_key, mut by_name) = (None, None);
     doc.walk(crate::node::ROOT_ID, &mut |n| {
-        if found.is_none() && n.kind == NodeType::Component && n.name == key {
-            found = Some(n.id.clone());
+        if n.kind == NodeType::Component {
+            if by_key.is_none() && n.key.as_deref() == Some(key) {
+                by_key = Some(n.id.clone());
+            }
+            if by_name.is_none() && n.name == key {
+                by_name = Some(n.id.clone());
+            }
         }
     });
-    found
+    by_key.or(by_name)
 }
 
 /// Build an INSTANCE node from a friendly spec: `{type:"instance", component:"Button",

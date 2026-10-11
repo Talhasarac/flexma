@@ -163,9 +163,10 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
 - **`INSTANCE`** fields:
   - `component` (alias `componentId`, `of`): the main component's id or name. Required when creating.
   - `text`: shorthand that overrides the component's first text layer.
-  - `overrides`: `{ "<layer name or id>": { …props } }`. The key `""` targets the instance itself, though setting props directly on the instance does the same.
+  - `overrides`: `{ "<layer id, key or name>": { …props } }`. A layer's `key` is unambiguous where names repeat (e.g. several "Text (TMP)" layers), and it reaches layers inside nested instances too. The key `""` targets the instance itself, though setting props directly on the instance does the same.
+  - Geometry overrides (`x`, `y`, `width`, `height`) on inner layers win over their constraints when the instance is resized.
   - Any frame prop (`fill`, `radius`, `padding`, `layout`, …) set on the instance overrides the component's value. Unset props follow the component.
-  - `component` can name a component made earlier in the same batch.
+  - `component`: the main component's id, `key` or name. It can be one made earlier in the same batch.
   - An instance can't have `children`. Its layers come from the component, and their ids look like `<instanceId>~<componentLayerId>`. Nested instances use `I~N~S`.
 - **Editing.**
   - Updating a layer inside an instance stores an override; deleting one hides it.

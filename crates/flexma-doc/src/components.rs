@@ -468,6 +468,16 @@ pub fn resolve_override_key(doc: &Document, component_id: &str, key: &str) -> Op
     if doc.get(key).is_some() && doc.is_ancestor(component_id, key) {
         return Some(key.to_string());
     }
+    // A layer's `key` (stable ids from an export) is unique where names repeat,
+    // including layers inside nested instances (their override keys are `N~S`).
+    let mut stack: Vec<NodeId> = doc.children(component_id).to_vec();
+    while let Some(id) = stack.pop() {
+        let Some(n) = doc.get(&id) else { continue };
+        if n.key.as_deref() == Some(key) {
+            return Some(id);
+        }
+        stack.extend(doc.children(&id).iter().cloned());
+    }
     let mut found = None;
     doc.walk(component_id, &mut |n| {
         if found.is_none() && n.id != component_id && n.name == key {
