@@ -178,6 +178,7 @@ async fn main() {
         .route("/share/{token}/fonts/{fid}", get(api_fonts::share_file))
         .route("/workspaces/{id}/fonts", get(api_fonts::list).post(api_fonts::upload).delete(api_fonts::delete_family))
         .route("/workspaces/{id}/fonts/google", post(api_fonts::add_google))
+        .route("/font-uploads/{token}", post(api_fonts::upload_with_link))
         .route("/fonts/{id}", get(api_fonts::file))
         .route("/google-fonts", get(api_fonts::google_catalogue))
         .route("/google-fonts/preview", get(api_fonts::google_preview))

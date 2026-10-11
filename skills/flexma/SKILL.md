@@ -83,7 +83,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
   - 24, 32, 40 or 48 for headings
   - Weights are 400 for body, 600 for labels and buttons, and 700 to 800 for headings.
   - For long text, set `width: "fill"` (or a fixed width) so it wraps.
-- **Fonts:** Inter is always available. For anything else, use a family from `list_fonts` (the workspace's fonts), or add a Google Fonts family with `add_font` *before* using it. A font that isn't in the workspace shows as Inter for most people and in exports, and the tool result warns you. One or two families per design is plenty.
+- **Fonts:** Inter is always available. For anything else, use a family from `list_fonts` (the workspace's fonts), or add a Google Fonts family with `add_font` *before* using it. For the user's own font files (a brand or game font on their computer), call `upload_font` and run the `curl` command it returns once per file. A font that isn't in the workspace shows as Inter for most people and in exports, and the tool result warns you. One or two families per design is plenty.
 - **Color:** use one accent color, neutral grays for text (`#111` for primary, `#555` to `#666` for secondary) and light surfaces (`#fff`, `#f6f6f8`). Check contrast on colored backgrounds.
 - **Names:** give layers meaningful names ("Header", "Primary button", "Plan card / Pro"). People read the layers panel, and so will the next agent.
 - **Notes:** put intent, specs or code hints in a node's `description` (Notes). They are visible to humans and agents.
@@ -106,6 +106,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `save_version` | Checkpoint the file in its version history before risky edits |
 | `list_fonts` | See the workspace's fonts (uploaded and Google Fonts) and their weights |
 | `add_font` | Add a Google Fonts family to the workspace so everyone sees it |
+| `upload_font` | Upload the user's own .ttf/.otf files: returns a 15-minute `curl` upload link |
 | `share_file` | Get a public view-only link (no account needed) to hand to someone, or turn it off |
 | `list_comments` | Read open feedback threads (who, where, which node, replies) |
 | `add_comment` | Pin a note on a node or point, or reply to a thread (`reply_to`) |

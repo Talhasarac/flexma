@@ -86,7 +86,7 @@ Sizing rules:
 | `text` / `characters` / `content` | The string. `\n` makes a hard line break. |
 | `size` / `fontSize` | px |
 | `weight` / `fontWeight` | 100–900, or `thin`, `light`, `regular`, `medium`, `semibold`, `bold`, `extrabold`, `black` |
-| `font` / `fontFamily` | Default `Inter`. Use a family from `list_fonts` (the workspace's fonts), or call `add_font` to add any Google Fonts family first. Fonts outside the workspace show as Inter for most people and in exports. |
+| `font` / `fontFamily` | Default `Inter`. Use a family from `list_fonts` (the workspace's fonts), or add one first: `add_font` for any Google Fonts family, `upload_font` for the user's own .ttf/.otf files. Fonts outside the workspace show as Inter for most people and in exports. |
 | `color` | Shorthand for a text fill. |
 | `align` / `textAlign` | `LEFT`, `CENTER`, `RIGHT` |
 | `verticalAlign` / `textAlignVertical` | `TOP`, `CENTER`, `BOTTOM` |

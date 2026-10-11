@@ -109,12 +109,18 @@ contact Google.
 | POST | `/api/workspaces/:id/fonts/google` | `{ family }` | `{ family, styles }`: every style of a Google Fonts family (editors) |
 | DELETE | `/api/workspaces/:id/fonts?family=…` | – | `{}`: removes all styles of a family (editors) |
 | GET | `/api/fonts/:fontId` | – | font file (members of its workspace) |
+| POST | `/api/font-uploads/:token` | raw `.ttf`/`.otf` bytes, no sign-in | `font` + `remainingUploads`: upload through a link from the MCP `upload_font` tool (15 minutes, a set number of files) |
 | GET | `/api/google-fonts` | – | `[{ family, category, styles, popularity }]`, most popular first, cached by the server for a week |
 | GET | `/api/google-fonts/preview?family=…` | – | a tiny font with just the family name's glyphs, for pickers |
 
 `font = { id, family, weight, weightMax, italic, source: "upload" | "google", format, size, createdBy, createdAt }`.
 `weightMax` differs from `weight` only for variable fonts. WOFF/WOFF2 and `.ttc`
 collections are rejected because the server renderer can't read them.
+
+Agents can't send font bytes through MCP, so `upload_font` returns an upload link
+instead: it's tied to the workspace and the person who authorized the agent, works
+for the number of files asked for (at most 20) within 15 minutes, and is kept in
+memory only. A file that isn't a valid font doesn't use up an upload.
 
 Open editors get `{ t: "fonts" }` over the socket when a workspace's fonts change.
 

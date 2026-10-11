@@ -172,6 +172,14 @@ fn tools() -> Value {
             },
             "required": ["file_id", "family"]
         })),
+        tool("upload_font", "Upload your own font files (.ttf or .otf, e.g. a brand or game font on the user's computer) to the file's workspace, so everyone sees them and exports use them. Returns a curl command with a short-lived upload link; run it once per font file. For Google Fonts, use add_font instead.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "files": { "type": "integer", "description": "How many font files you'll upload (one per style: Regular, Bold, Italic…). Default 1, max 20." }
+            },
+            "required": ["file_id"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -389,6 +397,7 @@ impl Ctx {
             "share_file" => self.share_file(args).await,
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
+            "upload_font" => self.upload_font(args).await,
             "create_component" => self.create_component(args).await,
             "detach_instance" => self.detach_instance(args).await,
             "add_comment" => self.add_comment(args).await,
@@ -993,7 +1002,7 @@ impl Ctx {
             return String::new();
         }
         format!(
-            "\n\nNote: {} isn't in this workspace's fonts, so most people (and exports) will see Inter instead. Add it from Google Fonts with add_font, or pick one from list_fonts.",
+            "\n\nNote: {} isn't in this workspace's fonts, so most people (and exports) will see Inter instead. Add it from Google Fonts with add_font, upload the user's font files with upload_font, or pick one from list_fonts.",
             missing.join(", ")
         )
     }
@@ -1030,7 +1039,7 @@ impl Ctx {
         out.push_str(
             "Always available: Inter (100–900, italics).\n\
              Common system fonts (Arial, Georgia, …) work on most computers but render as Inter in exports.\n\
-             To use any other Google Fonts family, call add_font first.",
+             To use any other Google Fonts family, call add_font first; for the user's own font files, use upload_font.",
         );
         Ok(text_result(&out))
     }
@@ -1053,6 +1062,30 @@ impl Ctx {
             styles.len(),
             if styles.len() == 1 { "style" } else { "styles" },
             styles.join(", ")
+        )))
+    }
+
+    async fn upload_font(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let max = crate::api_fonts::MAX_LINK_FILES;
+        let files = args.get("files").and_then(Value::as_u64).unwrap_or(1).clamp(1, max as u64) as u32;
+        let uid = self.user.id.clone();
+        let ws = self
+            .st
+            .db
+            .call(move |c| Ok(file_access(c, &uid, &fid, Role::Editor)?.0))
+            .await
+            .map_err(err_msg)?;
+        let token = crate::api_fonts::create_upload_link(&ws, &self.user.id, files);
+        let url = format!("{}/api/font-uploads/{token}", self.base);
+        Ok(text_result(format!(
+            "Upload link ready. It works for {files} font {} over the next 15 minutes. Run this once per file:\n\n\
+             curl -sS --data-binary @\"/path/to/Font-Regular.ttf\" {url}\n\n\
+             Each upload prints the family, weight and style it added (and how many uploads are left); use that family name as fontFamily. \
+             One style per file, .ttf or .otf (WOFF/WOFF2 and .ttc collections aren't accepted). \
+             A file with the same family, weight and style replaces the existing one. \
+             Only upload fonts the user is licensed to use on the web. Don't share this link.",
+            if files == 1 { "file" } else { "files" }
         )))
     }
 
