@@ -632,7 +632,7 @@ impl FlexmaEditor {
         let resolve = move |id: &str| Some(format!("{base}{id}"));
         let renderer = self.ed.renderer.as_ref();
         let image_size = |id: &str| renderer.and_then(|r| r.image_size(id));
-        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_crop: &|_, _| None };
+        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &|_, _, _| None };
         let out = flexma_doc::svg::export(&self.ed.doc, &ids, &opts).map(|(s, _)| s);
         self.ed.text = text.into_inner();
         out

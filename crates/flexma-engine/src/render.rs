@@ -790,6 +790,19 @@ impl Renderer {
     ) {
         let ellipse = n.kind == NodeType::Ellipse;
         let radii = if ellipse { [0.0; 4] } else { n.radii() };
+        // A layer filled only with images casts its shadows from the image's
+        // alpha (an icon's silhouette), like exports; others from the box.
+        let has_shadow = n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, .. }));
+        let shadow_image = if has_shadow && !n.hide_fill {
+            let vis: Vec<&Paint> = n.fills.iter().filter(|p| p.is_visible()).collect();
+            if !vis.is_empty() && vis.iter().all(|p| matches!(p, Paint::Image { .. })) {
+                Some(self.fill_params(vis.last().copied())).filter(|f| f.image.is_some())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Shadows below the shape.
         for e in &n.effects {
             if let Effect::DropShadow { color, x, y, blur, spread, visible } = e {
@@ -799,6 +812,25 @@ impl Renderer {
                 let m = Affine::translate(*x as f64, *y as f64).mul(world);
                 let idx = (inst.len() / INST_FLOATS) as u32;
                 let pad = *blur + spread.max(0.0) + 2.0;
+                if let Some(f) = &shadow_image {
+                    push_instance(
+                        inst,
+                        &m,
+                        n.width,
+                        n.height,
+                        ellipse,
+                        4.0,
+                        radii,
+                        f.colors,
+                        f.stops,
+                        [3.0, 0.0, 0.0, opacity],
+                        premul(*color, 1.0),
+                        [*blur, *spread, pad, 0.0],
+                        f.fx,
+                    );
+                    cmds.push(Cmd::Image { inst: idx, asset: f.image.clone().unwrap() });
+                    continue;
+                }
                 push_instance(
                     inst,
                     &m,

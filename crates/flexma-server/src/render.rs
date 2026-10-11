@@ -39,10 +39,10 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>) -> Opt
     let bg = page_background(doc, &page);
     let mode = AssetMode::Inline(data_dir);
     let resolve = |id: &str| resolve_asset(&mode, id);
-    let crop = |id: &str, c: &ImageCrop| crop_asset(&mode, id, c);
+    let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t);
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_crop: &crop };
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &variant };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts).ok().map(|(png, _, _)| png)
 }
@@ -60,7 +60,7 @@ pub enum AssetMode<'a> {
 /// lines by the real font metrics instead of estimates.
 pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>) -> Option<(String, Rect)> {
     let resolve = |id: &str| resolve_asset(&assets, id);
-    let crop = |id: &str, c: &ImageCrop| crop_asset(&assets, id, c);
+    let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&assets, id, c, t);
     let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
     let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
     let opts = SvgOptions {
@@ -69,7 +69,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         resolve_asset: &resolve,
         image_size: &image_size,
         measure_text: if measurer.is_some() { Some(&measure) } else { None },
-        resolve_crop: &crop,
+        resolve_variant: &variant,
     };
     export(doc, ids, &opts)
 }
@@ -146,18 +146,23 @@ impl TextMeasurer {
     }
 }
 
-/// A sprite cut out of an inlined image as a PNG data URI (whole pixels,
-/// cached), so smoothing at its edges never reaches the pixels next to it.
-fn crop_asset(assets: &AssetMode, id: &str, c: &ImageCrop) -> Option<String> {
+/// An inlined image with its crop cut out (whole pixels) and/or its tint
+/// multiplied in, as a cached PNG data URI. Server renders use these instead
+/// of viewports and filters: smoothing never reaches past a sprite, and
+/// resvg can't drop a tint on a large or sliced layer.
+fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: Option<Color>) -> Option<String> {
     let AssetMode::Inline(_) = assets else { return None };
-    let (x, y, w, h) = (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0));
-    let key = format!("{id}/{x}/{y}/{w}/{h}");
+    let (fw, fh) = image_size(id)?;
+    let (x, y, w, h) = match crop {
+        Some(c) => (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0)),
+        None => (0.0, 0.0, fw, fh),
+    };
+    let key = format!("{id}/{x}/{y}/{w}/{h}/{}", tint.map(|t| t.to_hex()).unwrap_or_default());
     static CACHE: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(hit) = cache.lock().ok()?.get(&key) {
         return Some(hit.clone());
     }
-    let (fw, fh) = image_size(id)?;
     let src = resolve_asset(assets, id)?;
     // Render the region 1:1 with nearest sampling: an exact pixel copy.
     let svg = format!(
@@ -166,6 +171,16 @@ fn crop_asset(assets: &AssetMode, id: &str, c: &ImageCrop) -> Option<String> {
     let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok()?;
     let mut pm = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
     resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+    if let Some(t) = tint {
+        // Premultiplied: color × tint color × tint alpha, alpha × tint alpha.
+        let (r, g, b, a) = (t.r * t.a, t.g * t.a, t.b * t.a, t.a);
+        for px in pm.pixels_mut() {
+            let c = |v: u8, k: f32| (v as f32 * k).round().clamp(0.0, 255.0) as u8;
+            let alpha = c(px.alpha(), a);
+            *px = resvg::tiny_skia::PremultipliedColorU8::from_rgba(c(px.red(), r).min(alpha), c(px.green(), g).min(alpha), c(px.blue(), b).min(alpha), alpha)
+                .unwrap_or(resvg::tiny_skia::PremultipliedColorU8::TRANSPARENT);
+        }
+    }
     use base64::Engine;
     let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(pm.encode_png().ok()?));
     if let Ok(mut m) = cache.lock() {
@@ -434,7 +449,15 @@ mod large_fill_tests {
         use base64::Engine;
         let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(pm.encode_png().unwrap()));
         let slice = NineSlice { top: 2.0, right: 2.0, bottom: 3.0, left: 2.0, scale: 1.0, fill_center: true };
-        for (slice, fit) in [(Some(slice), ImageFit::Stretch), (None, ImageFit::Stretch), (None, ImageFit::Fill)] {
+        let tint = Some(flexma_doc::Color::parse("#1a1a1ac7").unwrap());
+        for (slice, fit, side, tint) in [
+            (Some(slice), ImageFit::Stretch, 6000.0, None),
+            (None, ImageFit::Stretch, 6000.0, None),
+            (None, ImageFit::Fill, 6000.0, None),
+            // The pause-menu dim: 8192 px, sliced and tinted.
+            (Some(slice), ImageFit::Stretch, 8192.0, tint),
+            (None, ImageFit::Stretch, 8192.0, tint),
+        ] {
             let mut doc = Document::new_empty();
             let mut frame = Node::new("f:1", NodeType::Frame);
             frame.parent = Some("0:1".into());
@@ -445,18 +468,29 @@ mod large_fill_tests {
             doc.apply(&Op::Create { node: frame }).unwrap();
             let mut dim = Node::new("r:1", NodeType::Rectangle);
             dim.parent = Some("f:1".into());
-            dim.x = -2500.0;
-            dim.y = -2500.0;
-            dim.width = 6000.0;
-            dim.height = 6000.0;
-            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+            dim.x = (1920.0 - side) / 2.0;
+            dim.y = (1080.0 - side) / 2.0;
+            dim.width = side;
+            dim.height = side;
+            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint, slice, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: dim }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((64.0, 40.0));
-            let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+            // Like the server's image_variant: the tint multiplied into the pixels.
+            let variant = |_: &str, _: Option<&flexma_doc::ImageCrop>, t: Option<Color>| {
+                let t = t?;
+                let mut p = pm.clone();
+                for px in p.pixels_mut() {
+                    let k = |v: u8, f: f32| (v as f32 * f).round() as u8;
+                    let a = k(px.alpha(), t.a);
+                    *px = resvg::tiny_skia::PremultipliedColorU8::from_rgba(k(px.red(), t.r * t.a).min(a), k(px.green(), t.g * t.a).min(a), k(px.blue(), t.b * t.a).min(a), a).unwrap();
+                }
+                Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(p.encode_png().unwrap())))
+            };
+            let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, resolve_variant: &variant, ..SvgOptions::default() };
             let (svg, _) = export(&doc, &["f:1".to_string()], &opts).unwrap();
             let cov = image_coverage(&svg);
-            assert!(cov > 0.99, "{slice:?} {fit:?}: only {:.0}% of the frame shows the image", cov * 100.0);
+            assert!(cov > 0.99, "{side} {slice:?} {fit:?} {tint:?}: only {:.0}% of the frame shows the image", cov * 100.0);
         }
     }
 }
@@ -793,5 +827,41 @@ mod measure_tests {
         let lines = flexma_doc::text::layout_lines(&n, &mut |s| m.measure(&n, s));
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(flexma_doc::text::estimate_width(&n.characters, 24.0, 0.0, 400) > 200.0, "the estimate alone would wrap");
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+    use flexma_doc::{ImageFit, NineSlice, Node, NodeType, Op, Paint};
+
+    /// A bar sprite sliced 64 + 64 on a 128 px image has no middle: Unity
+    /// stretches the seam, so the bar stays solid instead of two end caps.
+    #[test]
+    fn zero_width_slice_centers_stretch_the_seam() {
+        let mut img = resvg::tiny_skia::Pixmap::new(8, 4).unwrap();
+        img.fill(resvg::tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+        use base64::Engine;
+        let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(img.encode_png().unwrap()));
+        let mut doc = Document::new_empty();
+        let mut bg = Node::new("f:0", NodeType::Frame);
+        bg.parent = Some("0:1".into());
+        (bg.width, bg.height) = (200.0, 20.0);
+        doc.apply(&Op::Create { node: bg }).unwrap();
+        let mut r = Node::new("r:1", NodeType::Rectangle);
+        r.parent = Some("f:0".into());
+        (r.width, r.height) = (200.0, 20.0);
+        let slice = NineSlice { top: 0.0, right: 4.0, bottom: 0.0, left: 4.0, scale: 1.0, fill_center: true };
+        r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: Some(slice), filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: r }).unwrap();
+        let resolve = |_: &str| Some(uri.clone());
+        let size = |_: &str| Some((8.0, 4.0));
+        let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+        let (svg, _) = export(&doc, &["f:0".to_string()], &opts).unwrap();
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(200, 20).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+        let p = pm.pixel(100, 10).unwrap();
+        assert_eq!((p.red(), p.green(), p.blue()), (20, 30, 40), "the middle is the stretched seam, not the white frame");
     }
 }

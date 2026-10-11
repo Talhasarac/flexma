@@ -21,15 +21,17 @@ pub struct SvgOptions<'a> {
     pub image_size: &'a dyn Fn(&str) -> Option<(f64, f64)>,
     /// Text line breaking with real metrics if available.
     pub measure_text: Option<&'a dyn Fn(&Node, &str) -> f64>,
-    /// A cropped region of an image as its own URL or data URI, if the host
-    /// can cut it out. Otherwise crops are viewports into the whole image,
-    /// where smoothing can pick up a sliver of the pixels next to the region.
-    pub resolve_crop: &'a dyn Fn(&str, &ImageCrop) -> Option<String>,
+    /// An image with its crop cut out and/or its tint multiplied in, as its
+    /// own URL or data URI, if the host can make one. Otherwise crops are
+    /// viewports into the whole image (where smoothing can pick up a sliver of
+    /// the pixels next to the region) and tints are color-matrix filters
+    /// (which resvg can drop on large or sliced layers).
+    pub resolve_variant: &'a dyn Fn(&str, Option<&ImageCrop>, Option<Color>) -> Option<String>,
 }
 
 impl Default for SvgOptions<'_> {
     fn default() -> Self {
-        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None, resolve_crop: &|_, _| None }
+        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None, resolve_variant: &|_, _, _| None }
     }
 }
 
@@ -309,12 +311,16 @@ impl Writer<'_> {
                 // `origin`), so nothing else of an atlas shows.
                 let mut full = (self.opts.image_size)(asset);
                 let mut region = full.and_then(|(fw, fh)| crop.and_then(|c| c.within(fw, fh)));
-                // Better: the region cut out as an image of its own.
-                if let Some(c) = region {
-                    if let Some(cut) = (self.opts.resolve_crop)(asset, &c) {
-                        href = escape(&cut);
-                        full = Some((c.width, c.height));
-                        region = None;
+                let mut tint = tint.filter(|t| *t != Color::WHITE);
+                // Better: the region cut out and the tint multiplied in, as an
+                // image of its own.
+                if region.is_some() || tint.is_some() {
+                    if let Some(variant) = (self.opts.resolve_variant)(asset, region.as_ref(), tint) {
+                        href = escape(&variant);
+                        if let Some(c) = region.take() {
+                            full = Some((c.width, c.height));
+                        }
+                        tint = None;
                     }
                 }
                 let (size, origin) = match region {
@@ -323,12 +329,16 @@ impl Writer<'_> {
                 };
                 let full_image = full.map(|(fw, fh)| format!(r#"<image href="{href}" width="{}" height="{}"/>"#, fmt_num(fw), fmt_num(fh)));
                 let filter = match tint {
-                    Some(t) if *t != Color::WHITE => {
+                    Some(t) => {
                         // Multiply each channel, like a GPU tint.
                         let fid = self.id("t");
                         let _ = write!(
                             self.defs,
-                            r#"<filter id="{fid}" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="{} 0 0 0 0 0 {} 0 0 0 0 0 {} 0 0 0 0 0 {} 0"/></filter>"#,
+                            // An explicit region: resvg misjudges the bounds of sliced
+                            // content (nested viewports) and would draw nothing.
+                            r#"<filter id="{fid}" filterUnits="userSpaceOnUse" x="0" y="0" width="{}" height="{}" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="{} 0 0 0 0 0 {} 0 0 0 0 0 {} 0 0 0 0 0 {} 0"/></filter>"#,
+                            fmt_num(w.max(1.0)),
+                            fmt_num(h.max(1.0)),
                             fmt_num(t.r as f64),
                             fmt_num(t.g as f64),
                             fmt_num(t.b as f64),
@@ -433,10 +443,25 @@ impl Writer<'_> {
                 if row == 1 && col == 1 && !s.fill_center {
                     continue;
                 }
-                let (sw, sh) = (sx[col + 1] - sx[col], sy[row + 1] - sy[row]);
+                let (mut x0, mut y0) = (sx[col], sy[row]);
+                let (mut sw, mut sh) = (sx[col + 1] - x0, sy[row + 1] - y0);
                 let (dw, dh) = (dx[col + 1] - dx[col], dy[row + 1] - dy[row]);
-                if sw <= 0.0 || sh <= 0.0 || dw <= 0.0 || dh <= 0.0 {
+                if dw <= 0.0 || dh <= 0.0 {
                     continue;
+                }
+                // Borders that meet leave no middle to stretch: like Unity, stretch
+                // the 1 px seam where they meet.
+                if sw <= 0.0 {
+                    if col != 1 || iw < 1.0 {
+                        continue;
+                    }
+                    (x0, sw) = ((x0 - 0.5).clamp(0.0, iw - 1.0), 1.0);
+                }
+                if sh <= 0.0 {
+                    if row != 1 || ih < 1.0 {
+                        continue;
+                    }
+                    (y0, sh) = ((y0 - 0.5).clamp(0.0, ih - 1.0), 1.0);
                 }
                 let _ = write!(
                     out,
@@ -445,8 +470,8 @@ impl Writer<'_> {
                     fmt_num(dy[row]),
                     fmt_num(dw),
                     fmt_num(dh),
-                    fmt_num(origin.0 + sx[col]),
-                    fmt_num(origin.1 + sy[row]),
+                    fmt_num(origin.0 + x0),
+                    fmt_num(origin.1 + y0),
                     fmt_num(sw),
                     fmt_num(sh)
                 );

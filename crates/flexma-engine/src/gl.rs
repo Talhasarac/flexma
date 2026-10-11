@@ -255,6 +255,47 @@ float slice1d(float x, float size, float img, float a, float b, float da, float 
   if (x >= size - db) return db > 0.0 ? b / db / img : 0.0;
   return (img - a - b) / max(size - da - db, 1e-4) / img;
 }
+// An image fill at layer position `local`: v_c0 = tint, v_c1 = (imgW, imgH,
+// fit, alpha), 9-slice when v_c3.z is set. gx, gy: layer-space screen
+// derivatives, which pick the mip level.
+vec4 imageFill(vec2 local, vec2 gx, vec2 gy, float aa) {
+  vec4 fill = vec4(0.0);
+  vec2 img = max(v_c1.xy, vec2(1.0));
+  vec2 sz = max(v_size.xy, vec2(1e-4));
+  if (v_c3.z > 0.5) {
+    // v_c2 = source insets (top, right, bottom, left) in image px, v_c3.x = layer px per image px.
+    vec2 a = v_c2.wx;
+    vec2 b = v_c2.yz;
+    vec2 da = a * v_c3.x;
+    vec2 db = b * v_c3.x;
+    vec2 k = min(vec2(1.0), sz / max(da + db, vec2(1e-4)));
+    da *= k;
+    db *= k;
+    vec2 p = clamp(local, vec2(0.0), sz);
+    vec2 tuv = vec2(slice1(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
+    vec2 f = vec2(slice1d(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1d(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
+    bool center = all(greaterThan(p, da)) && all(lessThan(p, sz - db));
+    if (v_c3.y > 0.5 || !center) fill = sampleImage(tuv, gx * f, gy * f) * v_c0 * v_c1.w;
+  } else {
+    float fit = v_c1.z;
+    if (fit > 2.5) {
+      // Tile: repeat at v_c3.w layer px per image px from the bottom-left, like Unity.
+      vec2 t = img * max(v_c3.w, 1e-4);
+      vec2 q = vec2(local.x, sz.y - local.y) / t;
+      fill = sampleImage(vec2(fract(q.x), 1.0 - fract(q.y)), gx / t, gy / t) * v_c0 * v_c1.w;
+    } else {
+      vec2 scale;
+      if (fit < 0.5) { float s = max(sz.x / img.x, sz.y / img.y); scale = img * s; }
+      else if (fit < 1.5) { float s = min(sz.x / img.x, sz.y / img.y); scale = img * s; }
+      else { scale = sz; }
+      vec2 off = (sz - scale) * 0.5;
+      vec2 tuv = (local - off) / scale;
+      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = sampleImage(tuv, gx / scale, gy / scale) * v_c0 * v_c1.w;
+    }
+  }
+  fill *= filledCoverage(local, sz, aa);
+  return fill;
+}
 void main() {
   // Screen derivatives of the layer position, taken in uniform control flow:
   // image lookups below sit in per-pixel branches, where implicit derivatives
@@ -266,6 +307,28 @@ void main() {
   float d = v_size.z > 0.5 ? sdEllipse(p, hs) : sdRoundBox(p, hs, v_radii);
   float aa = 1.0 / u_px;
   float mode = v_size.w;
+  if (mode > 3.5) {
+    // Drop shadow of an image: its alpha silhouette, grown by spread
+    // (v_strokep.y, the most of 9 taps around) and blurred (v_strokep.x, by
+    // sampling a blurrier mip), in the shadow color v_stroke.
+    float bl = max(v_strokep.x, 0.0);
+    float sp = v_strokep.y;
+    vec2 g1 = vec2(max(bl * 0.5, length(dlx)), 0.0);
+    vec2 g2 = vec2(0.0, max(bl * 0.5, length(dly)));
+    float a = sp < 0.0 ? 1.0 : 0.0;
+    for (int i = 0; i < 9; i++) {
+      float t = float(i) * 0.785398;
+      vec2 q = v_local + (i == 0 ? vec2(0.0) : abs(sp) * vec2(cos(t), sin(t)));
+      // Past the layer the silhouette fades out over the blur.
+      vec2 qc = clamp(q, vec2(0.0), v_size.xy);
+      float fade = 1.0 - smoothstep(0.0, bl + aa, length(q - qc));
+      float inside = (v_size.z > 0.5 ? sdEllipse(qc - hs, hs) : sdRoundBox(qc - hs, hs, v_radii)) <= 0.5 ? 1.0 : 0.0;
+      float ta = imageFill(qc, g1, g2, aa).a * fade * inside;
+      a = sp < 0.0 ? min(a, ta) : max(a, ta);
+    }
+    o = v_stroke * a * v_paint.w;
+    return;
+  }
   bool alphaClip = mode > 2.5;
   if (mode > 1.5 && !alphaClip) {
     // Stencil clip shape.
@@ -286,43 +349,7 @@ void main() {
   vec2 uv = v_local / max(v_size.xy, vec2(1e-4));
   if (ft == 1) fill = v_c0;
   else if (ft == 2) fill = gradient(uv);
-  else if (ft == 3) {
-    // Image: v_c0 = tint, v_c1 = (imgW, imgH, fit, alpha); 9-slice when v_c3.z is set.
-    vec2 img = max(v_c1.xy, vec2(1.0));
-    vec2 sz = max(v_size.xy, vec2(1e-4));
-    if (v_c3.z > 0.5) {
-      // v_c2 = source insets (top, right, bottom, left) in image px, v_c3.x = layer px per image px.
-      vec2 a = v_c2.wx;
-      vec2 b = v_c2.yz;
-      vec2 da = a * v_c3.x;
-      vec2 db = b * v_c3.x;
-      vec2 k = min(vec2(1.0), sz / max(da + db, vec2(1e-4)));
-      da *= k;
-      db *= k;
-      vec2 p = clamp(v_local, vec2(0.0), sz);
-      vec2 tuv = vec2(slice1(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
-      vec2 f = vec2(slice1d(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1d(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
-      bool center = all(greaterThan(p, da)) && all(lessThan(p, sz - db));
-      if (v_c3.y > 0.5 || !center) fill = sampleImage(tuv, dlx * f, dly * f) * v_c0 * v_c1.w;
-    } else {
-      float fit = v_c1.z;
-      if (fit > 2.5) {
-        // Tile: repeat at v_c3.w layer px per image px from the bottom-left, like Unity.
-        vec2 t = img * max(v_c3.w, 1e-4);
-        vec2 q = vec2(v_local.x, sz.y - v_local.y) / t;
-        fill = sampleImage(vec2(fract(q.x), 1.0 - fract(q.y)), dlx / t, dly / t) * v_c0 * v_c1.w;
-      } else {
-        vec2 scale;
-        if (fit < 0.5) { float s = max(sz.x / img.x, sz.y / img.y); scale = img * s; }
-        else if (fit < 1.5) { float s = min(sz.x / img.x, sz.y / img.y); scale = img * s; }
-        else { scale = sz; }
-        vec2 off = (sz - scale) * 0.5;
-        vec2 tuv = (v_local - off) / scale;
-        if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = sampleImage(tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
-      }
-    }
-    fill *= filledCoverage(v_local, sz, aa);
-  }
+  else if (ft == 3) fill = imageFill(v_local, dlx, dly, aa);
   if (alphaClip) {
     // Stencil alpha mask: keep the pixels where the fill isn't transparent
     // (above Unity's Mask cutoff of 0.001).
