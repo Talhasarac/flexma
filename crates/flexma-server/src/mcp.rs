@@ -226,6 +226,21 @@ fn tools() -> Value {
             },
             "required": ["query"]
         })),
+        tool("fill_with_data", "Make one copy of a component (or any layer) per data row, filling layers by name: realistic lists, tables, card grids and feeds in one call. Row values: a string or number sets that layer's text; an object sets props ({image:'<asset id>'} for a photo, {fill:'#f00'}, {visible:false}); null hides the layer; the key \"_self\" sets props on the copy itself.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "component": { "type": "string", "description": "Main component id or name to instance per row" },
+                "template_id": { "type": "string", "description": "Or: any layer to duplicate per row (used when component is absent)" },
+                "rows": { "type": "array", "items": { "type": "object" }, "description": "e.g. [{\"Name\":\"Ada\",\"Role\":\"Admin\",\"Avatar\":{\"image\":\"<asset>\"}}]" },
+                "parent_id": { "type": "string", "description": "Where the copies go (a frame, ideally with auto layout). Default: a new list frame (component) or next to the template." },
+                "columns": { "type": "integer", "description": "For a new container: lay copies out in a grid with this many columns" },
+                "direction": { "type": "string", "enum": ["vertical", "horizontal"], "description": "For a new single-row/column container. Default vertical." },
+                "gap": { "type": "number", "description": "Spacing in a new container (default 16)" },
+                "replace": { "type": "boolean", "description": "Remove parent_id's existing children first (the template is kept). Default false." }
+            },
+            "required": ["file_id", "rows"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -444,6 +459,7 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "fill_with_data" => self.fill_with_data(args).await,
             "import_svg" => self.import_svg(args).await,
             "search_icons" => self.search_icons(args).await,
             "undo_agent_changes" => self.undo_agent_changes(args).await,
@@ -690,6 +706,109 @@ impl Ctx {
             let mut out = format!("Created {count} node(s) in {parent}:\n");
             for id in &top {
                 outline(tx.doc, id, 0, 6, &mut out);
+            }
+            out.push_str(&note);
+            Ok(json!(out))
+        })
+        .await
+        .map_err(err_msg)?
+        .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
+    async fn fill_with_data(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let rows = args.get("rows").and_then(Value::as_array).cloned().ok_or("missing required array 'rows'")?;
+        if rows.is_empty() || rows.len() > 500 {
+            return Err("'rows' needs 1 to 500 rows".into());
+        }
+        let component = opt_s(args, "component").map(str::to_string);
+        let template = opt_s(args, "template_id").map(str::to_string);
+        if component.is_none() && template.is_none() {
+            return Err("give either 'component' (a main component's id or name) or 'template_id' (a layer to copy)".into());
+        }
+        let parent = opt_s(args, "parent_id").map(str::to_string);
+        let columns = args.get("columns").and_then(Value::as_u64).map(|c| c.clamp(1, 50) as usize);
+        let horizontal = opt_s(args, "direction").map(|d| d.eq_ignore_ascii_case("horizontal")).unwrap_or(false);
+        let gap = args.get("gap").and_then(Value::as_f64).unwrap_or(16.0);
+        let replace = args.get("replace").and_then(Value::as_bool).unwrap_or(false);
+        let room = self.room(&fid, Role::Editor).await?;
+        let note = self.font_note(&fid, args).await;
+        let prefix = format!("a{}", random_string(5));
+        room.mutate(self.agent(), move |tx| {
+            let mut unknown: std::collections::BTreeSet<String> = Default::default();
+            let mut n = 0u32;
+            let mut gen = || {
+                n += 1;
+                format!("{prefix}:{n}")
+            };
+            // Clear the target first if asked (never the template itself).
+            if replace {
+                let p = parent.as_deref().ok_or("'replace' needs 'parent_id'")?;
+                let keep = template.clone().unwrap_or_default();
+                let doomed: Vec<Op> = tx.doc.children(p).iter().filter(|c| **c != keep).map(|c| Op::Delete { id: c.clone() }).collect();
+                tx.apply_all(doomed);
+            }
+            let (top, where_) = if let Some(ckey) = &component {
+                let cid = flexma_doc::friendly::find_component(tx.doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file"))?;
+                let cname = tx.doc.get(&cid).map(|c| c.name.clone()).unwrap_or_default();
+                let specs: Vec<Value> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| instance_spec(tx.doc, &cid, &cname, i, row, &mut unknown))
+                    .collect();
+                match &parent {
+                    Some(p) => {
+                        let (ops, top) = build_create_ops(tx.doc, p, &specs, None, &mut gen)?;
+                        apply_or_fail(tx, ops)?;
+                        (top, p.clone())
+                    }
+                    None => {
+                        let page = tx.doc.pages().first().cloned().ok_or("file has no pages")?;
+                        let mut container = vec![data_container(&format!("{cname} list"), specs, columns, horizontal, gap)];
+                        place_on_page(tx.doc, &page, &mut container);
+                        let (ops, top) = build_create_ops(tx.doc, &page, &container, None, &mut gen)?;
+                        apply_or_fail(tx, ops)?;
+                        (top, page)
+                    }
+                }
+            } else {
+                let tid = template.clone().unwrap();
+                let tpl = tx.doc.get(&tid).ok_or_else(|| format!("template '{tid}' not found"))?.clone();
+                let target = match &parent {
+                    Some(p) => p.clone(),
+                    None => tpl.parent.clone().ok_or("the template has no parent")?,
+                };
+                let stacked = tx.doc.get(&target).map(|p| p.layout_mode == flexma_doc::LayoutMode::None).unwrap_or(true);
+                let mut top = Vec::new();
+                for (i, row) in rows.iter().enumerate() {
+                    let ops = template_copy_ops(tx.doc, &tpl, &target, row, &mut gen, &mut unknown)?;
+                    let root = match ops.first() {
+                        Some(Op::Create { node }) => node.id.clone(),
+                        _ => continue,
+                    };
+                    apply_or_fail(tx, ops)?;
+                    if stacked {
+                        // No auto layout: stack copies below the template.
+                        let dy = (tpl.height + gap) * (i + 1) as f64;
+                        let mut props = serde_json::Map::new();
+                        props.insert("x".into(), json!(tpl.x));
+                        props.insert("y".into(), json!(tpl.y + dy));
+                        apply_or_fail(tx, vec![Op::Update { id: root.clone(), props }])?;
+                    }
+                    top.push(root);
+                }
+                (top, target)
+            };
+            tx.relayout();
+            let mut out = format!("Filled {} row(s) into {where_}:\n", rows.len());
+            for id in top.iter().take(3) {
+                outline(tx.doc, id, 0, 3, &mut out);
+            }
+            if top.len() > 3 {
+                out.push_str(&format!("…and {} more\n", top.len() - 3));
+            }
+            if !unknown.is_empty() {
+                out.push_str(&format!("\nThese keys matched no layer and were ignored: {}.", unknown.into_iter().collect::<Vec<_>>().join(", ")));
             }
             out.push_str(&note);
             Ok(json!(out))
@@ -1721,4 +1840,157 @@ fn outline(doc: &Document, id: &str, level: usize, max_depth: usize, out: &mut S
     for c in kids {
         outline(doc, c, level + 1, max_depth, out);
     }
+}
+
+// ---------------------------------------------------------------------------
+// fill_with_data helpers
+// ---------------------------------------------------------------------------
+
+fn apply_or_fail(tx: &mut crate::rooms::Tx, ops: Vec<Op>) -> Result<(), String> {
+    let errs = tx.apply_all(ops);
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("some layers could not be created: {errs:?}"))
+    }
+}
+
+/// A data row value as props for one layer: text, an object of props (with
+/// `image` as a shorthand for an image fill), or null to hide it.
+fn row_props(value: &Value) -> serde_json::Map<String, Value> {
+    let mut props = serde_json::Map::new();
+    match value {
+        Value::Null => {
+            props.insert("visible".into(), json!(false));
+        }
+        Value::Object(o) => {
+            for (k, v) in o {
+                if k == "image" || k == "asset" {
+                    props.insert("fill".into(), json!({ "type": "IMAGE", "asset": v, "fit": "FILL" }));
+                } else {
+                    props.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        Value::String(t) => {
+            props.insert("text".into(), json!(t));
+        }
+        other => {
+            props.insert("text".into(), json!(other.to_string()));
+        }
+    }
+    props
+}
+
+fn instance_spec(
+    doc: &flexma_doc::Document,
+    cid: &str,
+    cname: &str,
+    i: usize,
+    row: &Value,
+    unknown: &mut std::collections::BTreeSet<String>,
+) -> Value {
+    let mut spec = serde_json::Map::new();
+    spec.insert("type".into(), json!("instance"));
+    spec.insert("component".into(), json!(cid));
+    spec.insert("name".into(), json!(format!("{cname} {}", i + 1)));
+    let mut overrides = serde_json::Map::new();
+    if let Some(o) = row.as_object() {
+        for (k, v) in o {
+            if k == "_self" {
+                if let Some(p) = v.as_object() {
+                    spec.extend(p.clone());
+                }
+                continue;
+            }
+            match flexma_doc::components::resolve_override_key(doc, cid, k) {
+                Some(key) => {
+                    let is_text = doc.get(&key).map(|n| n.kind == NodeType::Text).unwrap_or(false);
+                    let mut props = row_props(v);
+                    if !is_text && props.remove("text").is_some() {
+                        unknown.insert(format!("{k} (not a text layer)"));
+                    }
+                    if !props.is_empty() {
+                        overrides.insert(k.clone(), Value::Object(props));
+                    }
+                }
+                None => {
+                    unknown.insert(k.clone());
+                }
+            }
+        }
+    }
+    spec.insert("overrides".into(), Value::Object(overrides));
+    Value::Object(spec)
+}
+
+/// A new auto-layout frame for the copies: one row/column, or a grid built
+/// from rows of `columns` items.
+fn data_container(name: &str, items: Vec<Value>, columns: Option<usize>, horizontal: bool, gap: f64) -> Value {
+    match columns {
+        Some(cols) if cols > 1 => {
+            let rows: Vec<Value> = items
+                .chunks(cols)
+                .enumerate()
+                .map(|(i, chunk)| json!({ "type": "frame", "name": format!("Row {}", i + 1), "layout": "horizontal", "gap": gap, "fill": "none", "children": chunk }))
+                .collect();
+            json!({ "type": "frame", "name": name, "layout": "vertical", "gap": gap, "fill": "none", "children": rows })
+        }
+        _ => json!({ "type": "frame", "name": name, "layout": if horizontal { "horizontal" } else { "vertical" }, "gap": gap, "fill": "none", "children": items }),
+    }
+}
+
+/// Ops creating a copy of `tpl` (with its subtree) in `target`, with the row's
+/// values applied to layers by name.
+fn template_copy_ops(
+    doc: &flexma_doc::Document,
+    tpl: &flexma_doc::Node,
+    target: &str,
+    row: &Value,
+    gen: &mut dyn FnMut() -> String,
+    unknown: &mut std::collections::BTreeSet<String>,
+) -> Result<Vec<Op>, String> {
+    let mut nodes = Vec::new();
+    doc.walk(&tpl.id, &mut |c| nodes.push(c.clone()));
+    let mapping: std::collections::HashMap<String, String> = nodes.iter().map(|c| (c.id.clone(), gen())).collect();
+    let last = doc.children(target).last().and_then(|s| doc.get(s)).map(|s| s.index.clone());
+    let index = flexma_doc::fractional::key_between(last.as_deref(), None);
+    let values = row.as_object().cloned().unwrap_or_default();
+    let mut matched = std::collections::HashSet::new();
+    let mut ops = Vec::new();
+    for c in nodes {
+        let mut c2 = c.clone();
+        c2.id = mapping[&c.id].clone();
+        let is_root = c.id == tpl.id;
+        if is_root {
+            c2.parent = Some(target.to_string());
+            c2.index = index.clone();
+        } else if let Some(p) = &c.parent {
+            c2.parent = mapping.get(p).cloned().or(Some(p.clone()));
+        }
+        let key = if is_root { Some("_self") } else { values.keys().map(String::as_str).find(|k| *k == c.name && !matched.contains(*k)) };
+        if let Some(k) = key {
+            if let Some(v) = values.get(k) {
+                matched.insert(k.to_string());
+                let mut raw = if k == "_self" { v.as_object().cloned().unwrap_or_default() } else { row_props(v) };
+                if c2.kind != NodeType::Text && raw.remove("text").is_some() {
+                    unknown.insert(format!("{k} (not a text layer)"));
+                }
+                let props = flexma_doc::friendly::normalize_props(c2.kind, &raw).map_err(|e| format!("{k}: {e}"))?;
+                for (pk, pv) in &props {
+                    c2.set_prop(pk, pv)?;
+                }
+                if c2.kind == NodeType::Text && props.contains_key("characters") {
+                    c2.needs_measure = true;
+                }
+            }
+        }
+        ops.push(Op::Create { node: c2 });
+    }
+    for k in values.keys() {
+        if k != "_self" && !matched.contains(k.as_str()) {
+            unknown.insert(k.clone());
+        }
+    }
+    Ok(ops)
 }
