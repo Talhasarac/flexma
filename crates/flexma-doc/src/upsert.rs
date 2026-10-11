@@ -201,6 +201,11 @@ impl Work<'_> {
         if parent.is_some_and(|p| p.layout_mode != LayoutMode::None) && !e.layout_absolute && !tn.layout_absolute {
             skip.extend(["x", "y"]);
         }
+        // An instance's inherited props come from its component; the spec's
+        // own values for them are in its `overrides` (the "" entry).
+        if e.kind == NodeType::Instance {
+            skip.extend(crate::components::INHERITED.iter().copied());
+        }
         // Values a shared style supplies (applied on every replica).
         if e.fill_style_id.is_some() && e.fill_style_id == tn.fill_style_id {
             skip.insert("fills");
@@ -393,7 +398,7 @@ mod tests {
     fn keyed_components_and_instances_upsert_with_overrides_by_layer_key() {
         let spec = |plate: &str| {
             json!([
-                { "type": "component", "key": "unity:component/Contract", "name": "Contract", "width": 200, "height": 40, "children": [
+                { "type": "component", "key": "unity:component/Contract", "name": "Contract", "width": 200, "height": 40, "fill": "none", "clip": false, "children": [
                     { "type": "text", "key": "k-name", "name": "Text (TMP)", "text": "Car", "x": 0, "y": 0 },
                     { "type": "text", "key": "k-plate", "name": "Text (TMP)", "text": "PLATE", "x": 100, "y": 0 } ] },
                 { "type": "frame", "key": "screen/list", "name": "List", "x": 0, "y": 100, "width": 300, "height": 200, "children": [
@@ -411,9 +416,16 @@ mod tests {
         };
         // The second "Text (TMP)" got the override, not the first one by name.
         assert_eq!(texts(&doc), vec!["Car", "E30"]);
+        // The instance takes the component's look; nothing lands in its root overrides.
+        let inst = doc.get(&row).unwrap();
+        assert!(inst.fills.is_empty() && !inst.clips_content, "{:?}", inst.overrides);
+        assert!(!inst.overrides.contains_key(""), "{:?}", inst.overrides);
         // Same push: no changes.
         let again = run(&mut doc, spec("E30"), &mut n);
+        crate::components::sync_all(&mut doc);
         assert_eq!((again.created, again.updated, again.deleted), (0, 0, 0), "{:?}", again.ops);
+        let again2 = run(&mut doc, spec("E30"), &mut n);
+        assert_eq!((again2.created, again2.updated, again2.deleted), (0, 0, 0), "{:?}", again2.ops);
         // A changed override updates just the instance, keeping its id.
         let changed = run(&mut doc, spec("M3"), &mut n);
         crate::components::sync_all(&mut doc);

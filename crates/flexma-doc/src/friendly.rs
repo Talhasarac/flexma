@@ -463,6 +463,13 @@ fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> 
     let cid = find_component(doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file (a component made in the same batch must come before its instances)"))?;
     let comp = doc.get(&cid).unwrap();
     node.component_id = Some(cid.clone());
+    // Start from the component's look, not frame defaults (a white fill and
+    // clipping), which would read as overrides.
+    for k in crate::components::INHERITED {
+        if let Some(v) = comp.get_prop(k) {
+            let _ = node.set_prop(k, &v);
+        }
+    }
     node.width = comp.width;
     node.height = comp.height;
     node.layout_sizing_horizontal = comp.layout_sizing_horizontal;
