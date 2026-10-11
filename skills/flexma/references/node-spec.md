@@ -49,6 +49,7 @@ Type defaults:
     { "position": 0, "color": "#6d5dfc" }, { "position": 1, "color": "#e9488d" } ] }
 { "type": "IMAGE", "asset": "<asset id>", "fit": "FILL" }   // FILL | FIT | STRETCH
 { "type": "IMAGE", "asset": "<asset id>", "tint": "#ffd166", "slice": 12 }   // tinted 9-slice, see IMAGE
+{ "type": "IMAGE", "asset": "<asset id>", "filled": { "method": "RADIAL_360", "amount": 0.4, "origin": "TOP" } }   // cooldown wheel
 ```
 
 - Gradient `angle`: 0 runs left→right and 90 runs top→bottom. The canvas renders up to 4 stops.
@@ -174,7 +175,12 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
   - `scale` is layer px per image px for the border (default 1, 0.5 for @2x art).
   - `fillCenter: false` keeps only the border.
   - `fit` is ignored while an image is sliced.
-- Both also work on any `IMAGE` paint, e.g. a frame's background.
+- `filled`: show only part of the image, like Unity's Filled image type (progress bars, cooldown wheels): `{ "method": "RADIAL_360", "amount": 0.75, "origin": "TOP", "clockwise": true }`.
+  - `method`: `HORIZONTAL`, `VERTICAL`, `RADIAL_90`, `RADIAL_180` or `RADIAL_360`.
+  - `amount`: 0 to 1.
+  - `origin`: where the fill starts, by name or by Unity's `fillOrigin` number. `HORIZONTAL`: `LEFT`, `RIGHT`. `VERTICAL`: `BOTTOM`, `TOP`. `RADIAL_90` (pivot in that corner): `BOTTOM_LEFT`, `TOP_LEFT`, `TOP_RIGHT`, `BOTTOM_RIGHT`. `RADIAL_180` (pivot mid-edge): `BOTTOM`, `LEFT`, `TOP`, `RIGHT`. `RADIAL_360` (pivot in the center, sweep starts there): `BOTTOM`, `RIGHT`, `TOP`, `LEFT`. Defaults to the first.
+  - `clockwise` (default true) sets the radial sweep direction.
+- All of these also work on any `IMAGE` paint, e.g. a frame's background.
 
 ## Alpha masks
 

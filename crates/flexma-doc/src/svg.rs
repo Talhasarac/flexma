@@ -114,6 +114,33 @@ fn visual_bounds(doc: &Document, n: &Node) -> Rect {
     if grow > 0.0 { b.inflate(grow.ceil()) } else { b }
 }
 
+/// The region a filled image shows (Unity's Filled type), as path data in a
+/// `w`×`h` box. Matches the engine's `filledCoverage`.
+fn filled_path(f: &crate::paint::ImageFilled, w: f64, h: f64) -> String {
+    use crate::paint::FillMethod;
+    let a = f.amount.clamp(0.0, 1.0) as f64;
+    let o = f.origin_index();
+    let rect = |x: f64, y: f64, rw: f64, rh: f64| format!("M{} {}H{}V{}H{}Z", fmt_num(x), fmt_num(y), fmt_num(x + rw), fmt_num(y + rh), fmt_num(x));
+    let (pivot, start, span) = match f.method {
+        FillMethod::Horizontal => return if o == 0 { rect(0.0, 0.0, w * a, h) } else { rect(w * (1.0 - a), 0.0, w * a, h) },
+        FillMethod::Vertical => return if o == 0 { rect(0.0, h * (1.0 - a), w, h * a) } else { rect(0.0, 0.0, w, h * a) },
+        FillMethod::Radial90 => ([(0.0, h), (0.0, 0.0), (w, 0.0), (w, h)][o], o as f64 * 90.0, 90.0),
+        FillMethod::Radial180 => ([(w / 2.0, h), (0.0, h / 2.0), (w / 2.0, 0.0), (w, h / 2.0)][o], [270.0, 0.0, 90.0, 180.0][o], 180.0),
+        FillMethod::Radial360 => ((w / 2.0, h / 2.0), [180.0, 90.0, 0.0, 270.0][o], 360.0),
+    };
+    let (lo, hi) = if f.clockwise { (0.0, span * a) } else { (span * (1.0 - a), span) };
+    // A wedge from the pivot, far enough out to cover the box.
+    let r = 2.0 * w.hypot(h) + 1.0;
+    let steps = ((hi - lo) / 5.0).ceil().max(1.0) as usize;
+    let mut d = format!("M{} {}", fmt_num(pivot.0), fmt_num(pivot.1));
+    for i in 0..=steps {
+        let t = (start + lo + (hi - lo) * i as f64 / steps as f64).to_radians();
+        let _ = write!(d, "L{} {}", fmt_num(pivot.0 + r * t.sin()), fmt_num(pivot.1 - r * t.cos()));
+    }
+    d.push('Z');
+    d
+}
+
 struct Writer<'a> {
     doc: &'a Document,
     opts: &'a SvgOptions<'a>,
@@ -361,7 +388,22 @@ impl Writer<'_> {
         for p in fills.iter().filter(|p| p.is_visible()) {
             let rule = if n.fill_rule == FillRule::Evenodd { r#" fill-rule="evenodd""# } else { "" };
             if matches!(p, Paint::Image { .. }) {
+                let filled = match p {
+                    Paint::Image { filled: Some(f), .. } if f.amount < 1.0 => Some(*f),
+                    _ => None,
+                };
+                if filled.is_some_and(|f| f.amount <= 0.0) {
+                    continue;
+                }
                 if let Some(content) = self.image_content(p, n.width, n.height) {
+                    let content = match filled {
+                        Some(f) => {
+                            let clip = self.id("c");
+                            let _ = write!(self.defs, r#"<clipPath id="{clip}"><path d="{}"/></clipPath>"#, filled_path(&f, n.width, n.height));
+                            format!(r#"<g clip-path="url(#{clip})">{content}</g>"#)
+                        }
+                        None => content,
+                    };
                     // 9-slice, stretch and fit never leave the box, so a plain
                     // rectangle needs no clip. (resvg cuts off very large content
                     // under several nested clips, e.g. a full-screen sliced overlay

@@ -726,7 +726,7 @@ impl Renderer {
                     stops[k] = s.position;
                 }
             }
-            Some(Paint::Image { asset, fit, opacity: po, tint, slice, .. }) => {
+            Some(Paint::Image { asset, fit, opacity: po, tint, slice, filled, .. }) => {
                 ptype = 3.0;
                 let fit_v = match fit {
                     ImageFit::Fill => 0.0,
@@ -743,6 +743,10 @@ impl Renderer {
                         if let Some(s) = slice {
                             colors[2] = s.source_insets(w, h).map(|v| v as f32);
                             colors[3] = [s.scale.max(0.0), if s.fill_center { 1.0 } else { 0.0 }, 1.0, 0.0];
+                        }
+                        // stops = filled image: (method, amount, origin, clockwise).
+                        if let Some(f) = filled {
+                            stops = [f.method.code(), f.amount, f.origin_index() as f32, if f.clockwise { 1.0 } else { 0.0 }];
                         }
                         image = Some(asset.clone());
                     }

@@ -63,6 +63,10 @@ pub enum Paint {
         /// 9-slice scaling. When set, the image stretches by slices and `fit` is ignored.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slice: Option<NineSlice>,
+        /// Show only part of the image, cut along an axis or swept around a pivot
+        /// (Unity's Filled image type).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filled: Option<ImageFilled>,
         #[serde(default = "one", skip_serializing_if = "is_one")]
         opacity: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -162,6 +166,123 @@ impl<'de> Deserialize<'de> for NineSlice {
                 _ => return Err(serde::de::Error::custom("slice array must have 1, 2 or 4 numbers")),
             },
         })
+    }
+}
+
+/// Unity's Filled image: progress bars (`HORIZONTAL`, `VERTICAL`) and
+/// cooldown wheels (`RADIAL_90`, `RADIAL_180`, `RADIAL_360`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFilled {
+    pub method: FillMethod,
+    /// 0..1, the part shown.
+    pub amount: f32,
+    /// Where the fill starts: the edge (or corner) it grows from, or for
+    /// `RADIAL_360` the side its sweep starts at.
+    pub origin: FillOrigin,
+    /// Radial sweep direction.
+    pub clockwise: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum FillMethod {
+    #[serde(rename = "HORIZONTAL")]
+    Horizontal,
+    #[serde(rename = "VERTICAL")]
+    Vertical,
+    #[serde(rename = "RADIAL_90")]
+    Radial90,
+    #[serde(rename = "RADIAL_180")]
+    Radial180,
+    #[serde(rename = "RADIAL_360")]
+    Radial360,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FillOrigin {
+    Left,
+    Right,
+    Bottom,
+    Top,
+    BottomLeft,
+    TopLeft,
+    TopRight,
+    BottomRight,
+}
+
+impl FillMethod {
+    /// The origins this method takes, in Unity's `fillOrigin` order.
+    pub fn origins(self) -> &'static [FillOrigin] {
+        use FillOrigin::*;
+        match self {
+            FillMethod::Horizontal => &[Left, Right],
+            FillMethod::Vertical => &[Bottom, Top],
+            FillMethod::Radial90 => &[BottomLeft, TopLeft, TopRight, BottomRight],
+            FillMethod::Radial180 => &[Bottom, Left, Top, Right],
+            FillMethod::Radial360 => &[Bottom, Right, Top, Left],
+        }
+    }
+
+    /// Shader code: 1 horizontal, 2 vertical, 3/4/5 radial 90/180/360.
+    pub fn code(self) -> f32 {
+        match self {
+            FillMethod::Horizontal => 1.0,
+            FillMethod::Vertical => 2.0,
+            FillMethod::Radial90 => 3.0,
+            FillMethod::Radial180 => 4.0,
+            FillMethod::Radial360 => 5.0,
+        }
+    }
+}
+
+impl ImageFilled {
+    /// The origin as Unity's `fillOrigin` number for this method.
+    pub fn origin_index(&self) -> usize {
+        self.method.origins().iter().position(|o| *o == self.origin).unwrap_or(0)
+    }
+}
+
+/// Accepts `{method, amount?, origin?, clockwise?}`. Names are case-insensitive
+/// (`radial360`, `Radial_360`), and `origin` may be Unity's `fillOrigin` number.
+impl<'de> Deserialize<'de> for ImageFilled {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ImageFilled, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        struct Obj {
+            method: String,
+            #[serde(default = "one")]
+            amount: f32,
+            #[serde(default)]
+            origin: Option<serde_json::Value>,
+            #[serde(default = "yes")]
+            clockwise: bool,
+        }
+        let o = Obj::deserialize(d)?;
+        let key = |s: &str| s.to_ascii_uppercase().replace(['_', '-', ' '], "");
+        let method = match key(&o.method).as_str() {
+            "HORIZONTAL" => FillMethod::Horizontal,
+            "VERTICAL" => FillMethod::Vertical,
+            "RADIAL90" => FillMethod::Radial90,
+            "RADIAL180" => FillMethod::Radial180,
+            "RADIAL360" => FillMethod::Radial360,
+            _ => return Err(D::Error::custom("filled.method must be HORIZONTAL, VERTICAL, RADIAL_90, RADIAL_180 or RADIAL_360")),
+        };
+        let valid = method.origins();
+        let names = || valid.iter().map(|o| format!("{o:?}")).collect::<Vec<_>>().join(", ");
+        let origin = match &o.origin {
+            None | Some(serde_json::Value::Null) => valid[0],
+            Some(serde_json::Value::Number(n)) => *n
+                .as_u64()
+                .and_then(|i| valid.get(i as usize))
+                .ok_or_else(|| D::Error::custom(format!("filled.origin {n} is out of range for {method:?} (0..{})", valid.len() - 1)))?,
+            Some(serde_json::Value::String(s)) => *valid
+                .iter()
+                .find(|o| key(&format!("{o:?}")) == key(s))
+                .ok_or_else(|| D::Error::custom(format!("filled.origin '{s}' doesn't fit {method:?}; use one of {}", names())))?,
+            Some(other) => return Err(D::Error::custom(format!("invalid filled.origin {other}"))),
+        };
+        Ok(ImageFilled { method, amount: o.amount.clamp(0.0, 1.0), origin, clockwise: o.clockwise })
     }
 }
 

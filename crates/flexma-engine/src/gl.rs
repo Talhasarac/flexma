@@ -189,6 +189,56 @@ float slice1(float x, float size, float img, float a, float b, float da, float d
   if (x >= size - db) return 1.0 - (db > 0.0 ? (size - x) / db : 0.0) * b / img;
   return (a + (x - da) / max(size - da - db, 1e-4) * (img - a - b)) / img;
 }
+// Unity's Filled image: coverage of layer position p in a box of size sz.
+// v_stops = (method: 1 horizontal, 2 vertical, 3/4/5 radial 90/180/360,
+// amount, origin as Unity's fillOrigin, clockwise).
+float filledCoverage(vec2 p, vec2 sz, float aa) {
+  int m = int(v_stops.x + 0.5);
+  if (m == 0) return 1.0;
+  float a = clamp(v_stops.y, 0.0, 1.0);
+  if (a <= 0.0) return 0.0;
+  if (a >= 1.0) return 1.0;
+  int o = int(v_stops.z + 0.5);
+  bool cw = v_stops.w > 0.5;
+  if (m == 1) return clamp(0.5 + (o == 0 ? a * sz.x - p.x : p.x - (1.0 - a) * sz.x) / aa, 0.0, 1.0);
+  if (m == 2) return clamp(0.5 + (o == 0 ? p.y - (1.0 - a) * sz.y : a * sz.y - p.y) / aa, 0.0, 1.0);
+  // Radial: a pivot, the direction a clockwise sweep starts at (degrees
+  // clockwise from 12 o'clock) and the span of directions it covers.
+  vec2 pivot;
+  float start;
+  float span;
+  if (m == 3) {
+    // Corner: bottom-left, top-left, top-right, bottom-right.
+    pivot = o == 0 ? vec2(0.0, sz.y) : o == 1 ? vec2(0.0) : o == 2 ? vec2(sz.x, 0.0) : sz;
+    start = float(o) * 90.0;
+    span = 90.0;
+  } else if (m == 4) {
+    // Edge middle: bottom, left, top, right.
+    pivot = o == 0 ? vec2(sz.x * 0.5, sz.y) : o == 1 ? vec2(0.0, sz.y * 0.5) : o == 2 ? vec2(sz.x * 0.5, 0.0) : vec2(sz.x, sz.y * 0.5);
+    start = o == 0 ? 270.0 : o == 1 ? 0.0 : o == 2 ? 90.0 : 180.0;
+    span = 180.0;
+  } else {
+    // Center, starting at the bottom, right, top or left.
+    pivot = sz * 0.5;
+    start = o == 0 ? 180.0 : o == 1 ? 90.0 : o == 2 ? 0.0 : 270.0;
+    span = 360.0;
+  }
+  // The shown sweep [lo, hi] within the span. Counter-clockwise fills grow
+  // from the span's far end (for 360°, back from the start).
+  float lo = cw ? 0.0 : span * (1.0 - a);
+  float hi = cw ? span * a : span;
+  float hw = (hi - lo) * 0.5;
+  vec2 d = p - pivot;
+  float r = length(d);
+  float ang = degrees(atan(d.x, -d.y));
+  float rel = mod(ang - start - lo - hw + 540.0, 360.0) - 180.0;
+  // Signed px distance to the cut edges (positive inside); a span edge that
+  // is also the box edge isn't a cut.
+  bool full = span > 359.0;
+  float sdLo = (full || !cw) ? r * sin(radians(clamp(rel + hw, -90.0, 90.0))) : 1e6;
+  float sdHi = (full || cw) ? r * sin(radians(clamp(hw - rel, -90.0, 90.0))) : 1e6;
+  return clamp(0.5 + min(sdLo, sdHi) / aa, 0.0, 1.0);
+}
 // d(slice1)/dx, for explicit texture gradients.
 float slice1d(float x, float size, float img, float a, float b, float da, float db) {
   if (x <= da) return da > 0.0 ? a / da / img : 0.0;
@@ -254,6 +304,7 @@ void main() {
       vec2 tuv = (v_local - off) / scale;
       if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = textureGrad(u_tex, tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
     }
+    fill *= filledCoverage(v_local, sz, aa);
   }
   if (alphaClip) {
     // Stencil alpha mask: keep the pixels where the fill isn't transparent

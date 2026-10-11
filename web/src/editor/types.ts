@@ -80,9 +80,32 @@ export type Paint =
       /** Multiply color (Unity's Image.color). */
       tint?: string | null;
       slice?: NineSlice | null;
+      /** Unity's Filled image type. */
+      filled?: ImageFilled | null;
       opacity?: number;
       visible?: boolean;
     };
+
+export type FillMethod = 'HORIZONTAL' | 'VERTICAL' | 'RADIAL_90' | 'RADIAL_180' | 'RADIAL_360';
+export type FillOrigin = 'LEFT' | 'RIGHT' | 'BOTTOM' | 'TOP' | 'BOTTOM_LEFT' | 'TOP_LEFT' | 'TOP_RIGHT' | 'BOTTOM_RIGHT';
+
+/** Show only part of an image: a progress bar or a cooldown wheel. */
+export interface ImageFilled {
+  method: FillMethod;
+  /** 0..1 */
+  amount: number;
+  origin: FillOrigin;
+  clockwise?: boolean;
+}
+
+/** The origins each fill method takes, in Unity's fillOrigin order. */
+export const FILL_ORIGINS: Record<FillMethod, FillOrigin[]> = {
+  HORIZONTAL: ['LEFT', 'RIGHT'],
+  VERTICAL: ['BOTTOM', 'TOP'],
+  RADIAL_90: ['BOTTOM_LEFT', 'TOP_LEFT', 'TOP_RIGHT', 'BOTTOM_RIGHT'],
+  RADIAL_180: ['BOTTOM', 'LEFT', 'TOP', 'RIGHT'],
+  RADIAL_360: ['BOTTOM', 'RIGHT', 'TOP', 'LEFT'],
+};
 
 /** 9-slice insets in image pixels; corners keep their size. */
 export interface NineSlice {

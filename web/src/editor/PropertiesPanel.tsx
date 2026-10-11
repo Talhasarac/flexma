@@ -30,7 +30,8 @@ import { FontPicker } from './FontPicker';
 import { StyleChip, StylePickerButton } from './Styles';
 import { useToast } from '../components/Toast';
 import { useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
-import type { ConstraintType, Constraints, EffectValue, NineSlice, NodeData, Paint } from './types';
+import type { ConstraintType, Constraints, EffectValue, FillMethod, FillOrigin, ImageFilled, NineSlice, NodeData, Paint } from './types';
+import { FILL_ORIGINS } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
 
 type Props = { store: EditorStore };
@@ -832,7 +833,80 @@ function ImageOptions({ paint, onChange, store, begin, end }: { paint: ImagePain
           </div>
         </>
       )}
+      <FilledOptions paint={paint} onChange={onChange} begin={begin} end={end} />
     </div>
+  );
+}
+
+const ORIGIN_LABELS: Record<FillOrigin, string> = {
+  LEFT: 'Left',
+  RIGHT: 'Right',
+  BOTTOM: 'Bottom',
+  TOP: 'Top',
+  BOTTOM_LEFT: 'Bottom left',
+  TOP_LEFT: 'Top left',
+  TOP_RIGHT: 'Top right',
+  BOTTOM_RIGHT: 'Bottom right',
+};
+
+/** Unity's Filled image type: method, amount, origin and direction. */
+function FilledOptions({ paint, onChange, begin, end }: { paint: ImagePaint; onChange: (p: ImagePaint) => void; begin: () => void; end: () => void }) {
+  const f = paint.filled ?? null;
+  const setMethod = (m: FillMethod | 'NONE') => {
+    if (m === 'NONE') return onChange({ ...paint, filled: null });
+    const origins = FILL_ORIGINS[m];
+    const origin = f && origins.includes(f.origin) ? f.origin : origins[m === 'RADIAL_360' ? 2 : 0];
+    onChange({ ...paint, filled: { method: m, amount: f?.amount ?? 1, origin, clockwise: f?.clockwise ?? true } });
+  };
+  const setF = (next: Partial<ImageFilled>) => f && onChange({ ...paint, filled: { ...f, ...next } });
+  return (
+    <>
+      <div className="grid2">
+        <Select
+          value={f?.method ?? 'NONE'}
+          title="Filled: show part of the image (Unity's Filled image type)"
+          options={[
+            { value: 'NONE', label: 'Not filled' },
+            { value: 'HORIZONTAL', label: 'Horizontal' },
+            { value: 'VERTICAL', label: 'Vertical' },
+            { value: 'RADIAL_90', label: 'Radial 90' },
+            { value: 'RADIAL_180', label: 'Radial 180' },
+            { value: 'RADIAL_360', label: 'Radial 360' },
+          ]}
+          onChange={(v) => setMethod(v as FillMethod | 'NONE')}
+        />
+        {f && (
+          <NumberInput
+            label="Amount"
+            title="Fill amount"
+            value={Math.round(f.amount * 100)}
+            min={0}
+            max={100}
+            suffix="%"
+            precision={0}
+            onChange={(v) => setF({ amount: Math.min(1, Math.max(0, v / 100)) })}
+            onScrubStart={begin}
+            onScrubEnd={end}
+          />
+        )}
+      </div>
+      {f && (
+        <div className="grid2">
+          <Select
+            value={f.origin}
+            title="Fill origin"
+            options={FILL_ORIGINS[f.method].map((o) => ({ value: o, label: ORIGIN_LABELS[o] }))}
+            onChange={(v) => setF({ origin: v as FillOrigin })}
+          />
+          {f.method.startsWith('RADIAL') && (
+            <label className="check">
+              <input type="checkbox" checked={f.clockwise !== false} onChange={(e) => setF({ clockwise: e.target.checked })} />
+              Clockwise
+            </label>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 

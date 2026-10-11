@@ -252,7 +252,7 @@ mod large_fill_tests {
             dim.y = -2500.0;
             dim.width = 6000.0;
             dim.height = 6000.0;
-            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, opacity: 1.0, visible: true }];
+            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: dim }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((64.0, 40.0));
@@ -301,7 +301,7 @@ mod alpha_mask_tests {
             mask.clips_content = true;
             mask.clip_alpha = true;
             mask.hide_fill = hide;
-            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, opacity: 1.0, visible: true }];
+            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: mask }).unwrap();
             let mut red = Node::new("r:1", NodeType::Rectangle);
             red.parent = Some("f:1".into());
@@ -329,6 +329,59 @@ mod alpha_mask_tests {
             } else {
                 assert_eq!(graphic, (0, 0, 255), "the mask image is drawn");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod filled_image_tests {
+    use super::*;
+    use flexma_doc::{ImageFilled, ImageFit, Node, NodeType, Op, Paint};
+
+    /// Unity's Filled images in exports: which part of a red image shows.
+    #[test]
+    fn filled_images_show_their_part() {
+        let mut img = resvg::tiny_skia::Pixmap::new(10, 10).unwrap();
+        img.fill(resvg::tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+        use base64::Engine;
+        let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(img.encode_png().unwrap()));
+        let cases: &[(serde_json::Value, &[(u32, u32)], &[(u32, u32)])] = &[
+            (serde_json::json!({"method": "RADIAL_360", "amount": 0.25, "origin": "top"}), &[(75, 25)], &[(25, 25), (75, 75), (25, 75)]),
+            (serde_json::json!({"method": "radial360", "amount": 0.25, "origin": 0, "clockwise": false}), &[(75, 75)], &[(25, 75), (25, 25), (75, 25)]),
+            (serde_json::json!({"method": "HORIZONTAL", "amount": 0.3, "origin": 1}), &[(90, 50)], &[(50, 50), (10, 50)]),
+            (serde_json::json!({"method": "VERTICAL", "amount": 0.5}), &[(50, 75)], &[(50, 25)]),
+            (serde_json::json!({"method": "RADIAL_90", "amount": 0.5, "origin": "BOTTOM_LEFT"}), &[(10, 50)], &[(90, 90)]),
+            (serde_json::json!({"method": "Radial_180", "amount": 0.5, "origin": "bottom"}), &[(25, 50)], &[(75, 50)]),
+        ];
+        for (spec, shown, hidden) in cases {
+            let filled: ImageFilled = serde_json::from_value(spec.clone()).unwrap();
+            let mut doc = Document::new_empty();
+            let mut bg = Node::new("f:0", NodeType::Frame);
+            bg.parent = Some("0:1".into());
+            (bg.width, bg.height) = (100.0, 100.0);
+            doc.apply(&Op::Create { node: bg }).unwrap();
+            let mut r = Node::new("r:1", NodeType::Rectangle);
+            r.parent = Some("f:0".into());
+            (r.width, r.height) = (100.0, 100.0);
+            r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: Some(filled), opacity: 1.0, visible: true }];
+            doc.apply(&Op::Create { node: r }).unwrap();
+            let resolve = |_: &str| Some(uri.clone());
+            let size = |_: &str| Some((10.0, 10.0));
+            let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+            let (svg, _) = export(&doc, &["f:0".to_string()], &opts).unwrap();
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let mut pm = resvg::tiny_skia::Pixmap::new(100, 100).unwrap();
+            resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+            let red = |x: u32, y: u32| pm.pixel(x, y).unwrap().green() < 50;
+            for &(x, y) in *shown {
+                assert!(red(x, y), "{spec}: ({x},{y}) should show the image");
+            }
+            for &(x, y) in *hidden {
+                assert!(!red(x, y), "{spec}: ({x},{y}) should be cut away");
+            }
+        }
+        for bad in [serde_json::json!({"method": "RADIAL_90", "origin": "TOP"}), serde_json::json!({"method": "HORIZONTAL", "origin": 2}), serde_json::json!({"method": "SPIRAL"})] {
+            assert!(serde_json::from_value::<ImageFilled>(bad.clone()).is_err(), "{bad} should be rejected");
         }
     }
 }
