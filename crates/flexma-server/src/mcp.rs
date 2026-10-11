@@ -33,6 +33,40 @@ justify, alignItems, width/height: number|\"fill\"|\"hug\") for UI. Colors are h
 in the file. People leave feedback as comments: list_comments -> fix -> add_comment(reply_to) -> resolve_comment. Call \
 save_version before large or destructive edits. Load the `flexma` skill for the full node spec and design recipes.";
 
+/// Argument names a call passed that the tool's schema doesn't list.
+fn unknown_args(name: &str, args: &Value) -> Vec<String> {
+    static PROPS: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    let props = PROPS.get_or_init(|| {
+        tools()
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|t| {
+                        let keys = t["inputSchema"]["properties"].as_object()?.keys().cloned().collect();
+                        Some((t["name"].as_str()?.to_string(), keys))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    let (Some(known), Some(obj)) = (props.get(name), args.as_object()) else { return Vec::new() };
+    obj.keys().filter(|k| !known.contains(k)).cloned().collect()
+}
+
+/// A list of ids: a JSON array, or a string holding one (or "a, b c"), which
+/// some clients send for arrays they don't have a schema for.
+fn id_list(v: &Value) -> Option<Vec<String>> {
+    let ids: Vec<String> = match v {
+        Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        Value::String(s) => match serde_json::from_str::<Vec<String>>(s) {
+            Ok(list) => list,
+            Err(_) => s.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).map(str::to_string).collect(),
+        },
+        _ => return None,
+    };
+    (!ids.is_empty()).then_some(ids)
+}
+
 fn tool(name: &str, description: &str, schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": schema })
 }
@@ -458,10 +492,21 @@ impl Ctx {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let result = match self.call_tool(name, &args).await {
+                let mut result = match self.call_tool(name, &args).await {
                     Ok(v) => v,
                     Err(e) => error_result(e),
                 };
+                // Say so when arguments were ignored, instead of silently falling
+                // back (e.g. a client with an old tool list).
+                let unknown = unknown_args(name, &args);
+                if !unknown.is_empty() {
+                    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+                        content.push(json!({ "type": "text", "text": format!(
+                            "Note: ignored unknown argument(s) {} for {name}. If they should exist, your client's tool list may be out of date; reconnect to refresh it.",
+                            unknown.join(", ")
+                        ) }));
+                    }
+                }
                 rpc_result(&id, result)
             }
             other => rpc_error(&id, -32601, &format!("method not found: {other}")),
@@ -1391,12 +1436,13 @@ impl Ctx {
     }
 
     async fn get_screenshot(&self, args: &Value) -> ToolResult {
-        if args.get("node_ids").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
-            return self.contact_sheet(args).await;
+        if let Some(ids) = args.get("node_ids").and_then(id_list) {
+            return self.contact_sheet(args, ids).await;
         }
         let fid = s(args, "file_id")?.to_string();
         let node = opt_s(args, "node_id").map(str::to_string);
         let page = opt_s(args, "page_id").map(str::to_string);
+        let whole_page = node.is_none() && page.is_none();
         let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
         let room = self.room(&fid, Role::Viewer).await?;
         let data_dir = self.st.cfg.data_dir.clone();
@@ -1420,17 +1466,17 @@ impl Ctx {
             "content": [
                 { "type": "image", "data": data, "mimeType": "image/png" },
                 { "type": "text", "text": format!(
-                    "Rendered {}×{} px of canvas area x={} y={} w={} h={}, with the workspace's fonts. Line breaks can differ slightly from the browser editor, which is the source of truth.",
-                    w, h, fmt_num(bounds.x), fmt_num(bounds.y), fmt_num(bounds.width), fmt_num(bounds.height)
+                    "Rendered {}×{} px of canvas area x={} y={} w={} h={}, with the workspace's fonts. Line breaks can differ slightly from the browser editor, which is the source of truth.{}",
+                    w, h, fmt_num(bounds.x), fmt_num(bounds.y), fmt_num(bounds.width), fmt_num(bounds.height),
+                    if whole_page { " No node_id, node_ids or page_id was given, so this is the whole first page." } else { "" }
                 ) }
             ]
         }))
     }
 
     /// get_screenshot with `node_ids`: one labelled image of several nodes.
-    async fn contact_sheet(&self, args: &Value) -> ToolResult {
+    async fn contact_sheet(&self, args: &Value, ids: Vec<String>) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
-        let ids: Vec<String> = args["node_ids"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_string).collect();
         if ids.len() > 24 {
             return Err("node_ids takes up to 24 nodes per image".into());
         }
@@ -2700,5 +2746,26 @@ pub async fn upload_nodes_with_link(
         }))
         .into_response(),
         Err(e) => fail(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    #[test]
+    fn id_lists_from_arrays_or_strings() {
+        assert_eq!(id_list(&json!(["a:1", "b:2"])), Some(vec!["a:1".into(), "b:2".into()]));
+        // Clients without the schema sometimes stringify arrays.
+        assert_eq!(id_list(&json!("[\"a:1\",\"b:2\"]")), Some(vec!["a:1".into(), "b:2".into()]));
+        assert_eq!(id_list(&json!("a:1, b:2")), Some(vec!["a:1".into(), "b:2".into()]));
+        assert_eq!(id_list(&json!([])), None);
+    }
+
+    #[test]
+    fn unknown_arguments_are_reported() {
+        assert_eq!(unknown_args("get_screenshot", &json!({ "file_id": "f", "node_ids": [], "zoom": 2 })), vec!["zoom".to_string()]);
+        assert!(unknown_args("get_screenshot", &json!({ "file_id": "f", "scale": 2 })).is_empty());
+        assert!(unknown_args("no_such_tool", &json!({ "x": 1 })).is_empty());
     }
 }
