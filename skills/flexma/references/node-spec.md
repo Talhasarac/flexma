@@ -66,7 +66,8 @@ Type defaults:
 ]
 ```
 
-`LAYER_BLUR` currently affects exports only.
+- `blur` is the softness (0 is a hard copy, like Unity's Shadow). `spread` grows the shadow's shape first, or shrinks it when negative. Several shadows stack, the first one lowest.
+- `LAYER_BLUR`, and shadows on vectors, show in exports and screenshots only.
 
 ## FRAME (auto layout)
 

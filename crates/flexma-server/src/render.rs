@@ -385,3 +385,40 @@ mod filled_image_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+    use flexma_doc::{Color, Effect, Node, NodeType, Op, Paint};
+
+    /// Drop shadows in exports: spread grows the shape, blur 0 is a hard
+    /// copy (Unity's Shadow), and several shadows don't shadow each other.
+    #[test]
+    fn shadow_spread_and_hard_shadows() {
+        let shadow = |x: f32, spread: f32, color: &str| Effect::DropShadow { color: Color::parse(color).unwrap(), x, y: 0.0, blur: 0.0, spread, visible: true };
+        let mut doc = Document::new_empty();
+        let mut bg = Node::new("f:0", NodeType::Frame);
+        bg.parent = Some("0:1".into());
+        (bg.width, bg.height) = (200.0, 100.0);
+        doc.apply(&Op::Create { node: bg }).unwrap();
+        let mut r = Node::new("r:1", NodeType::Rectangle);
+        r.parent = Some("f:0".into());
+        (r.x, r.y, r.width, r.height) = (60.0, 30.0, 40.0, 40.0);
+        r.fills = vec![Paint::solid(Color::parse("#000000").unwrap())];
+        r.effects = vec![shadow(0.0, 10.0, "#ff0000"), shadow(60.0, 0.0, "#0000ff")];
+        doc.apply(&Op::Create { node: r }).unwrap();
+        let (svg, _) = export(&doc, &["f:0".to_string()], &SvgOptions::default()).unwrap();
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(200, 100).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+        let at = |x: u32, y: u32| {
+            let p = pm.pixel(x, y).unwrap().demultiply();
+            (p.red(), p.green(), p.blue())
+        };
+        assert_eq!(at(55, 50), (255, 0, 0), "spread 10 reaches 5px out");
+        assert_eq!(at(45, 50), (255, 255, 255), "but not 15px out");
+        assert_eq!(at(80, 50), (0, 0, 0), "the shape stays on top");
+        assert_eq!(at(150, 50), (0, 0, 255), "a blur-0 shadow is a hard copy");
+        assert_eq!(at(115, 50), (255, 255, 255), "shadows don't shadow each other");
+    }
+}

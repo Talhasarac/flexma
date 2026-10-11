@@ -441,24 +441,67 @@ impl Writer<'_> {
             return None;
         }
         let id = self.id("f");
-        let _ = write!(self.defs, r#"<filter id="{id}" x="-50%" y="-50%" width="200%" height="200%">"#);
-        for e in effects {
+        // The region covers the box, half its size again for overflowing
+        // content, and how far the effects reach (3σ of blur).
+        let reach = effects
+            .iter()
+            .map(|e| match e {
+                Effect::DropShadow { x, y, blur, spread, .. } => x.abs().max(y.abs()) as f64 + *blur as f64 * 1.5 + spread.max(0.0) as f64,
+                Effect::LayerBlur { radius, .. } => *radius as f64 * 1.5,
+            })
+            .fold(0.0, f64::max);
+        let m = (reach + n.width.abs().max(n.height.abs()) * 0.5 + 2.0).ceil();
+        // sRGB blending, like the editor.
+        let _ = write!(
+            self.defs,
+            r#"<filter id="{id}" filterUnits="userSpaceOnUse" x="{}" y="{}" width="{}" height="{}" color-interpolation-filters="sRGB">"#,
+            fmt_num(-m),
+            fmt_num(-m),
+            fmt_num(n.width.abs() + 2.0 * m),
+            fmt_num(n.height.abs() + 2.0 * m)
+        );
+        // Each shadow is built from the source's alpha (grown or shrunk by
+        // `spread`, blurred, offset, colored); all of them go under the source,
+        // the first one lowest. A layer blur then blurs the result.
+        let mut layers = Vec::new();
+        let mut blur = None;
+        for (i, e) in effects.iter().enumerate() {
             match e {
-                Effect::DropShadow { color, x, y, blur, .. } => {
+                Effect::DropShadow { color, x, y, blur: b, spread, .. } => {
+                    let mut input = "SourceAlpha".to_string();
+                    if spread.abs() > 0.01 {
+                        let op = if *spread > 0.0 { "dilate" } else { "erode" };
+                        let _ = write!(self.defs, r#"<feMorphology in="SourceAlpha" operator="{op}" radius="{}" result="s{i}m"/>"#, fmt_num(spread.abs() as f64));
+                        input = format!("s{i}m");
+                    }
+                    // Blur 0 is a hard copy (Unity's Shadow); some viewers
+                    // treat stdDeviation="0" as "draw nothing".
+                    if *b > 0.0 {
+                        let _ = write!(self.defs, r#"<feGaussianBlur in="{input}" stdDeviation="{}" result="s{i}b"/>"#, fmt_num(*b as f64 / 2.0));
+                        input = format!("s{i}b");
+                    }
                     let _ = write!(
                         self.defs,
-                        r#"<feDropShadow dx="{}" dy="{}" stdDeviation="{}" flood-color="{}" flood-opacity="{}"/>"#,
+                        r#"<feOffset in="{input}" dx="{}" dy="{}" result="s{i}o"/><feFlood flood-color="{}" flood-opacity="{}"/><feComposite in2="s{i}o" operator="in" result="s{i}"/>"#,
                         fmt_num(*x as f64),
                         fmt_num(*y as f64),
-                        fmt_num(*blur as f64 / 2.0),
                         color.to_hex_rgb(),
                         fmt_num(color.a as f64)
                     );
+                    layers.push(format!("s{i}"));
                 }
-                Effect::LayerBlur { radius, .. } => {
-                    let _ = write!(self.defs, r#"<feGaussianBlur stdDeviation="{}"/>"#, fmt_num(*radius as f64 / 2.0));
-                }
+                Effect::LayerBlur { radius, .. } => blur = Some(*radius),
             }
+        }
+        if !layers.is_empty() {
+            self.defs.push_str("<feMerge>");
+            for l in &layers {
+                let _ = write!(self.defs, r#"<feMergeNode in="{l}"/>"#);
+            }
+            self.defs.push_str(r#"<feMergeNode in="SourceGraphic"/></feMerge>"#);
+        }
+        if let Some(r) = blur {
+            let _ = write!(self.defs, r#"<feGaussianBlur stdDeviation="{}"/>"#, fmt_num(r as f64 / 2.0));
         }
         self.defs.push_str("</filter>");
         Some(id)

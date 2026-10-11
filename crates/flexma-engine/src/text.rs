@@ -3,7 +3,7 @@
 //! where lines wrap; only the metrics differ (real fonts here).
 
 use flexma_doc::paint::{StrokeAlign, TextAlign, TextAlignVertical, TextAutoResize, TextOverflow};
-use flexma_doc::{Color, Node, Paint};
+use flexma_doc::{Color, Effect, Node, Paint};
 use std::collections::HashMap;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
@@ -11,6 +11,8 @@ use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 pub struct TextEngine {
     pub canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
+    /// Scratch canvases for drop shadows (the text, and a spread mask).
+    fx: Option<[(HtmlCanvasElement, CanvasRenderingContext2d); 2]>,
     widths: HashMap<String, f64>,
     metrics: HashMap<String, (f64, f64)>,
     current_font: String,
@@ -68,6 +70,31 @@ pub fn text_stroke(n: &Node) -> Option<(Color, f64, StrokeAlign)> {
     (color.a > 0.0).then_some((color, n.stroke_weight, n.stroke_align))
 }
 
+/// A text node's visible drop shadows: (color, x, y, blur, spread).
+pub fn text_shadows(n: &Node) -> Vec<(Color, f64, f64, f64, f64)> {
+    n.effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::DropShadow { color, x, y, blur, spread, visible } if *visible && color.a > 0.0 => {
+                Some((*color, *x as f64, *y as f64, (*blur as f64).max(0.0), *spread as f64))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How far drop shadows reach past the glyphs.
+fn shadow_reach(shadows: &[(Color, f64, f64, f64, f64)]) -> f64 {
+    shadows.iter().map(|&(_, x, y, blur, spread)| x.abs().max(y.abs()) + blur + spread.max(0.0)).fold(0.0, f64::max)
+}
+
+fn new_canvas() -> Result<(HtmlCanvasElement, CanvasRenderingContext2d), JsValue> {
+    let doc = web_sys::window().ok_or("no window")?.document().ok_or("no document")?;
+    let canvas: HtmlCanvasElement = doc.create_element("canvas")?.dyn_into()?;
+    let ctx: CanvasRenderingContext2d = canvas.get_context("2d")?.ok_or("no 2d context")?.dyn_into()?;
+    Ok((canvas, ctx))
+}
+
 /// How far an outline reaches past the glyphs.
 fn stroke_reach(stroke: Option<(Color, f64, StrokeAlign)>) -> f64 {
     match stroke {
@@ -90,6 +117,7 @@ impl TextEngine {
         Ok(TextEngine {
             canvas,
             ctx,
+            fx: None,
             widths: HashMap::new(),
             metrics: HashMap::new(),
             current_font: String::new(),
@@ -173,7 +201,8 @@ impl TextEngine {
         let w = n.width.max(1.0);
         let h = n.height.max(1.0);
         let stroke = text_stroke(n);
-        let margin = (n.font_size * 0.35 + stroke_reach(stroke)).ceil().max(2.0);
+        let shadows = text_shadows(n);
+        let margin = (n.font_size * 0.35 + stroke_reach(stroke) + shadow_reach(&shadows)).ceil().max(2.0);
         let lines = self.lines(n);
         let lh = n.effective_line_height();
         let total = lh * lines.len() as f64;
@@ -262,7 +291,61 @@ impl TextEngine {
             ctx.fill_rect(0.0, 0.0, n.width, n.height);
             let _ = ctx.set_global_composite_operation("source-over");
         }
+        if !shadows.is_empty() {
+            let _ = self.draw_shadows(&shadows, px_w, px_h, scale);
+        }
         Some(Raster { px_w, px_h, rect: [x_min, y_min, lw, lh_box] })
+    }
+
+    /// Put drop shadows under what's on the canvas, like the exports'
+    /// shadow filter: the blur is a Gaussian with σ = blur / 2, and spread
+    /// grows (or shrinks) the shape first.
+    fn draw_shadows(&mut self, shadows: &[(Color, f64, f64, f64, f64)], w: u32, h: u32, scale: f64) -> Result<(), JsValue> {
+        if self.fx.is_none() {
+            self.fx = Some([new_canvas()?, new_canvas()?]);
+        }
+        let [(copy, copy_ctx), (mask, mask_ctx)] = self.fx.as_ref().unwrap();
+        copy.set_width(w);
+        copy.set_height(h);
+        copy_ctx.draw_image_with_html_canvas_element(&self.canvas, 0.0, 0.0)?;
+        // Signed distances to the glyph edges, for spread.
+        let mut field: Option<Vec<f32>> = None;
+        let ctx = &self.ctx;
+        ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)?;
+        ctx.clear_rect(0.0, 0.0, w as f64, h as f64);
+        // Only the shadow lands on the canvas: the source is drawn far off to
+        // the left and its shadow offset back.
+        let far = (w as f64 + 1000.0).ceil();
+        for &(color, x, y, blur, spread) in shadows {
+            let source = if spread.abs() * scale >= 0.5 {
+                let sd = field.get_or_insert_with(|| {
+                    let px = copy_ctx.get_image_data(0.0, 0.0, w as f64, h as f64).map(|d| d.data().0).unwrap_or_default();
+                    signed_field(&px, w as usize, h as usize)
+                });
+                let s = (spread * scale) as f32;
+                let mut px = vec![0u8; sd.len() * 4];
+                for (i, d) in sd.iter().enumerate() {
+                    px[i * 4 + 3] = ((s - d + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+                mask.set_width(w);
+                mask.set_height(h);
+                let img = web_sys::ImageData::new_with_u8_clamped_array_and_sh(wasm_bindgen::Clamped(&px), w, h)?;
+                mask_ctx.put_image_data(&img, 0.0, 0.0)?;
+                mask
+            } else {
+                copy
+            };
+            ctx.set_shadow_color(&css_color(color));
+            ctx.set_shadow_blur(blur * scale);
+            ctx.set_shadow_offset_x(x * scale + far);
+            ctx.set_shadow_offset_y(y * scale);
+            ctx.draw_image_with_html_canvas_element(source, -far, 0.0)?;
+        }
+        ctx.set_shadow_color("transparent");
+        ctx.set_shadow_blur(0.0);
+        ctx.set_shadow_offset_x(0.0);
+        ctx.set_shadow_offset_y(0.0);
+        ctx.draw_image_with_html_canvas_element(copy, 0.0, 0.0)
     }
 
     /// Small UI label (frame names, size badges) rendered at device scale.
@@ -344,6 +427,18 @@ fn outline_from_mask(ctx: &CanvasRenderingContext2d, w: u32, h: u32, fill: Color
     }
     let out = web_sys::ImageData::new_with_u8_clamped_array_and_sh(wasm_bindgen::Clamped(&px), w, h)?;
     ctx.put_image_data(&out, 0.0, 0.0)
+}
+
+/// Signed distance in px to the edge of an RGBA image's shape (alpha ≥ 0.5),
+/// negative inside.
+fn signed_field(px: &[u8], w: usize, h: usize) -> Vec<f32> {
+    let n = w * h;
+    let inside = |i: usize| px.get(i * 4 + 3).copied().unwrap_or(0) >= 128;
+    let mut to_in: Vec<f32> = (0..n).map(|i| if inside(i) { 0.0 } else { f32::INFINITY }).collect();
+    let mut to_out: Vec<f32> = (0..n).map(|i| if inside(i) { f32::INFINITY } else { 0.0 }).collect();
+    edt(&mut to_in, w, h);
+    edt(&mut to_out, w, h);
+    (0..n).map(|i| if inside(i) { 0.5 - to_out[i].sqrt() } else { to_in[i].sqrt() - 0.5 }).collect()
 }
 
 /// In-place 2D squared Euclidean distance transform (Felzenszwalb &
