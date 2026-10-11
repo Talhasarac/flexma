@@ -5,7 +5,7 @@ use crate::color::Color;
 use crate::doc::Document;
 use crate::geom::{fmt_num, Affine, Rect};
 use crate::node::{Node, NodeId, NodeType};
-use crate::paint::{Effect, ImageFit, Paint, TextAlign, TextAlignVertical};
+use crate::paint::{Effect, FillRule, ImageFit, Paint, StrokeCap, StrokeJoin, TextAlign, TextAlignVertical};
 use crate::path;
 use std::fmt::Write;
 
@@ -311,7 +311,8 @@ impl Writer<'_> {
                     if closed {
                         for p in fills.iter() {
                             if let Some(attr) = self.paint_attr(p, n.width, n.height, "fill") {
-                                let _ = write!(self.body, "{shape}{attr}/>");
+                                let rule = if n.fill_rule == FillRule::Evenodd { r#" fill-rule="evenodd""# } else { "" };
+                                let _ = write!(self.body, "{shape}{attr}{rule}/>");
                             }
                         }
                     }
@@ -327,9 +328,20 @@ impl Writer<'_> {
                                         n.dash_pattern.iter().map(|v| fmt_num(*v)).collect::<Vec<_>>().join(" ")
                                     )
                                 };
+                                let cap = match n.stroke_cap {
+                                    Some(StrokeCap::Round) => r#" stroke-linecap="round""#,
+                                    Some(StrokeCap::Square) => r#" stroke-linecap="square""#,
+                                    None if n.kind == NodeType::Line => r#" stroke-linecap="round""#,
+                                    _ => "",
+                                };
+                                let join = match n.stroke_join {
+                                    StrokeJoin::Round => r#" stroke-linejoin="round""#,
+                                    StrokeJoin::Bevel => r#" stroke-linejoin="bevel""#,
+                                    StrokeJoin::Miter => "",
+                                };
                                 let _ = write!(
                                     self.body,
-                                    r#"{shape} fill="none"{attr} stroke-width="{}"{dash}/>"#,
+                                    r#"{shape} fill="none"{attr} stroke-width="{}"{dash}{cap}{join}/>"#,
                                     fmt_num(n.stroke_weight)
                                 );
                             }

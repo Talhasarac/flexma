@@ -152,6 +152,33 @@ pub enum TextAutoResize {
     None,
 }
 
+/// How overlapping sub-paths fill: EVENODD punches holes (icons, glyphs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FillRule {
+    #[default]
+    Nonzero,
+    Evenodd,
+}
+
+/// Stroke ends. NONE is a flat (butt) end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StrokeCap {
+    None,
+    Round,
+    Square,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StrokeJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum StrokeAlign {

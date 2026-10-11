@@ -202,6 +202,30 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
+        tool("import_svg", "Turn SVG markup (a logo, illustration, chart or icon you wrote or found) into editable vector layers inside a frame: fills, linear gradients, strokes, caps, joins, dashes and fill rules carry over; text becomes outlines. Returns the outline.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "svg": { "type": "string", "description": "The SVG markup, starting with <svg" },
+                "name": { "type": "string", "description": "Name of the frame (default 'SVG')" },
+                "width": { "type": "number", "description": "Target width; height keeps the aspect ratio. Default: the SVG's own size." },
+                "height": { "type": "number", "description": "Target height (used when width is absent)" },
+                "flatten": { "type": "boolean", "description": "Merge all shapes into one vector layer when they share a style (good for icons). Default false." },
+                "parent_id": { "type": "string" },
+                "index": { "type": "integer" },
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+            },
+            "required": ["file_id", "svg"]
+        })),
+        tool("search_icons", "Search the built-in Lucide icon set (about 1,900 outline icons) by name or meaning, e.g. 'search', 'cart', 'settings', 'arrow right'. Place results with create_nodes {type:'icon', icon:'<name>', size, color}.", json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer", "description": "Default 20, max 100" }
+            },
+            "required": ["query"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -420,6 +444,8 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "import_svg" => self.import_svg(args).await,
+            "search_icons" => self.search_icons(args).await,
             "undo_agent_changes" => self.undo_agent_changes(args).await,
             "upload_image" => self.upload_image(args).await,
             "list_images" => self.list_images(args).await,
@@ -626,15 +652,21 @@ impl Ctx {
     async fn create_nodes(&self, args: &Value) -> ToolResult {
         let fid = s(args, "file_id")?.to_string();
         let specs = args.get("nodes").and_then(Value::as_array).cloned().ok_or("missing required array 'nodes'")?;
+        let parent = opt_s(args, "parent_id").map(str::to_string);
+        let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
+        let note = self.font_note(&fid, args).await;
+        self.create_specs(&fid, parent, index, specs, note).await
+    }
+
+    /// Create friendly specs (icons and images expanded) in one undoable step.
+    async fn create_specs(&self, fid: &str, parent: Option<String>, index: Option<usize>, specs: Vec<Value>, note: String) -> ToolResult {
         if specs.is_empty() {
             return Err("'nodes' is empty".into());
         }
-        let parent = opt_s(args, "parent_id").map(str::to_string);
-        let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
-        let room = self.room(&fid, Role::Editor).await?;
-        let note = self.font_note(&fid, args).await;
+        let room = self.room(fid, Role::Editor).await?;
         let mut specs = specs;
-        self.size_images(&fid, &mut specs).await?;
+        crate::icons::expand_all(&mut specs)?;
+        self.size_images(fid, &mut specs).await?;
         let prefix = format!("a{}", random_string(5));
         room.mutate(self.agent(), move |tx| {
             let parent = match parent {
@@ -665,6 +697,47 @@ impl Ctx {
         .await
         .map_err(err_msg)?
         .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
+    async fn import_svg(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let svg = s(args, "svg")?;
+        let opts = crate::svg_import::ImportOptions {
+            name: opt_s(args, "name").unwrap_or("SVG").to_string(),
+            width: args.get("width").and_then(Value::as_f64),
+            height: args.get("height").and_then(Value::as_f64),
+            flatten: args.get("flatten").and_then(Value::as_bool).unwrap_or(false),
+        };
+        let imported = crate::svg_import::import(svg, &opts)?;
+        let mut spec = imported.spec;
+        for k in ["x", "y"] {
+            if let Some(v) = args.get(k).and_then(Value::as_f64) {
+                spec[k] = json!(v);
+            }
+        }
+        let mut note = format!("\nImported {} vector layer{}.", imported.layers, if imported.layers == 1 { "" } else { "s" });
+        if !imported.notes.is_empty() {
+            note.push_str(&format!(" Note: {}.", imported.notes.join("; ")));
+        }
+        let parent = opt_s(args, "parent_id").map(str::to_string);
+        let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
+        self.create_specs(&fid, parent, index, vec![spec], note).await
+    }
+
+    async fn search_icons(&self, args: &Value) -> ToolResult {
+        let q = s(args, "query")?;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+        let hits = crate::icons::search(q, limit);
+        if hits.is_empty() {
+            return Ok(text_result(format!("No icons match '{q}'. Try a simpler word (e.g. 'user', 'cart', 'arrow', 'settings').")));
+        }
+        let mut out = format!("Icons matching '{q}' (Lucide {}, {} icons):\n", crate::icons::version(), crate::icons::count());
+        for (name, icon) in hits {
+            let tags: Vec<&str> = icon.tags.iter().take(6).map(String::as_str).collect();
+            out.push_str(&format!("- {name}{}\n", if tags.is_empty() { String::new() } else { format!(" ({})", tags.join(", ")) }));
+        }
+        out.push_str("Place one with create_nodes {type:'icon', icon:'<name>', size:24, color:'#111111'}.");
+        Ok(text_result(out))
     }
 
     async fn update_nodes(&self, args: &Value) -> ToolResult {

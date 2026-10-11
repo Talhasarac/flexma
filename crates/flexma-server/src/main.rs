@@ -19,11 +19,13 @@ mod config;
 mod db;
 mod error;
 mod fonts;
+mod icons;
 mod mcp;
 mod oauth;
 mod render;
 mod rooms;
 mod state;
+mod svg_import;
 mod uploads;
 mod ws;
 

@@ -240,6 +240,16 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
             | "textDecoration" => {
                 out.insert(k.clone(), upper(v));
             }
+            "fillRule" | "strokeJoin" => {
+                out.insert(k.clone(), upper(v));
+            }
+            "strokeCap" | "strokeLinecap" | "linecap" => {
+                let cap = upper(v);
+                out.insert("strokeCap".into(), if cap == json!("BUTT") { json!("NONE") } else { cap });
+            }
+            "strokeLinejoin" | "linejoin" => {
+                out.insert("strokeJoin".into(), upper(v));
+            }
             "primaryAxisSizing" | "counterAxisSizing" => {
                 return Err(format!("use layoutSizingHorizontal / layoutSizingVertical instead of '{k}'"));
             }

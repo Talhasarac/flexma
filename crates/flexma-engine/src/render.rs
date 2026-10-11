@@ -275,6 +275,9 @@ fn mesh_key(n: &Node, tol_bucket: i32) -> u64 {
     f(n.stroke_weight).hash(&mut h);
     n.has_visible_stroke().hash(&mut h);
     n.fills.iter().any(|p| p.is_visible()).hash(&mut h);
+    n.fill_rule.hash(&mut h);
+    n.stroke_cap.hash(&mut h);
+    n.stroke_join.hash(&mut h);
     tol_bucket.hash(&mut h);
     h.finish()
 }
@@ -852,7 +855,10 @@ impl Renderer {
                 let ok = lt::FillTessellator::new()
                     .tessellate_path(
                         &lp,
-                        &lt::FillOptions::tolerance(tol).with_fill_rule(lt::FillRule::NonZero),
+                        &lt::FillOptions::tolerance(tol).with_fill_rule(match n.fill_rule {
+                            flexma_doc::FillRule::Nonzero => lt::FillRule::NonZero,
+                            flexma_doc::FillRule::Evenodd => lt::FillRule::EvenOdd,
+                        }),
                         &mut lt::BuffersBuilder::new(&mut geom, |v: lt::FillVertex| v.position().to_array()),
                     )
                     .is_ok();
@@ -868,8 +874,18 @@ impl Renderer {
                         &lp,
                         &lt::StrokeOptions::tolerance(tol)
                             .with_line_width(n.stroke_weight as f32)
-                            .with_line_join(lt::LineJoin::Miter)
-                            .with_line_cap(if n.kind == NodeType::Line { lt::LineCap::Round } else { lt::LineCap::Butt }),
+                            .with_line_join(match n.stroke_join {
+                                flexma_doc::StrokeJoin::Miter => lt::LineJoin::Miter,
+                                flexma_doc::StrokeJoin::Round => lt::LineJoin::Round,
+                                flexma_doc::StrokeJoin::Bevel => lt::LineJoin::Bevel,
+                            })
+                            .with_line_cap(match n.stroke_cap {
+                                Some(flexma_doc::StrokeCap::Round) => lt::LineCap::Round,
+                                Some(flexma_doc::StrokeCap::Square) => lt::LineCap::Square,
+                                Some(flexma_doc::StrokeCap::None) => lt::LineCap::Butt,
+                                None if n.kind == NodeType::Line => lt::LineCap::Round,
+                                None => lt::LineCap::Butt,
+                            }),
                         &mut lt::BuffersBuilder::new(&mut geom, |v: lt::StrokeVertex| v.position().to_array()),
                     )
                     .is_ok();

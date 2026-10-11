@@ -191,6 +191,10 @@ define_node! {
     stroke_weight: f64 = 1.0 => "strokeWeight",
     stroke_align: StrokeAlign = StrokeAlign::Center => "strokeAlign",
     dash_pattern: Vec<f64> = Vec::new() => "dashPattern",
+    fill_rule: FillRule = FillRule::Nonzero => "fillRule",
+    /// None: round for lines, flat for everything else.
+    stroke_cap: Option<StrokeCap> = None => "strokeCap",
+    stroke_join: StrokeJoin = StrokeJoin::Miter => "strokeJoin",
     corner_radius: f64 = 0.0 => "cornerRadius",
     /// Optional per-corner radii `[topLeft, topRight, bottomRight, bottomLeft]`; overrides `cornerRadius`.
     corner_radii: Option<[f64; 4]> = None => "cornerRadii",
