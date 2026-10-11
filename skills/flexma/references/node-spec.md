@@ -183,6 +183,7 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
   - `amount`: 0 to 1.
   - `origin`: where the fill starts, by name or by Unity's `fillOrigin` number. `HORIZONTAL`: `LEFT`, `RIGHT`. `VERTICAL`: `BOTTOM`, `TOP`. `RADIAL_90` (pivot in that corner): `BOTTOM_LEFT`, `TOP_LEFT`, `TOP_RIGHT`, `BOTTOM_RIGHT`. `RADIAL_180` (pivot mid-edge): `BOTTOM`, `LEFT`, `TOP`, `RIGHT`. `RADIAL_360` (pivot in the center, sweep starts there): `BOTTOM`, `RIGHT`, `TOP`, `LEFT`. Defaults to the first.
   - `clockwise` (default true) sets the radial sweep direction.
+- `crop`: use only a region of the image, in image pixels from the top-left: `[x, y, width, height]` or `{x, y, width, height}`. Upload a sprite atlas once and point each sprite at its region. Fit, slice and filled then treat the region as the whole image, and an image node without a size takes the region's size. Note that Unity sprite rects count y from the bottom: y = atlasHeight − rect.y − rect.height.
 - All of these also work on any `IMAGE` paint, e.g. a frame's background.
 
 ## Re-uploads (`key`)

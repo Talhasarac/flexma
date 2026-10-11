@@ -460,13 +460,13 @@ pub fn expand_image(spec: &Value) -> Result<Option<Value>, String> {
         other => return Err(format!("unknown image fit '{other}' (use FILL, FIT or STRETCH)")),
     };
     let mut paint = json!({ "type": "IMAGE", "asset": asset, "fit": fit });
-    for k in ["tint", "slice", "filled"] {
+    for k in ["tint", "slice", "filled", "crop"] {
         if let Some(v) = obj.get(k) {
             paint[k] = v.clone();
         }
     }
     let mut out = obj.clone();
-    for k in ["asset", "src", "image", "fit", "tint", "slice", "filled", "fill", "fills", "background"] {
+    for k in ["asset", "src", "image", "fit", "tint", "slice", "filled", "crop", "fill", "fills", "background"] {
         out.remove(k);
     }
     out.insert("type".into(), json!("RECTANGLE"));

@@ -52,6 +52,8 @@ struct FillParams {
     nstops: f32,
     colors: [[f32; 4]; 4],
     stops: [f32; 4],
+    /// Images: the crop as a texture-space rect (x, y, w, h); zero = whole image.
+    fx: [f32; 4],
     image: Option<String>,
 }
 
@@ -624,7 +626,7 @@ impl Renderer {
                 let ellipse = n.kind == NodeType::Ellipse;
                 let mut parts = Vec::new();
                 for p in n.fills.iter().filter(|p| p.is_visible()) {
-                    let FillParams { ptype, angle, nstops, colors, stops, image } = self.fill_params(Some(p));
+                    let FillParams { ptype, angle, nstops, colors, stops, fx, image } = self.fill_params(Some(p));
                     let ci = (inst.len() / INST_FLOATS) as u32;
                     push_instance(
                         &mut inst,
@@ -639,7 +641,7 @@ impl Renderer {
                         [ptype, angle, nstops, 1.0],
                         [0.0; 4],
                         [0.0; 4],
-                        [0.0; 4],
+                        fx,
                     );
                     parts.push((ci, image));
                 }
@@ -714,6 +716,7 @@ impl Renderer {
         let mut angle = 0.0;
         let mut nstops = 0.0;
         let mut image: Option<String> = None;
+        let mut fx = [0.0f32; 4];
         match paint {
             Some(Paint::Solid { color, opacity: po, .. }) => {
                 ptype = 1.0;
@@ -730,7 +733,7 @@ impl Renderer {
                     stops[k] = s.position;
                 }
             }
-            Some(Paint::Image { asset, fit, opacity: po, tint, slice, filled, .. }) => {
+            Some(Paint::Image { asset, fit, opacity: po, tint, slice, filled, crop, .. }) => {
                 ptype = 3.0;
                 let fit_v = match fit {
                     ImageFit::Fill => 0.0,
@@ -738,7 +741,15 @@ impl Renderer {
                     ImageFit::Stretch => 2.0,
                 };
                 match self.image(asset).map(|(_, w, h)| (w, h)) {
-                    Some((w, h)) => {
+                    Some((iw, ih)) => {
+                        // A crop makes the region the image.
+                        let (w, h) = match crop.and_then(|c| c.within(iw, ih)) {
+                            Some(c) => {
+                                fx = [(c.x / iw) as f32, (c.y / ih) as f32, (c.width / iw) as f32, (c.height / ih) as f32];
+                                (c.width, c.height)
+                            }
+                            None => (iw, ih),
+                        };
                         // c0 = tint, c1 = (imgW, imgH, fit, alpha),
                         // c2 = 9-slice source insets (top, right, bottom, left) in image px,
                         // c3 = (layer px per image px, fill center, sliced, 0).
@@ -763,7 +774,7 @@ impl Renderer {
             }
             None => {}
         }
-        FillParams { ptype, angle, nstops, colors, stops, image }
+        FillParams { ptype, angle, nstops, colors, stops, fx, image }
     }
 
     fn build_box(
@@ -830,7 +841,7 @@ impl Renderer {
             } else {
                 ([0.0; 4], [0.0; 4])
             };
-            let FillParams { ptype, angle, nstops, colors, stops, image } = self.fill_params(paint);
+            let FillParams { ptype, angle, nstops, colors, stops, fx, image } = self.fill_params(paint);
             if ptype == 0.0 && stroke[3] == 0.0 {
                 continue;
             }
@@ -848,7 +859,7 @@ impl Renderer {
                 [ptype, angle, nstops, opacity],
                 stroke,
                 strokep,
-                [0.0; 4],
+                fx,
             );
             match image {
                 Some(asset) => cmds.push(Cmd::Image { inst: idx, asset }),

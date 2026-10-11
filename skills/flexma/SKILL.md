@@ -81,7 +81,7 @@ Shared color and text styles keep a design consistent: change a style once and e
   - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox) or `STRETCH`.
   - It's a rectangle with an image fill, so `radius`, `stroke`, `shadow` and `opacity` work, and it can sit inside auto layout.
 - **As a background:** any frame or shape can take `fill: { "type": "IMAGE", "asset": "<id>", "fit": "FILL" }`, e.g. a hero frame with text on top.
-- **Game UI:** `slice` gives 9-slice scaling (a sliced Unity sprite), `tint` multiplies the color (Unity's `Image.color`), and `filled` shows part of the image like a Filled image (bars and radial wheels), on the image shorthand or any `IMAGE` paint.
+- **Game UI:** `slice` gives 9-slice scaling (a sliced Unity sprite), `tint` multiplies the color (Unity's `Image.color`), and `filled` shows part of the image like a Filled image (bars and radial wheels), and `crop` picks a sprite out of an atlas, on the image shorthand or any `IMAGE` paint.
 - **Masks:** a frame with an `IMAGE` fill and `clip: "alpha"` shows its children only where the image isn't transparent (Unity's `Mask`). Add `hideFill: true` to mask without drawing the image.
 - **Reuse:** `list_images` shows pictures already in the workspace and which ones this file uses. Uploading the same picture again returns its existing asset id, so re-exports don't pile up copies.
 - **From the web:** download the picture first (`curl -L -o photo.jpg <url>`), then upload it. Only use images the user has the rights to. For placeholders, a solid color or gradient block is fine.

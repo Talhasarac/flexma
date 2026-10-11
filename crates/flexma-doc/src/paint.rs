@@ -67,6 +67,10 @@ pub enum Paint {
         /// (Unity's Filled image type).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filled: Option<ImageFilled>,
+        /// Use only this region of the image (a sprite in an atlas), in image
+        /// pixels. Fit, slice and filled then work on the region.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crop: Option<ImageCrop>,
         #[serde(default = "one", skip_serializing_if = "is_one")]
         opacity: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -166,6 +170,56 @@ impl<'de> Deserialize<'de> for NineSlice {
                 _ => return Err(serde::de::Error::custom("slice array must have 1, 2 or 4 numbers")),
             },
         })
+    }
+}
+
+/// A region of an image in image pixels, from the top-left.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ImageCrop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ImageCrop {
+    /// The region clamped to a `w`×`h` image, or `None` if nothing is left.
+    pub fn within(&self, w: f64, h: f64) -> Option<ImageCrop> {
+        let x = self.x.clamp(0.0, w);
+        let y = self.y.clamp(0.0, h);
+        let width = self.width.min(w - x);
+        let height = self.height.min(h - y);
+        (width > 0.0 && height > 0.0).then_some(ImageCrop { x, y, width, height })
+    }
+}
+
+/// Accepts `{x, y, width|w, height|h}` or `[x, y, width, height]`.
+impl<'de> Deserialize<'de> for ImageCrop {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ImageCrop, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Arr([f64; 4]),
+            Obj {
+                #[serde(default)]
+                x: f64,
+                #[serde(default)]
+                y: f64,
+                #[serde(alias = "w")]
+                width: f64,
+                #[serde(alias = "h")]
+                height: f64,
+            },
+        }
+        let (x, y, width, height) = match Repr::deserialize(d).map_err(|_| D::Error::custom("crop must be {x, y, width, height} or [x, y, width, height] in image pixels"))? {
+            Repr::Arr([x, y, w, h]) => (x, y, w, h),
+            Repr::Obj { x, y, width, height } => (x, y, width, height),
+        };
+        if width <= 0.0 || height <= 0.0 {
+            return Err(D::Error::custom("crop width and height must be positive"));
+        }
+        Ok(ImageCrop { x, y, width, height })
     }
 }
 

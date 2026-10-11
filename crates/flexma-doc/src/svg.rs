@@ -5,7 +5,7 @@ use crate::color::Color;
 use crate::doc::Document;
 use crate::geom::{fmt_num, Affine, Rect};
 use crate::node::{Node, NodeId, NodeType};
-use crate::paint::{Effect, FillRule, ImageFit, NineSlice, Paint, StrokeCap, StrokeJoin, TextAlign, TextAlignVertical};
+use crate::paint::{Effect, FillRule, ImageCrop, ImageFit, NineSlice, Paint, StrokeCap, StrokeJoin, TextAlign, TextAlignVertical};
 use crate::path;
 use std::fmt::Write;
 
@@ -21,11 +21,15 @@ pub struct SvgOptions<'a> {
     pub image_size: &'a dyn Fn(&str) -> Option<(f64, f64)>,
     /// Text line breaking with real metrics if available.
     pub measure_text: Option<&'a dyn Fn(&Node, &str) -> f64>,
+    /// A cropped region of an image as its own URL or data URI, if the host
+    /// can cut it out. Otherwise crops are viewports into the whole image,
+    /// where smoothing can pick up a sliver of the pixels next to the region.
+    pub resolve_crop: &'a dyn Fn(&str, &ImageCrop) -> Option<String>,
 }
 
 impl Default for SvgOptions<'_> {
     fn default() -> Self {
-        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None }
+        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None, resolve_crop: &|_, _| None }
     }
 }
 
@@ -289,8 +293,26 @@ impl Writer<'_> {
     /// tile first and cut off very large ones.
     fn image_content(&mut self, p: &Paint, w: f64, h: f64) -> Option<String> {
         match p {
-            Paint::Image { asset, fit, opacity, tint, slice, .. } => {
-                let href = escape(&(self.opts.resolve_asset)(asset)?);
+            Paint::Image { asset, fit, opacity, tint, slice, crop, .. } => {
+                let mut href = escape(&(self.opts.resolve_asset)(asset)?);
+                // A crop makes the region the image. Viewports below point
+                // their viewBox at the region inside the full image (offset by
+                // `origin`), so nothing else of an atlas shows.
+                let mut full = (self.opts.image_size)(asset);
+                let mut region = full.and_then(|(fw, fh)| crop.and_then(|c| c.within(fw, fh)));
+                // Better: the region cut out as an image of its own.
+                if let Some(c) = region {
+                    if let Some(cut) = (self.opts.resolve_crop)(asset, &c) {
+                        href = escape(&cut);
+                        full = Some((c.width, c.height));
+                        region = None;
+                    }
+                }
+                let (size, origin) = match region {
+                    Some(c) => (Some((c.width, c.height)), (c.x, c.y)),
+                    None => (full, (0.0, 0.0)),
+                };
+                let full_image = full.map(|(fw, fh)| format!(r#"<image href="{href}" width="{}" height="{}"/>"#, fmt_num(fw), fmt_num(fh)));
                 let filter = match tint {
                     Some(t) if *t != Color::WHITE => {
                         // Multiply each channel, like a GPU tint.
@@ -307,24 +329,23 @@ impl Writer<'_> {
                     }
                     _ => String::new(),
                 };
-                let sliced = slice.and_then(|s| (self.opts.image_size)(asset).map(|size| (s, size)));
+                let sliced = slice.and_then(|s| size.zip(full).map(|(size, full)| (s, size, full)));
                 let content = match sliced {
-                    Some((s, (iw, ih))) => self.nine_slice(&href, &s, iw, ih, w, h),
-                    None => match (fit, slice, (self.opts.image_size)(asset)) {
+                    Some((s, (iw, ih), full)) => self.nine_slice(&href, &s, origin, full, iw, ih, w, h),
+                    None => match (fit, slice, size) {
                         // Cover: show just the centered crop through a viewport, so
                         // nothing spills outside the box (and no clip is needed).
                         (ImageFit::Fill, None, Some((iw, ih))) if iw > 0.0 && ih > 0.0 && w > 0.0 && h > 0.0 => {
                             let (cw, ch) = if iw / ih > w / h { (ih * w / h, ih) } else { (iw, iw * h / w) };
                             format!(
-                                r#"<svg width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none"><image href="{href}" width="{}" height="{}"/></svg>"#,
+                                r#"<svg width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none">{}</svg>"#,
                                 fmt_num(w),
                                 fmt_num(h),
-                                fmt_num((iw - cw) / 2.0),
-                                fmt_num((ih - ch) / 2.0),
+                                fmt_num(origin.0 + (iw - cw) / 2.0),
+                                fmt_num(origin.1 + (ih - ch) / 2.0),
                                 fmt_num(cw),
                                 fmt_num(ch),
-                                fmt_num(iw),
-                                fmt_num(ih)
+                                full_image.clone().unwrap_or_default()
                             )
                         }
                         _ => {
@@ -333,7 +354,30 @@ impl Writer<'_> {
                                 (ImageFit::Fill, _) => "xMidYMid slice",
                                 (ImageFit::Fit, _) => "xMidYMid meet",
                             };
-                            format!(r#"<image href="{href}" width="{}" height="{}" preserveAspectRatio="{par}"/>"#, fmt_num(w), fmt_num(h))
+                            match (region, &full_image) {
+                                (Some(c), Some(img)) => {
+                                    // The viewport is exactly the drawn region.
+                                    let (dw, dh) = match fit {
+                                        ImageFit::Fit if slice.is_none() => {
+                                            let k = (w / c.width).min(h / c.height);
+                                            (c.width * k, c.height * k)
+                                        }
+                                        _ => (w, h),
+                                    };
+                                    format!(
+                                        r#"<svg x="{}" y="{}" width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none">{img}</svg>"#,
+                                        fmt_num((w - dw) / 2.0),
+                                        fmt_num((h - dh) / 2.0),
+                                        fmt_num(dw),
+                                        fmt_num(dh),
+                                        fmt_num(c.x),
+                                        fmt_num(c.y),
+                                        fmt_num(c.width),
+                                        fmt_num(c.height)
+                                    )
+                                }
+                                _ => format!(r#"<image href="{href}" width="{}" height="{}" preserveAspectRatio="{par}"/>"#, fmt_num(w), fmt_num(h)),
+                            }
                         }
                     },
                 };
@@ -344,11 +388,13 @@ impl Writer<'_> {
     }
 
     /// A 9-slice image as nine cells, each a viewport onto one part of the image.
-    fn nine_slice(&mut self, href: &str, s: &NineSlice, iw: f64, ih: f64, w: f64, h: f64) -> String {
+    /// Slices an `iw`×`ih` image, or region of one at `origin` in a `full`-sized image.
+    #[allow(clippy::too_many_arguments)]
+    fn nine_slice(&mut self, href: &str, s: &NineSlice, origin: (f64, f64), full: (f64, f64), iw: f64, ih: f64, w: f64, h: f64) -> String {
         let src = s.source_insets(iw, ih);
         let dst = s.dest_insets(src, w, h);
         let img = self.id("i");
-        let _ = write!(self.defs, r#"<image id="{img}" href="{href}" width="{}" height="{}"/>"#, fmt_num(iw), fmt_num(ih));
+        let _ = write!(self.defs, r#"<image id="{img}" href="{href}" width="{}" height="{}"/>"#, fmt_num(full.0), fmt_num(full.1));
         let sx = [0.0, src[3], iw - src[1], iw];
         let sy = [0.0, src[0], ih - src[2], ih];
         let dx = [0.0, dst[3], w - dst[1], w];
@@ -371,8 +417,8 @@ impl Writer<'_> {
                     fmt_num(dy[row]),
                     fmt_num(dw),
                     fmt_num(dh),
-                    fmt_num(sx[col]),
-                    fmt_num(sy[row]),
+                    fmt_num(origin.0 + sx[col]),
+                    fmt_num(origin.1 + sy[row]),
                     fmt_num(sw),
                     fmt_num(sh)
                 );

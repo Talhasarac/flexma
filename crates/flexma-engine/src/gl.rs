@@ -239,6 +239,16 @@ float filledCoverage(vec2 p, vec2 sz, float aa) {
   float sdHi = (full || cw) ? r * sin(radians(clamp(hw - rel, -90.0, 90.0))) : 1e6;
   return clamp(0.5 + min(sdLo, sdHi) / aa, 0.0, 1.0);
 }
+// An image lookup at tuv in [0, 1] over the image, or over its crop when
+// v_fx = crop rect in texture space (x, y, w, h). Lookups stay half a texel
+// inside the crop so neighbouring sprites in an atlas don't bleed in.
+vec4 sampleImage(vec2 tuv, vec2 gx, vec2 gy) {
+  if (v_fx.z <= 0.0) return textureGrad(u_tex, tuv, gx, gy);
+  vec2 half_texel = 0.5 / vec2(textureSize(u_tex, 0));
+  vec2 lo = v_fx.xy + half_texel;
+  vec2 hi = max(lo, v_fx.xy + v_fx.zw - half_texel);
+  return textureGrad(u_tex, clamp(v_fx.xy + tuv * v_fx.zw, lo, hi), gx * v_fx.zw, gy * v_fx.zw);
+}
 // d(slice1)/dx, for explicit texture gradients.
 float slice1d(float x, float size, float img, float a, float b, float da, float db) {
   if (x <= da) return da > 0.0 ? a / da / img : 0.0;
@@ -293,7 +303,7 @@ void main() {
       vec2 tuv = vec2(slice1(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
       vec2 f = vec2(slice1d(p.x, sz.x, img.x, a.x, b.x, da.x, db.x), slice1d(p.y, sz.y, img.y, a.y, b.y, da.y, db.y));
       bool center = all(greaterThan(p, da)) && all(lessThan(p, sz - db));
-      if (v_c3.y > 0.5 || !center) fill = textureGrad(u_tex, tuv, dlx * f, dly * f) * v_c0 * v_c1.w;
+      if (v_c3.y > 0.5 || !center) fill = sampleImage(tuv, dlx * f, dly * f) * v_c0 * v_c1.w;
     } else {
       float fit = v_c1.z;
       vec2 scale;
@@ -302,7 +312,7 @@ void main() {
       else { scale = sz; }
       vec2 off = (sz - scale) * 0.5;
       vec2 tuv = (v_local - off) / scale;
-      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = textureGrad(u_tex, tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
+      if (tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x <= 1.0 && tuv.y <= 1.0) fill = sampleImage(tuv, dlx / scale, dly / scale) * v_c0 * v_c1.w;
     }
     fill *= filledCoverage(v_local, sz, aa);
   }
@@ -382,3 +392,29 @@ uniform float u_alpha;
 out vec4 o;
 void main() { o = texture(u_tex, v_uv) * u_alpha; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reserved word in a shader fails to compile on every GPU, which
+    /// stops the editor from opening any file.
+    #[test]
+    fn shaders_avoid_glsl_es_reserved_words() {
+        const RESERVED: &[&str] = &[
+            "attribute", "varying", "coherent", "volatile", "restrict", "readonly", "writeonly", "resource", "atomic_uint",
+            "noperspective", "patch", "sample", "subroutine", "common", "partition", "active", "asm", "class", "union", "enum",
+            "typedef", "template", "this", "goto", "inline", "noinline", "public", "static", "extern", "external", "interface",
+            "long", "short", "double", "half", "fixed", "unsigned", "superp", "input", "output", "filter", "sizeof", "cast",
+            "namespace", "using",
+        ];
+        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS)] {
+            for line in src.lines() {
+                let code = line.split("//").next().unwrap_or("");
+                for word in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                    assert!(!RESERVED.contains(&word), "{name} uses the reserved word '{word}': {line}");
+                }
+            }
+        }
+    }
+}

@@ -656,7 +656,7 @@ impl Editor {
         pr.insert("height".into(), json!(h));
         let mut node = self.make_node(NodeType::Rectangle, &target, &pr);
         node.name = "Image".into();
-        node.fills = vec![Paint::Image { asset: asset.to_string(), fit: flexma_doc::ImageFit::Fill, tint: None, slice: None, filled: None, opacity: 1.0, visible: true }];
+        node.fills = vec![Paint::Image { asset: asset.to_string(), fit: flexma_doc::ImageFit::Fill, tint: None, slice: None, filled: None, crop: None, opacity: 1.0, visible: true }];
         let id = node.id.clone();
         self.begin("image");
         self.apply_local(vec![Op::Create { node }]);

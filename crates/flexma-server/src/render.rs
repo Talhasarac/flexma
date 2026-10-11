@@ -4,7 +4,8 @@
 //! a font database so workspace fonts render (see `fonts::fontdb_for`).
 
 use flexma_doc::svg::{export, SvgOptions};
-use flexma_doc::{Color, Document, NodeId, Rect};
+use flexma_doc::{Color, Document, ImageCrop, NodeId, Rect};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -38,7 +39,8 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>) -> Opt
     let bg = page_background(doc, &page);
     let mode = AssetMode::Inline(data_dir);
     let resolve = |id: &str| resolve_asset(&mode, id);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: None };
+    let crop = |id: &str, c: &ImageCrop| crop_asset(&mode, id, c);
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: None, resolve_crop: &crop };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts).ok().map(|(png, _, _)| png)
 }
@@ -55,8 +57,40 @@ pub enum AssetMode<'a> {
 /// Export nodes (or a whole page) to SVG.
 pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode) -> Option<(String, Rect)> {
     let resolve = |id: &str| resolve_asset(&assets, id);
-    let opts = SvgOptions { padding: 0.0, background, resolve_asset: &resolve, image_size: &image_size, measure_text: None };
+    let crop = |id: &str, c: &ImageCrop| crop_asset(&assets, id, c);
+    let opts = SvgOptions { padding: 0.0, background, resolve_asset: &resolve, image_size: &image_size, measure_text: None, resolve_crop: &crop };
     export(doc, ids, &opts)
+}
+
+/// A sprite cut out of an inlined image as a PNG data URI (whole pixels,
+/// cached), so smoothing at its edges never reaches the pixels next to it.
+fn crop_asset(assets: &AssetMode, id: &str, c: &ImageCrop) -> Option<String> {
+    let AssetMode::Inline(_) = assets else { return None };
+    let (x, y, w, h) = (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0));
+    let key = format!("{id}/{x}/{y}/{w}/{h}");
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok()?.get(&key) {
+        return Some(hit.clone());
+    }
+    let (fw, fh) = image_size(id)?;
+    let src = resolve_asset(assets, id)?;
+    // Render the region 1:1 with nearest sampling: an exact pixel copy.
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}"><image href="{src}" width="{fw}" height="{fh}" image-rendering="optimizeSpeed"/></svg>"#
+    );
+    let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok()?;
+    let mut pm = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+    use base64::Engine;
+    let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(pm.encode_png().ok()?));
+    if let Ok(mut m) = cache.lock() {
+        if m.len() > 512 {
+            m.clear();
+        }
+        m.insert(key, uri.clone());
+    }
+    Some(uri)
 }
 
 static ASSETS_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -252,7 +286,7 @@ mod large_fill_tests {
             dim.y = -2500.0;
             dim.width = 6000.0;
             dim.height = 6000.0;
-            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, opacity: 1.0, visible: true }];
+            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop: None, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: dim }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((64.0, 40.0));
@@ -301,7 +335,7 @@ mod alpha_mask_tests {
             mask.clips_content = true;
             mask.clip_alpha = true;
             mask.hide_fill = hide;
-            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, opacity: 1.0, visible: true }];
+            mask.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop: None, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: mask }).unwrap();
             let mut red = Node::new("r:1", NodeType::Rectangle);
             red.parent = Some("f:1".into());
@@ -363,7 +397,7 @@ mod filled_image_tests {
             let mut r = Node::new("r:1", NodeType::Rectangle);
             r.parent = Some("f:0".into());
             (r.width, r.height) = (100.0, 100.0);
-            r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: Some(filled), opacity: 1.0, visible: true }];
+            r.fills = vec![Paint::Image { asset: "a".into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: Some(filled), crop: None, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: r }).unwrap();
             let resolve = |_: &str| Some(uri.clone());
             let size = |_: &str| Some((10.0, 10.0));
@@ -420,5 +454,61 @@ mod shadow_tests {
         assert_eq!(at(80, 50), (0, 0, 0), "the shape stays on top");
         assert_eq!(at(150, 50), (0, 0, 255), "a blur-0 shadow is a hard copy");
         assert_eq!(at(115, 50), (255, 255, 255), "shadows don't shadow each other");
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+    use flexma_doc::{ImageCrop, ImageFit, NineSlice, Node, NodeType, Op, Paint};
+
+    /// A sprite cut out of an atlas: only its region shows, in every mode.
+    #[test]
+    fn cropped_sprites_show_only_their_region() {
+        // 20×10 atlas: red sprite on the left, blue on the right.
+        let mut img = resvg::tiny_skia::Pixmap::new(20, 10).unwrap();
+        for (i, px) in img.pixels_mut().iter_mut().enumerate() {
+            let c = if i % 20 < 10 { (255, 0, 0) } else { (0, 0, 255) };
+            *px = resvg::tiny_skia::ColorU8::from_rgba(c.0, c.1, c.2, 255).premultiply();
+        }
+        use base64::Engine;
+        let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(img.encode_png().unwrap()));
+        let crop = Some(ImageCrop { x: 10.0, y: 0.0, width: 10.0, height: 10.0 });
+        let slice = Some(NineSlice::uniform(3.0));
+        for (fit, slice, (w, h), blue, white) in [
+            (ImageFit::Stretch, None, (100.0, 100.0), vec![(5, 5), (95, 95)], vec![]),
+            (ImageFit::Fit, None, (200.0, 100.0), vec![(100, 50)], vec![(20, 50), (180, 50)]),
+            (ImageFit::Fill, None, (100.0, 50.0), vec![(5, 25), (95, 25)], vec![]),
+            (ImageFit::Stretch, slice, (120.0, 60.0), vec![(2, 2), (60, 30), (118, 58)], vec![]),
+        ] {
+            let mut doc = Document::new_empty();
+            let mut bg = Node::new("f:0", NodeType::Frame);
+            bg.parent = Some("0:1".into());
+            (bg.width, bg.height) = (w, h);
+            doc.apply(&Op::Create { node: bg }).unwrap();
+            let mut r = Node::new("r:1", NodeType::Rectangle);
+            r.parent = Some("f:0".into());
+            (r.width, r.height) = (w, h);
+            r.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, filled: None, crop, opacity: 1.0, visible: true }];
+            doc.apply(&Op::Create { node: r }).unwrap();
+            let resolve = |_: &str| Some(uri.clone());
+            let size = |_: &str| Some((20.0, 10.0));
+            let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+            let (svg, _) = export(&doc, &["f:0".to_string()], &opts).unwrap();
+            let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+            let mut pm = resvg::tiny_skia::Pixmap::new(w as u32, h as u32).unwrap();
+            resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+            let at = |x: u32, y: u32| {
+                let p = pm.pixel(x, y).unwrap().demultiply();
+                (p.red(), p.green(), p.blue())
+            };
+            for (x, y) in blue {
+                let c = at(x, y);
+                assert!(c.2 > 200 && c.0 < 60, "{fit:?} {slice:?}: ({x},{y}) should be the blue sprite, got {c:?}");
+            }
+            for (x, y) in white {
+                assert_eq!(at(x, y), (255, 255, 255), "{fit:?}: ({x},{y}) is letterbox, not the atlas");
+            }
+        }
     }
 }
