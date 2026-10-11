@@ -1,7 +1,7 @@
 // Right-hand "Design" panel. Reads the selection snapshot from the store and
 // writes canonical node props back through the engine (one undo step per edit;
 // scrubs and color drags are wrapped in begin/end).
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
   AlignCenterHorizontal,
@@ -239,6 +239,7 @@ export function PropertiesPanel({ store }: Props) {
       <EffectsSection sel={sel} set={set} begin={begin} end={end} />
       <ExportSection store={store} sel={sel} />
       {sel.length === 1 && <NotesSection node={n0} set={set} readOnly={readOnly} />}
+      {sel.length === 1 && (n0.key || (n0.meta && Object.keys(n0.meta).length > 0)) && <MetaSection node={n0} />}
     </div>
   );
 }
@@ -1087,6 +1088,32 @@ function NotesSection({ node, set, readOnly }: { node: NodeData; set: (p: Record
           if (e.target.value !== node.description) set({ description: e.target.value });
         }}
       />
+    </Section>
+  );
+}
+
+/** Read-only: the key and meta that exports and agents attached. */
+function MetaSection({ node }: { node: NodeData }) {
+  const entries = Object.entries(node.meta ?? {});
+  return (
+    <Section title="Data">
+      <dl className="prop-meta">
+        {node.key && (
+          <>
+            <dt>key</dt>
+            <dd title={node.key}>{node.key}</dd>
+          </>
+        )}
+        {entries.map(([k, v]) => {
+          const text = typeof v === 'string' ? v : JSON.stringify(v);
+          return (
+            <Fragment key={k}>
+              <dt>{k}</dt>
+              <dd title={text}>{text}</dd>
+            </Fragment>
+          );
+        })}
+      </dl>
     </Section>
   );
 }

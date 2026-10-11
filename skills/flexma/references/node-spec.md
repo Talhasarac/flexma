@@ -28,6 +28,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `strokeJoin` / `linejoin` | `MITER` \| `ROUND` \| `BEVEL` | `MITER` | Stroke corners. |
 | `flipX`, `flipY` | bool | false | |
 | `description` | string | "" | Notes for collaborators and agents. |
+| `meta` | object | `{}` | Your own JSON (up to 64 KB), kept with the node and never drawn: the source component, a button's action, data bindings. `find_nodes` filters by it (`meta: {"onClick": "OpenShop"}`; a null value matches any). People see it read-only under Data. |
 | `key` | string | none | A stable id from the source of the design (e.g. a Unity object). Uploading a top-level spec with the same `key` again updates that node in place: see Re-uploads. |
 | `absolute` / `layoutAbsolute` | bool | false | Take the node out of its auto-layout parent's flow. |
 | `constraints` | `{horizontal, vertical}` \| string | `MIN` / `MIN` | How the node follows when its parent frame or instance is resized, like Unity anchors. See Constraints. |

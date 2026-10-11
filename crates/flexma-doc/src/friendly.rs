@@ -231,6 +231,17 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                 };
                 out.insert("autoFontSize".into(), range);
             }
+            "meta" | "metadata" | "userData" => {
+                let v = match v {
+                    Value::Null => json!({}),
+                    Value::Object(_) => v.clone(),
+                    _ => return Err(format!("'{k}' must be a JSON object")),
+                };
+                if v.to_string().len() > 64 * 1024 {
+                    return Err(format!("'{k}' is larger than 64 KB"));
+                }
+                out.insert("meta".into(), v);
+            }
             "wrap" | "textWrap" | "wordWrap" => {
                 out.insert("textWrap".into(), v.clone());
             }
@@ -716,6 +727,16 @@ mod tests {
         assert!(norm(NodeType::Text, json!({ "overflow": "scroll" })).is_err());
         assert_eq!(norm(NodeType::Text, json!({ "autoSize": [10, 24] })).unwrap()["autoFontSize"], json!({ "min": 10, "max": 24 }));
         assert!(norm(NodeType::Text, json!({ "autoSize": true })).is_err());
+    }
+
+    #[test]
+    fn meta_is_a_bounded_object() {
+        let norm = |v: Value| normalize_props(NodeType::Frame, v.as_object().unwrap());
+        let m = norm(json!({ "meta": { "unity": { "component": "Button" }, "onClick": "OpenShop" } })).unwrap();
+        assert_eq!(m["meta"]["onClick"], json!("OpenShop"));
+        assert_eq!(norm(json!({ "meta": null })).unwrap()["meta"], json!({}));
+        assert!(norm(json!({ "meta": "x" })).is_err());
+        assert!(norm(json!({ "meta": { "big": "x".repeat(70_000) } })).is_err());
     }
 
     #[test]

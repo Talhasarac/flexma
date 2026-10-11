@@ -659,6 +659,24 @@
   padding: 6px 8px;
   user-select: text;
 }
+.prop-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 11px;
+}
+.prop-meta dt {
+  color: var(--text-muted);
+}
+.prop-meta dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  user-select: text;
+}
 .prop-text:focus,
 .prop-notes:focus {
   outline: none;

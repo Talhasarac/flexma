@@ -168,6 +168,10 @@ export interface NodeData {
   clipsContent: boolean;
   clipAlpha: boolean;
   hideFill: boolean;
+  /** Stable id from an export (e.g. Unity), so re-uploads update in place. */
+  key?: string | null;
+  /** Free-form JSON from tools and agents. */
+  meta?: Record<string, unknown>;
   textWrap: boolean;
   textOverflow: 'VISIBLE' | 'CLIP' | 'ELLIPSIS' | 'TRUNCATE';
   /** Fixed boxes: shrink the font within this range to fit. */
