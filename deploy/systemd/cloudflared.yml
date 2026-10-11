@@ -1,0 +1,14 @@
+# /etc/cloudflared/config.yml: publish Flexma through a Cloudflare Tunnel on
+# standard HTTPS (443) when something else already owns 443 (e.g. OpenVPN
+# Access Server). Replaces the Caddyfile; the server needs no open ports.
+# Setup steps: docs/deploy-digitalocean.md.
+tunnel: <tunnel id>
+credentials-file: /etc/cloudflared/<tunnel id>.json
+
+ingress:
+  - hostname: design.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      # Flexma compares Origin with Host on cookie-authenticated writes.
+      httpHostHeader: design.example.com
+  - service: http_status:404

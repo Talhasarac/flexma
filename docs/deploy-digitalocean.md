@@ -138,6 +138,29 @@ iptables rules, so it can share a small droplet with something like OpenVPN:
   keep `FLEXMA_MAX_EXPORT_PX=4096` on 1 GB servers.
 - `Caddyfile` serves HTTPS on port **8443** for when something else already owns 443
   (OpenVPN Access Server does). The certificate comes over port 80, which must be free.
+  Claude Code and Codex connect fine on 8443, but a claude.ai custom connector
+  couldn't reach it. Use the Cloudflare Tunnel below for claude.ai.
+- `cloudflared.yml` publishes Flexma on standard HTTPS through a Cloudflare Tunnel
+  instead, without opening any port on the server.
+
+#### Cloudflare Tunnel
+
+You need a domain on Cloudflare. On the server:
+
+```bash
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" > /etc/apt/sources.list.d/cloudflared.list
+apt-get update && apt-get install -y cloudflared
+cloudflared tunnel login                     # open the printed link, pick your domain
+cloudflared tunnel create flexma             # prints the tunnel id
+cloudflared tunnel route dns flexma design.example.com
+mkdir -p /etc/cloudflared && cp ~/.cloudflared/<tunnel id>.json /etc/cloudflared/
+```
+
+Copy `cloudflared.yml` to `/etc/cloudflared/config.yml`, fill in the tunnel id and
+hostname, then run `cloudflared service install`. Set
+`FLEXMA_PUBLIC_URL=https://design.example.com` in `/etc/flexma/flexma.env` and
+`systemctl restart flexma`. WebSockets and MCP streaming pass through the tunnel as is.
 
 You can build the Linux binary on a Mac instead of the server:
 
