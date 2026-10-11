@@ -354,11 +354,37 @@ pub fn build_create_ops(
     };
     let mut ops = Vec::new();
     let mut top = Vec::new();
+    let mut ctx = BuildCtx { doc, scratch: None };
     for (spec, key) in specs.iter().zip(keys) {
-        let id = build_one(doc, spec, parent, parent_node.kind, key, &mut ops, new_id)?;
+        let id = build_one(&mut ctx, spec, parent, parent_node.kind, key, &mut ops, new_id)?;
         top.push(id);
     }
     Ok((ops, top))
+}
+
+/// The document specs are built against. Components created earlier in the
+/// same batch are found in a scratch copy with the ops so far applied.
+struct BuildCtx<'a> {
+    doc: &'a Document,
+    /// The copy, and how many ops it has applied.
+    scratch: Option<(Document, usize)>,
+}
+
+impl BuildCtx<'_> {
+    /// The document to resolve component `key` in.
+    fn for_component(&mut self, key: &str, ops: &[Op]) -> &Document {
+        if self.scratch.is_none() && find_component(self.doc, key).is_some() {
+            return self.doc;
+        }
+        let (scratch, applied) = self.scratch.get_or_insert_with(|| (self.doc.clone(), 0));
+        if *applied < ops.len() {
+            let (eff, _) = scratch.apply_all(&ops[*applied..]);
+            *applied = ops.len();
+            // Expand instances, so overrides can reach layers inside nested ones.
+            crate::components::sync_instances(scratch, &eff.changed, &eff.removed);
+        }
+        scratch
+    }
 }
 
 /// Find a main component by id or name.
@@ -384,7 +410,7 @@ fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> 
         .or_else(|| obj.get("of"))
         .and_then(Value::as_str)
         .ok_or("instances need \"component\": the main component's id or name")?;
-    let cid = find_component(doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file"))?;
+    let cid = find_component(doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file (a component made in the same batch must come before its instances)"))?;
     let comp = doc.get(&cid).unwrap();
     node.component_id = Some(cid.clone());
     node.width = comp.width;
@@ -488,7 +514,7 @@ pub fn expand_image(spec: &Value) -> Result<Option<Value>, String> {
 }
 
 fn build_one(
-    doc: &Document,
+    ctx: &mut BuildCtx,
     spec: &Value,
     parent: &str,
     parent_kind: NodeType,
@@ -500,7 +526,7 @@ fn build_one(
     // Style refs by name: {fillStyle:"Brand/Primary", textStyle:"Heading/H1"}.
     if let Some(o) = spec.as_object().filter(|o| o.contains_key("fillStyle") || o.contains_key("strokeStyle") || o.contains_key("textStyle")) {
         let mut o = expanded.as_ref().and_then(Value::as_object).cloned().unwrap_or_else(|| o.clone());
-        crate::styles::resolve_refs(doc, &mut o)?;
+        crate::styles::resolve_refs(ctx.doc, &mut o)?;
         expanded = Some(Value::Object(o));
     }
     let spec = expanded.as_ref().unwrap_or(spec);
@@ -529,7 +555,8 @@ fn build_one(
             node.height = 100.0;
         }
         NodeType::Instance => {
-            build_instance(doc, obj, &mut node)?;
+            let ckey = obj.get("component").or_else(|| obj.get("componentId")).or_else(|| obj.get("of")).and_then(Value::as_str).unwrap_or_default();
+            build_instance(ctx.for_component(ckey, ops), obj, &mut node)?;
         }
         NodeType::Line => {
             node.width = 100.0;
@@ -641,7 +668,7 @@ fn build_one(
     ops.push(Op::Create { node });
     let keys = fractional::keys_between(None, None, children.len());
     for (c, key) in children.iter().zip(keys) {
-        build_one(doc, c, &id, kind, key, ops, new_id)?;
+        build_one(ctx, c, &id, kind, key, ops, new_id)?;
     }
     Ok(id)
 }
@@ -737,6 +764,39 @@ mod tests {
         assert_eq!(norm(json!({ "meta": null })).unwrap()["meta"], json!({}));
         assert!(norm(json!({ "meta": "x" })).is_err());
         assert!(norm(json!({ "meta": { "big": "x".repeat(70_000) } })).is_err());
+    }
+
+    #[test]
+    fn components_can_be_used_in_the_batch_that_makes_them() {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("b:{n}")
+        };
+        let spec = json!([
+            { "type": "frame", "name": "Library", "children": [
+                { "type": "component", "name": "Chip", "layout": "horizontal", "padding": 8, "children": [
+                    { "type": "text", "name": "Label", "text": "Chip" } ] } ] },
+            { "type": "frame", "name": "Screen", "layout": "vertical", "children": [
+                { "type": "instance", "component": "Chip", "text": "One" },
+                { "type": "instance", "component": "Chip", "overrides": { "Label": { "text": "Two" } } } ] }
+        ]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        crate::components::sync_all(&mut doc);
+        // Instance layers are derived: `ii~source` children.
+        let screen = doc.children(&top[1]).to_vec();
+        let texts: Vec<String> = screen
+            .iter()
+            .filter_map(|i| doc.children(i).iter().filter_map(|c| doc.get(c)).find(|c| c.kind == NodeType::Text).map(|c| c.characters.clone()))
+            .collect();
+        assert_eq!(texts, vec!["One", "Two"]);
+        // Used before it's made: a clear error.
+        let early = json!([{ "type": "instance", "component": "Badge" }, { "type": "component", "name": "Badge" }]);
+        let err = build_create_ops(&doc, "0:1", early.as_array().unwrap(), None, &mut || "x:1".into()).unwrap_err();
+        assert!(err.contains("must come before"), "{err}");
     }
 
     #[test]

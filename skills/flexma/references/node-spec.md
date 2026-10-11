@@ -152,6 +152,7 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
   - `text`: shorthand that overrides the component's first text layer.
   - `overrides`: `{ "<layer name or id>": { …props } }`. The key `""` targets the instance itself, though setting props directly on the instance does the same.
   - Any frame prop (`fill`, `radius`, `padding`, `layout`, …) set on the instance overrides the component's value. Unset props follow the component.
+  - `component` can name a component made earlier in the same batch.
   - An instance can't have `children`. Its layers come from the component, and their ids look like `<instanceId>~<componentLayerId>`. Nested instances use `I~N~S`.
 - **Editing.**
   - Updating a layer inside an instance stores an override; deleting one hides it.

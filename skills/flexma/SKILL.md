@@ -53,7 +53,7 @@ Anything that repeats (buttons, inputs, cards, nav items, list rows, avatars) sh
    - `text` overrides the component's first text layer.
    - For anything else, use `overrides: { "<layer name or id>": { color: "#fff", text: "…", visible: false } }`.
    - Instance-level styling like `fill` or `stroke` is also an override.
-   - Create the component in an earlier call than its instances, since instances look the component up by name or id.
+   - Instances look the component up by name or id. It can be made in the same `create_nodes` / `upload_nodes` batch, as long as it comes before its instances (e.g. a "Components" frame first, then the screens).
 3. **Customize one instance.** `update_nodes` works on an instance's inner layers through their ids from `get_file_tree` (they look like `instanceId~layerId`). These edits become overrides on that instance. Deleting an inner layer hides it.
 4. **Change all instances.** Edit the main component's layers. Overrides survive.
 5. **Discover existing ones.** Call `list_components` before building UI in an existing file, and reuse what's there. Call `detach_instance` only when a copy truly needs to diverge.
