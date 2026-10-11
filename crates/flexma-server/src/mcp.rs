@@ -241,6 +241,15 @@ fn tools() -> Value {
             },
             "required": ["file_id", "rows"]
         })),
+        tool("audit_design", "Audit a page or frame: the colors, type styles, spacing, radii and fonts it uses, plus problems to fix (near-duplicate colors, sizes off the type scale, spacing off the 4-pt grid, text failing WCAG AA contrast, text under 12 px, fonts missing from the workspace). Run it before editing an existing design to match its system, and after to check your work.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "node_id": { "type": "string", "description": "Page or layer to audit (default: the first page)" },
+                "json": { "type": "boolean", "description": "Return the full structured data instead of a summary" }
+            },
+            "required": ["file_id"]
+        })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
             "properties": { "file_id": file_id },
@@ -459,6 +468,7 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "audit_design" => self.audit_design(args).await,
             "fill_with_data" => self.fill_with_data(args).await,
             "import_svg" => self.import_svg(args).await,
             "search_icons" => self.search_icons(args).await,
@@ -816,6 +826,33 @@ impl Ctx {
         .await
         .map_err(err_msg)?
         .map(|v| text_result(v.as_str().unwrap_or_default()))
+    }
+
+    async fn audit_design(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let node = opt_s(args, "node_id").map(str::to_string);
+        let as_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+        let room = self.room(&fid, Role::Viewer).await?;
+        let f2 = fid.clone();
+        let mut available: Vec<String> = self.st.db.call(move |c| crate::fonts::families(c, &crate::fonts::file_workspace(c, &f2)?)).await.unwrap_or_default();
+        available.extend(crate::fonts::BUILTIN.iter().map(|s| s.to_string()));
+        let (audit, title) = room
+            .read(move |doc, _| -> Result<(flexma_doc::audit::Audit, String), String> {
+                let root = match node {
+                    Some(id) => id,
+                    None => doc.pages().first().cloned().ok_or("file has no pages")?,
+                };
+                let n = doc.get(&root).ok_or_else(|| format!("node '{root}' not found"))?;
+                let page = if n.kind == NodeType::Page { Some(root.clone()) } else { doc.page_of(&root) };
+                let bg = page.map(|p| render::page_background(doc, &p)).unwrap_or(flexma_doc::Color::WHITE);
+                Ok((flexma_doc::audit::audit(doc, &root, bg), format!("{} \"{}\" [{}]", n.kind.as_str(), n.name, n.id)))
+            })
+            .await
+            .map_err(err_msg)??;
+        if as_json {
+            return Ok(text_result(serde_json::to_string_pretty(&audit).unwrap_or_default()));
+        }
+        Ok(text_result(audit_report(&audit, &title, &available)))
     }
 
     async fn import_svg(&self, args: &Value) -> ToolResult {
@@ -1993,4 +2030,93 @@ fn template_copy_ops(
         }
     }
     Ok(ops)
+}
+
+// ---------------------------------------------------------------------------
+// audit_design report
+// ---------------------------------------------------------------------------
+
+fn audit_report(a: &flexma_doc::audit::Audit, title: &str, available: &[String]) -> String {
+    let num = |v: f64| fmt_num(v);
+    let ids = |v: &[String]| v.iter().map(|i| format!("[{i}]")).collect::<Vec<_>>().join(" ");
+    let mut out = format!(
+        "Design audit of {title}: {} visible layers, {} component{}, {} instance{}.\n\n",
+        a.layers,
+        a.components,
+        if a.components == 1 { "" } else { "s" },
+        a.instances,
+        if a.instances == 1 { "" } else { "s" }
+    );
+    let mut problems = 0;
+    let colors: Vec<String> = a.colors.iter().take(12).map(|(h, c, _)| format!("{h} ×{c}")).collect();
+    out.push_str(&format!("Colors ({} in use): {}{}\n", a.colors.len(), colors.join(", "), if a.colors.len() > 12 { ", …" } else { "" }));
+    if !a.near_duplicates.is_empty() {
+        problems += a.near_duplicates.len();
+        let pairs: Vec<String> = a.near_duplicates.iter().take(8).map(|(x, y)| format!("{x} ≈ {y}")).collect();
+        out.push_str(&format!("  ⚠ Near-duplicate colors (pick one of each): {}\n", pairs.join("; ")));
+    }
+    let styles: Vec<String> = a
+        .text_styles
+        .iter()
+        .take(10)
+        .map(|t| {
+            let lh = t.line_height.map(|l| format!("/{}", num(l))).unwrap_or_default();
+            format!("{} {}{lh} w{} ×{}", t.family, num(t.size), t.weight, t.uses)
+        })
+        .collect();
+    out.push_str(&format!("Type ({} styles): {}{}\n", a.text_styles.len(), styles.join(", "), if a.text_styles.len() > 10 { ", …" } else { "" }));
+    if !a.off_scale_sizes.is_empty() {
+        problems += a.off_scale_sizes.len();
+        let sizes: Vec<String> = a.off_scale_sizes.iter().map(|(s, i)| format!("{}px {}", num(*s), ids(i))).collect();
+        out.push_str(&format!("  ⚠ Font sizes off the type scale: {}\n", sizes.join("; ")));
+    }
+    let list = |v: &[(f64, usize)]| v.iter().take(8).map(|(x, c)| format!("{} ×{c}", num(*x))).collect::<Vec<_>>().join(", ");
+    if !a.gaps.is_empty() || !a.paddings.is_empty() {
+        out.push_str(&format!("Spacing: gaps {} · padding {}\n", if a.gaps.is_empty() { "none".into() } else { list(&a.gaps) }, if a.paddings.is_empty() { "none".into() } else { list(&a.paddings) }));
+    }
+    if !a.radii.is_empty() {
+        out.push_str(&format!("Radii: {}\n", list(&a.radii)));
+    }
+    if !a.off_grid.is_empty() {
+        problems += a.off_grid.len();
+        let items: Vec<String> = a.off_grid.iter().take(10).map(|o| format!("{} {} in \"{}\" [{}]", o.what, num(o.value), o.name, o.id)).collect();
+        out.push_str(&format!("  ⚠ Off the 4-pt grid: {}{}\n", items.join("; "), if a.off_grid.len() > 10 { "; …" } else { "" }));
+    }
+    if !a.fonts.is_empty() {
+        let fonts: Vec<String> = a
+            .fonts
+            .iter()
+            .map(|(f, c)| {
+                let known = available.iter().any(|x| x.eq_ignore_ascii_case(f));
+                let web_safe = crate::fonts::WEB_SAFE.iter().any(|x| x.eq_ignore_ascii_case(f));
+                if !known && !web_safe {
+                    problems += 1;
+                }
+                let tag = if known { "" } else if web_safe { " (system font, not in exports)" } else { " ⚠ not in the workspace" };
+                format!("{f}{tag} ×{c}")
+            })
+            .collect();
+        out.push_str(&format!("Fonts: {}\n", fonts.join(", ")));
+    }
+    if !a.contrast.is_empty() {
+        problems += a.contrast.len();
+        let items: Vec<String> = a
+            .contrast
+            .iter()
+            .take(10)
+            .map(|c| format!("\"{}\" [{}] {} on {} = {}:1 (needs {}:1)", c.name, c.id, c.fg, c.bg, num(c.ratio), num(c.required)))
+            .collect();
+        out.push_str(&format!("⚠ Text contrast below WCAG AA ({}): {}{}\n", a.contrast.len(), items.join("; "), if a.contrast.len() > 10 { "; …" } else { "" }));
+    }
+    if !a.small_text.is_empty() {
+        problems += a.small_text.len();
+        let shown: Vec<String> = a.small_text.iter().take(8).cloned().collect();
+        out.push_str(&format!("⚠ Text under 12px ({}): {}\n", a.small_text.len(), ids(&shown)));
+    }
+    out.push_str(&if problems == 0 {
+        "\nNo problems found. Reuse these colors, type styles and spacing values for new work.".to_string()
+    } else {
+        format!("\n{problems} thing(s) to look at. Reuse the most-used values above for new work and fix the ⚠ items with update_nodes.")
+    });
+    out
 }
