@@ -296,7 +296,7 @@ pub async fn export_png(
 ) -> AppResult<Response> {
     let fid = id.clone();
     st.db.call(move |c| file_access(c, &user.id, &fid, Role::Viewer)).await?;
-    export_png_response(&st, &id, q, 8192).await
+    export_png_response(&st, &id, q, st.cfg.max_export_px).await
 }
 
 /// Rasterizing is memory-hungry (up to 4 bytes per pixel), so only a few

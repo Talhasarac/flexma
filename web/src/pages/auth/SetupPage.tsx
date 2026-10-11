@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, errorMessage } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { useDocumentTitle } from '../../lib/useDocumentTitle';
@@ -12,8 +12,12 @@ export default function SetupPage() {
   const { user, setup, loading, setUser, refresh } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
+  const [params] = useSearchParams();
   useDocumentTitle('Set up Flexma');
 
+  // The setup link printed in the server log carries ?token=…
+  const linkToken = params.get('token') ?? '';
+  const [setupToken, setSetupToken] = useState(linkToken);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -35,7 +39,7 @@ export default function SetupPage() {
     setBusy(true);
     let created;
     try {
-      created = await api.auth.signup({ name: name.trim(), email: email.trim(), password });
+      created = await api.auth.signup({ name: name.trim(), email: email.trim(), password, setupToken: setupToken.trim() });
     } catch (err) {
       setError(errorMessage(err));
       setBusy(false);
@@ -60,6 +64,21 @@ export default function SetupPage() {
       subtitle="Let's set up this instance. You'll be its administrator, and can invite your team right after."
     >
       <form className="stack" onSubmit={onSubmit}>
+        {!linkToken && (
+          <Field
+            label="Setup token"
+            hint="Only the person running the server can set it up. Open the setup link from the server log (journalctl -u flexma, or docker compose logs flexma), or paste its token here."
+          >
+            <input
+              className="input input-lg"
+              value={setupToken}
+              onChange={(e) => setSetupToken(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              required
+            />
+          </Field>
+        )}
         <div className="form-section-label">Your admin account</div>
         <Field label="Name">
           <input

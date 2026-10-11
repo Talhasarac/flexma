@@ -66,6 +66,18 @@ async fn main() {
         Some(_) => usage(),
     }
 
+    let mut cfg = cfg;
+    let users: i64 = db
+        .call(|c| Ok(c.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?))
+        .await
+        .expect("cannot read users");
+    if users == 0 {
+        let token = cfg.setup_token.clone().unwrap_or_else(|| db::random_string(24));
+        let base = cfg.public_url.clone().unwrap_or_else(|| format!("http://{}", cfg.addr.replace("0.0.0.0", "localhost")));
+        tracing::warn!("no accounts yet; create the admin account at {base}/setup?token={token}");
+        cfg.setup_token = Some(token);
+    }
+
     let rooms = rooms::Rooms::new(db.clone());
     let state = state::AppState { cfg: Arc::new(cfg.clone()), db, rooms: rooms.clone() };
 

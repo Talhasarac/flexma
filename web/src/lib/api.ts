@@ -217,6 +217,8 @@ export interface SignupInput {
   name: string;
   password: string;
   inviteToken?: string;
+  /** Required for the first (admin) account; it's in the setup link from the server log. */
+  setupToken?: string;
 }
 
 export interface LoginInput {

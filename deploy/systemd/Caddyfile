@@ -1,0 +1,25 @@
+# /etc/caddy/Caddyfile for Flexma next to a service that already owns TCP 443
+# (e.g. OpenVPN Access Server). HTTPS is served on 8443; the certificate is
+# obtained over port 80 (HTTP-01), which must be reachable.
+{
+	https_port 8443
+}
+
+design.example.com {
+	tls {
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}
+	encode zstd gzip
+	# WebSockets (multiplayer) and MCP streaming are proxied transparently.
+	reverse_proxy 127.0.0.1:8080 {
+		flush_interval -1
+	}
+}
+
+# Port 80's automatic redirect would point at 443 (not ours), so send people
+# to 8443 explicitly. ACME challenges on port 80 still work.
+http://design.example.com {
+	redir https://design.example.com:8443{uri} permanent
+}

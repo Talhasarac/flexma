@@ -50,7 +50,7 @@ docker compose up -d --build
 The first build takes a while (Rust plus the web app). When it finishes:
 
 - Caddy gets a Let's Encrypt certificate automatically, and HTTP redirects to HTTPS.
-- Open `https://design.yourdomain.com`. The first visit shows **setup**, where you create the admin account and your first workspace.
+- Get the setup link from the log: `docker compose logs flexma | grep setup`. It looks like `https://design.yourdomain.com/setup?token=…`. Open it to create the admin account and your first workspace. The token stops strangers from claiming a fresh instance; it's only needed until the first account exists, and a new one is printed on every restart until then. To choose it yourself, set `FLEXMA_SETUP_TOKEN`.
 - Invite teammates from **Workspace settings → Invite people**. The invite link is the only way in unless you set `FLEXMA_ALLOW_SIGNUP=true`.
 
 ## 6. Connect Claude Code and Codex (remote MCP)
@@ -125,3 +125,27 @@ Flexma is a single binary plus a static web folder. Build it with:
 Then run `FLEXMA_PUBLIC_URL=https://… FLEXMA_WEB_DIR=web/dist FLEXMA_DATA_DIR=/var/lib/flexma ./target/release/flexma` behind any reverse proxy that supports WebSockets (Caddy, nginx, Traefik).
 
 The proxy must pass `Host` (or `X-Forwarded-Host`) and `X-Forwarded-Proto`, or you must set `FLEXMA_PUBLIC_URL`. The OAuth and MCP URLs are built from these.
+
+### As a systemd service next to other software (e.g. a VPN)
+
+`deploy/systemd/` has a ready setup that doesn't touch the firewall or Docker's
+iptables rules, so it can share a small droplet with something like OpenVPN:
+
+- `flexma.service` runs Flexma as its own user on `127.0.0.1:8080`, capped at
+  350 MB of memory and first in line for the OOM killer, so it can't starve
+  the other services.
+- `flexma.env.example` goes to `/etc/flexma/flexma.env`. Set `FLEXMA_PUBLIC_URL`, and
+  keep `FLEXMA_MAX_EXPORT_PX=4096` on 1 GB servers.
+- `Caddyfile` serves HTTPS on port **8443** for when something else already owns 443
+  (OpenVPN Access Server does). The certificate comes over port 80, which must be free.
+
+You can build the Linux binary on a Mac instead of the server:
+
+```bash
+brew install zig && cargo install cargo-zigbuild && rustup target add x86_64-unknown-linux-gnu
+cargo zigbuild --release -p flexma-server --target x86_64-unknown-linux-gnu.2.31
+```
+
+Then copy `target/x86_64-unknown-linux-gnu/release/flexma` to `/opt/flexma/flexma` and `web/dist/` to `/opt/flexma/web/`, and run
+`systemctl enable --now flexma`. The setup link is in `journalctl -u flexma | grep setup`.
+

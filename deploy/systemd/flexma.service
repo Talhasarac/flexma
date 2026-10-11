@@ -1,0 +1,39 @@
+# Flexma as a plain systemd service (no Docker), e.g. on a small VPS that
+# already runs other things. Install: see docs/deploy-digitalocean.md.
+[Unit]
+Description=Flexma design server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=flexma
+Group=flexma
+EnvironmentFile=/etc/flexma/flexma.env
+ExecStart=/opt/flexma/flexma
+WorkingDirectory=/var/lib/flexma
+StateDirectory=flexma
+Restart=always
+RestartSec=2
+
+# Be a good neighbour on a small server: cap memory, and make Flexma the
+# first thing the OOM killer picks instead of other services.
+MemoryHigh=280M
+MemoryMax=350M
+OOMScoreAdjust=500
+Nice=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/flexma
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,13 @@ pub struct Config {
     pub max_upload_bytes: usize,
     /// Mark the session cookie `Secure` (set when serving over HTTPS).
     pub secure_cookies: bool,
+    /// Required to create the first (admin) account, so a fresh public
+    /// instance can't be claimed by whoever finds it first. Taken from
+    /// `FLEXMA_SETUP_TOKEN`, or generated at startup and logged.
+    pub setup_token: Option<String>,
+    /// Longest side of a PNG export, px. Each render needs about 4 bytes per
+    /// pixel, so lower it on small servers.
+    pub max_export_px: u32,
 }
 
 fn env(key: &str) -> Option<String> {
@@ -49,6 +56,8 @@ impl Config {
                 * 1024
                 * 1024,
             secure_cookies: env_bool("FLEXMA_SECURE_COOKIES", secure_default),
+            setup_token: env("FLEXMA_SETUP_TOKEN"),
+            max_export_px: env("FLEXMA_MAX_EXPORT_PX").and_then(|v| v.parse().ok()).unwrap_or(8192).clamp(256, 16384),
         }
     }
 }

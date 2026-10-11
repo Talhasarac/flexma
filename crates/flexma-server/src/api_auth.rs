@@ -31,6 +31,13 @@ pub struct SignupReq {
     password: String,
     invite_token: Option<String>,
     workspace_name: Option<String>,
+    /// Required for the first account (see `Config::setup_token`).
+    setup_token: Option<String>,
+}
+
+/// Constant-time string comparison for secrets.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn valid_email(e: &str) -> bool {
@@ -58,12 +65,22 @@ pub async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> A
     let allow = crate::api_admin::allow_signup(&st).await;
     let invite = req.invite_token.clone();
     let ws_name = req.workspace_name.clone();
+    let setup_ok = match (&st.cfg.setup_token, &req.setup_token) {
+        (None, _) => true,
+        (Some(expected), Some(given)) => same_secret(expected, given.trim()),
+        (Some(_), None) => false,
+    };
     let user = st
         .db
         .call(move |c| {
             let tx = c.transaction()?;
             let users: i64 = tx.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
             let first = users == 0;
+            if first && !setup_ok {
+                return Err(AppError::forbidden(
+                    "this setup link is missing or has the wrong setup token; open the link printed in the server log",
+                ));
+            }
             let invite_row: Option<(String, String)> = match &invite {
                 Some(t) => tx
                     .query_row(

@@ -197,7 +197,7 @@ pub async fn export_png(State(st): State<AppState>, Path(token): Path<String>, Q
     let t = token.clone();
     let (file_id, _) = st.db.call(move |c| resolve(c, &t)).await?;
     // Public links get a smaller size cap than members.
-    export_png_response(&st, &file_id, q, 4096).await
+    export_png_response(&st, &file_id, q, st.cfg.max_export_px.min(4096)).await
 }
 
 /// Public preview image (e.g. for link unfurls).
