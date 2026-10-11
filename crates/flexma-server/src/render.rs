@@ -305,7 +305,43 @@ pub fn base_fontdb() -> Arc<FontDb> {
 }
 
 /// Rasterize SVG to PNG at `scale`, clamped so the longest side is ≤ `max_dim`.
+/// Put a render over a grey checkerboard, so transparent areas (and white
+/// content on them) show, like design tools draw transparency.
+pub fn over_checkerboard(pm: &resvg::tiny_skia::Pixmap) -> resvg::tiny_skia::Pixmap {
+    const CELL: u32 = 8;
+    let (w, h) = (pm.width(), pm.height());
+    let mut out = resvg::tiny_skia::Pixmap::new(w, h).unwrap_or_else(|| pm.clone());
+    // Mid greys, so both white and dark content stand out.
+    let (light, dark) = (resvg::tiny_skia::PremultipliedColorU8::from_rgba(196, 196, 202, 255).unwrap(), resvg::tiny_skia::PremultipliedColorU8::from_rgba(150, 150, 158, 255).unwrap());
+    for (i, px) in out.pixels_mut().iter_mut().enumerate() {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        *px = if (x / CELL + y / CELL) % 2 == 0 { light } else { dark };
+    }
+    out.draw_pixmap(0, 0, pm.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), resvg::tiny_skia::Transform::identity(), None);
+    out
+}
+
+/// Whether a screenshot of this node should show transparency as a
+/// checkerboard: it isn't a page and has no opaque solid fill of its own.
+pub fn wants_checkerboard(doc: &Document, ids: &[NodeId]) -> bool {
+    let [id] = ids else { return false };
+    let Some(n) = doc.get(id) else { return false };
+    if matches!(n.kind, flexma_doc::NodeType::Page | flexma_doc::NodeType::Document) {
+        return false;
+    }
+    let opaque = !n.hide_fill
+        && n.opacity >= 0.999
+        && n.fills.iter().any(|p| matches!(p, flexma_doc::Paint::Solid { color, opacity, visible: true } if color.a * opacity >= 0.999));
+    !opaque
+}
+
 pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool) -> Result<(Vec<u8>, u32, u32), String> {
+    svg_to_png_on(svg, scale, max_dim, fonts, linear, false)
+}
+
+/// `svg_to_png`, optionally over a checkerboard (agent screenshots of
+/// transparent layers).
+pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, checker: bool) -> Result<(Vec<u8>, u32, u32), String> {
     let mut opt = resvg::usvg::Options::default();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
@@ -323,6 +359,9 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linea
     if linear {
         encode_linear(&mut pixmap);
     }
+    if checker {
+        pixmap = over_checkerboard(&pixmap);
+    }
     let png = pixmap.encode_png().map_err(|e| e.to_string())?;
     Ok((png, w, h))
 }
@@ -330,13 +369,13 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linea
 /// One image of several renders in a labelled grid (a contact sheet), so an
 /// agent can compare screens at a glance. `tiles` are (label, svg). Returns
 /// the PNG, its size and each tile's rect in it.
-pub fn contact_sheet(tiles: &[(String, String, bool)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
+pub fn contact_sheet(tiles: &[(String, String, bool, bool)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
     const PAD: f32 = 16.0;
     const LABEL: f32 = 22.0;
     let mut opt = resvg::usvg::Options::default();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
-    let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg, _)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+    let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg, _, _)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
     if trees.is_empty() {
         return Err("nothing to render".into());
     }
@@ -347,7 +386,7 @@ pub fn contact_sheet(tiles: &[(String, String, bool)], scale: f32, max_dim: u32,
         let sizes: Vec<(f32, f32)> = trees
             .iter()
             .zip(tiles)
-            .map(|(t, (label, _, _))| ((t.size().width() * s).max(label.chars().take(80).count() as f32 * 7.2 + 8.0), t.size().height() * s))
+            .map(|(t, (label, _, _, _))| ((t.size().width() * s).max(label.chars().take(80).count() as f32 * 7.2 + 8.0), t.size().height() * s))
             .collect();
         let area: f32 = sizes.iter().map(|(w, h)| (w + PAD) * (h + LABEL + PAD)).sum();
         let widest = sizes.iter().map(|z| z.0).fold(0.0, f32::max);
@@ -382,13 +421,16 @@ pub fn contact_sheet(tiles: &[(String, String, bool)], scale: f32, max_dim: u32,
     pm.fill(resvg::tiny_skia::Color::from_rgba8(232, 233, 237, 255));
     let mut rects = Vec::new();
     let mut labels = String::new();
-    for ((tree, (label, _, linear)), (x, y)) in trees.iter().zip(tiles).zip(pos) {
+    for ((tree, (label, _, linear, checker)), (x, y)) in trees.iter().zip(tiles).zip(pos) {
         let tw = ((tree.size().width() * s).ceil() as u32).max(1);
         let th = ((tree.size().height() * s).ceil() as u32).max(1);
         let mut tile = resvg::tiny_skia::Pixmap::new(tw, th).ok_or("image too large")?;
         resvg::render(tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut tile.as_mut());
         if *linear {
             encode_linear(&mut tile);
+        }
+        if *checker {
+            tile = over_checkerboard(&tile);
         }
         let ty = (y + LABEL).round() as i32;
         pm.draw_pixmap(x.round() as i32, ty, tile.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), resvg::tiny_skia::Transform::identity(), None);
@@ -1011,5 +1053,39 @@ mod nested_clip_tests {
             assert_eq!(at(80.0, 1010.0), (200, 0, 0), "{root}: the bar's caps draw");
             assert_eq!(at(960.0, 1010.0), (200, 0, 0), "{root}: the bar's stretched middle draws");
         }
+    }
+}
+
+#[cfg(test)]
+mod checker_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType, Op, Paint};
+
+    #[test]
+    fn transparent_layers_get_a_checkerboard() {
+        let mut doc = Document::new_empty();
+        let mut comp = Node::new("c:1", NodeType::Component);
+        comp.parent = Some("0:1".into());
+        comp.fills = vec![];
+        doc.apply(&Op::Create { node: comp }).unwrap();
+        let mut card = Node::new("f:1", NodeType::Frame);
+        card.parent = Some("0:1".into());
+        card.fills = vec![Paint::solid(flexma_doc::Color::parse("#223344").unwrap())];
+        doc.apply(&Op::Create { node: card }).unwrap();
+        assert!(wants_checkerboard(&doc, &["c:1".to_string()]), "no fill: checkerboard");
+        assert!(!wants_checkerboard(&doc, &["f:1".to_string()]), "opaque fill: plain");
+        assert!(!wants_checkerboard(&doc, &["0:1".to_string()]), "pages keep their color");
+        // Transparent pixels become the grid; opaque ones stay.
+        let mut pm = resvg::tiny_skia::Pixmap::new(32, 8).unwrap();
+        for x in 16..32 {
+            for y in 0..8 {
+                let i = (y * 32 + x) as usize;
+                pm.pixels_mut()[i] = resvg::tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap();
+            }
+        }
+        let out = over_checkerboard(&pm);
+        let px = |x: u32, y: u32| out.pixel(x, y).unwrap();
+        assert_eq!((px(1, 1).red(), px(9, 1).red()), (196, 150), "alternating cells");
+        assert_eq!((px(20, 1).red(), px(20, 1).green()), (255, 0), "content on top");
     }
 }

@@ -1462,18 +1462,20 @@ impl Ctx {
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
-        let (svg, bounds, linear) = room
+        let (svg, bounds, linear, checker) = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
-                let bg = bg.or(Some(flexma_doc::Color::WHITE));
                 let linear = render::linear_for(doc, &ids);
+                // Layers without an opaque fill show transparency as a checkerboard.
+                let checker = render::wants_checkerboard(doc, &ids);
+                let bg = if checker { None } else { bg.or(Some(flexma_doc::Color::WHITE)) };
                 render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
-                    .map(|(s, b)| (s, b, linear))
+                    .map(|(s, b)| (s, b, linear, checker))
                     .ok_or_else(|| "nothing to render".to_string())
             })
             .await
             .map_err(err_msg)??;
-        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, 1600, fonts, linear))
+        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png_on(&svg, scale, 1600, fonts, linear, checker))
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;
@@ -1484,7 +1486,7 @@ impl Ctx {
                 { "type": "text", "text": format!(
                     "Rendered {}×{} px of canvas area x={} y={} w={} h={}, with the workspace's fonts. Line breaks can differ slightly from the browser editor, which is the source of truth.{}",
                     w, h, fmt_num(bounds.x), fmt_num(bounds.y), fmt_num(bounds.width), fmt_num(bounds.height),
-                    if whole_page { " No node_id, node_ids or page_id was given, so this is the whole first page." } else { "" }
+                    if whole_page { " No node_id, node_ids or page_id was given, so this is the whole first page." } else if checker { " Transparent areas show as a checkerboard." } else { "" }
                 ) }
             ]
         }))
@@ -1503,27 +1505,30 @@ impl Ctx {
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
-        let tiles: Vec<(String, String, String, bool)> = room
+        let tiles: Vec<(String, String, String, bool, bool)> = room
             .read(move |doc, _| {
                 let mut out = Vec::new();
                 for id in &ids {
                     let n = doc.get(id).ok_or_else(|| format!("node '{id}' not found"))?;
-                    let (svg, _) = render::export_svg(doc, std::slice::from_ref(id), Some(flexma_doc::Color::WHITE), render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
+                    let one = std::slice::from_ref(id);
+                    let checker = render::wants_checkerboard(doc, one);
+                    let bg = if checker { None } else { Some(flexma_doc::Color::WHITE) };
+                    let (svg, _) = render::export_svg(doc, one, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
                         .ok_or_else(|| format!("nothing to render for '{id}'"))?;
-                    out.push((id.clone(), n.name.clone(), svg, render::linear_for(doc, std::slice::from_ref(id))));
+                    out.push((id.clone(), n.name.clone(), svg, render::linear_for(doc, one), checker));
                 }
                 Ok::<_, String>(out)
             })
             .await
             .map_err(err_msg)??;
-        let labelled: Vec<(String, String, bool)> = tiles.iter().map(|(id, name, svg, linear)| (format!("{name} [{id}]"), svg.clone(), *linear)).collect();
+        let labelled: Vec<(String, String, bool, bool)> = tiles.iter().map(|(id, name, svg, linear, checker)| (format!("{name} [{id}]"), svg.clone(), *linear, *checker)).collect();
         let (png, w, h, rects) = tokio::task::spawn_blocking(move || render::contact_sheet(&labelled, scale, 2400, fonts))
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         let mut text = format!("Contact sheet {w}×{h} px, {} node(s), each under its name:\n", tiles.len());
-        for ((id, name, _, _), r) in tiles.iter().zip(&rects) {
+        for ((id, name, _, _, _), r) in tiles.iter().zip(&rects) {
             text.push_str(&format!("\"{name}\" [{id}] at x={} y={} ({}×{} px)\n", r[0], r[1], r[2], r[3]));
         }
         Ok(json!({ "content": [{ "type": "image", "data": data, "mimeType": "image/png" }, { "type": "text", "text": text }] }))
