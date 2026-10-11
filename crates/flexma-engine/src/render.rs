@@ -268,6 +268,7 @@ fn text_content_hash(n: &Node) -> u64 {
     f(n.height).hash(&mut h);
     format!("{:?}{:?}{:?}{:?}{:?}", n.text_align, n.text_align_vertical, n.text_auto_resize, n.text_decoration, n.text_overflow).hash(&mut h);
     n.text_wrap.hash(&mut h);
+    n.auto_font_size.map(|r| (f(r.min), f(r.max))).hash(&mut h);
     n.line_height.map(f).hash(&mut h);
     f(n.letter_spacing).hash(&mut h);
     let c = text_color(n);

@@ -593,7 +593,35 @@ function TextSection({ sel, set, begin, end, store, readOnly }: SectionProps & {
           </label>
         </div>
       )}
+      {common(sel, (n) => n.textAutoResize) === 'NONE' && <AutoFontSize sel={sel} set={set} begin={begin} end={end} readOnly={readOnly} />}
     </Section>
+  );
+}
+
+/** Auto size: a fixed text box shrinks its font within a range to fit (TextMeshPro's Auto Size). */
+function AutoFontSize({ sel, set, begin, end, readOnly }: SectionProps & { readOnly: boolean }) {
+  const range = common(sel, (n) => n.autoFontSize ?? null);
+  const r = range === 'mixed' ? null : range;
+  const size = common(sel, (n) => n.fontSize);
+  const base = typeof size === 'number' ? size : 16;
+  return (
+    <>
+      <label className="check" title="Shrink the font to fit the box">
+        <input
+          type="checkbox"
+          checked={!!r}
+          onChange={(e) => set({ autoFontSize: e.target.checked ? { min: Math.max(1, Math.round(base / 2)), max: base } : null })}
+          disabled={readOnly}
+        />
+        Auto size
+      </label>
+      {r && (
+        <div className="grid2">
+          <NumberInput label="Min" title="Smallest font size" value={r.min} min={1} onChange={(v) => set({ autoFontSize: { ...r, min: Math.min(v, r.max) } })} onScrubStart={begin} onScrubEnd={end} disabled={readOnly} />
+          <NumberInput label="Max" title="Largest font size" value={r.max} min={1} onChange={(v) => set({ autoFontSize: { ...r, max: Math.max(v, r.min) } })} onScrubStart={begin} onScrubEnd={end} disabled={readOnly} />
+        </div>
+      )}
+    </>
   );
 }
 

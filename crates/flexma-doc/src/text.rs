@@ -3,6 +3,7 @@
 
 use crate::node::Node;
 use crate::paint::{TextAutoResize, TextOverflow};
+use std::borrow::Cow;
 
 /// Break `text` into lines. Hard newlines always break; when `max_width` is set,
 /// words wrap greedily (very long words are split by character).
@@ -73,6 +74,56 @@ pub fn layout_lines(n: &Node, measure: &mut dyn FnMut(&str) -> f64) -> Vec<Strin
         }
     }
     lines
+}
+
+/// The node as drawn. With `autoFontSize`, a fixed box uses the largest font
+/// size in the range at which the text fits, like TextMeshPro's Auto Size:
+/// every line fits the height, and no word is wider than the box (or, without
+/// wrapping, no line). Line height and letter spacing scale with it. `measure`
+/// measures at the node's own font size.
+pub fn fitted<'a>(n: &'a Node, measure: &mut dyn FnMut(&str) -> f64) -> Cow<'a, Node> {
+    let Some(range) = n.auto_font_size else { return Cow::Borrowed(n) };
+    if n.text_auto_resize != TextAutoResize::None || n.font_size <= 0.0 {
+        return Cow::Borrowed(n);
+    }
+    let (lo, hi) = (range.min.max(1.0).min(range.max), range.max.max(1.0));
+    let base = n.font_size;
+    let lh = n.effective_line_height();
+    // Text scales linearly with the font size, so test size s by laying out
+    // at the base size in a box shrunk by s / base.
+    let widest_word = if n.text_wrap { n.characters.split_whitespace().map(|w| measure(w)).fold(0.0, f64::max) } else { 0.0 };
+    let mut fits = |s: f64| {
+        let k = s / base;
+        let w = n.width / k + 0.01;
+        let lines = wrap_lines(&n.characters, n.text_wrap.then_some(w), measure);
+        let tall_ok = lines.len().max(1) as f64 * lh * k <= n.height + 0.01;
+        let wide_ok = if n.text_wrap { widest_word <= w } else { lines.iter().all(|l| measure(l) <= w) };
+        tall_ok && wide_ok
+    };
+    let size = if fits(hi) {
+        hi
+    } else {
+        let (mut a, mut b) = (lo, hi);
+        for _ in 0..14 {
+            let mid = (a + b) / 2.0;
+            if fits(mid) {
+                a = mid;
+            } else {
+                b = mid;
+            }
+        }
+        (a * 10.0).floor() / 10.0
+    };
+    if (size - base).abs() < 1e-6 {
+        return Cow::Borrowed(n);
+    }
+    let k = size / base;
+    let mut out = n.clone();
+    out.auto_font_size = None;
+    out.font_size = size;
+    out.line_height = n.line_height.map(|v| v * k);
+    out.letter_spacing = n.letter_spacing * k;
+    Cow::Owned(out)
 }
 
 /// Drop characters from the end of `line` until it fits `max_w` with `mark`
@@ -147,6 +198,7 @@ pub fn fit_box(n: &mut Node) {
 }
 
 pub fn estimate_layout(n: &Node) -> (Vec<String>, f64, f64) {
+    let n = &*fitted(n, &mut |s: &str| estimate_width(s, n.font_size, n.letter_spacing, n.font_weight));
     let mut measure = |s: &str| estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);
     let lines = layout_lines(n, &mut measure);
     let lh = n.effective_line_height();
@@ -174,6 +226,29 @@ mod tests {
         assert_eq!(lines, vec!["a", "", "b"]);
         let lines = wrap_lines("abcdefgh", Some(3.0), &mut m);
         assert_eq!(lines, vec!["abc", "def", "gh"]);
+    }
+
+    #[test]
+    fn auto_font_size_shrinks_to_fit() {
+        // 1 unit per char at size 10: widths scale with the size.
+        let mut n = Node { characters: "aaaa bbbb cccc dddd".into(), width: 30.0, height: 24.0, font_size: 10.0, line_height: Some(12.0), ..Node::default() };
+        n.text_auto_resize = TextAutoResize::None;
+        n.auto_font_size = Some(crate::paint::FontSizeRange { min: 4.0, max: 20.0 });
+        let mut m = |s: &str| s.chars().count() as f64;
+        // One line of 19 chars fits 30 wide up to size 15.79 (two lines would
+        // need size 10 to fit 24 tall).
+        let f = fitted(&n, &mut m);
+        assert!((f.font_size - 15.7).abs() < 0.05, "{}", f.font_size);
+        assert!((f.line_height.unwrap() - 12.0 * f.font_size / 10.0).abs() < 1e-9);
+        // Plenty of room: the max size.
+        n.characters = "ab".into();
+        assert_eq!(fitted(&n, &mut m).font_size, 20.0);
+        // Never below the min: one 78-char word is 31.2 wide even at size 4.
+        n.characters = "abcdefghijklmnopqrstuvwxyz".repeat(3);
+        assert_eq!(fitted(&n, &mut m).font_size, 4.0);
+        // Only fixed boxes auto-size.
+        n.text_auto_resize = TextAutoResize::Height;
+        assert_eq!(fitted(&n, &mut m).font_size, 10.0);
     }
 
     #[test]

@@ -132,11 +132,12 @@ Sizing rules:
 | `textStyle` | Link to a shared text style by name or id (sets font, size, weight, line height, letter spacing); null detaches. |
 | `textAutoResize` | `WIDTH_AND_HEIGHT` (default: grows with the text), `HEIGHT` (fixed width, wraps; the default once you give a width), `NONE` (fixed box) |
 | `wrap` / `textWrap` | Default true. `false`: only `\n` breaks lines, and long lines run past the box width (TextMeshPro's word wrapping off). |
+| `autoSize` / `autoFontSize` | `[min, max]` or `{min, max}`: a fixed box draws its text at the largest size in the range that fits, like TextMeshPro's Auto Size. Line height and letter spacing scale along; `size` stays as set. `false` turns it off. |
 | `overflow` / `textOverflow` | What happens to text that doesn't fit a fixed box: `VISIBLE` (default, draws past it), `CLIP` (cut at the box edges, TMP Masking), `ELLIPSIS` (drops what doesn't fit and ends with "…") or `TRUNCATE` (the same without "…"). |
 
 For paragraphs, give the text a width (a number, or `"fill"` inside auto layout) so it wraps.
 
-For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `overflow` mode, which makes it `NONE` (fixed) unless you set `textAutoResize` yourself:
+For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `overflow` mode or `autoSize`, which makes it `NONE` (fixed) unless you set `textAutoResize` yourself:
 
 ```json
 { "type": "text", "text": "A long item name that won't fit", "width": 160, "height": 22, "wrap": false, "overflow": "ellipsis" }

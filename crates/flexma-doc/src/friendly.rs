@@ -222,6 +222,15 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                     out.insert("clipsContent".into(), v.clone());
                 }
             },
+            "autoSize" | "autoFontSize" | "fontSizeRange" => {
+                let range = match v {
+                    Value::Null | Value::Bool(false) => Value::Null,
+                    Value::Array(a) if a.len() == 2 && a.iter().all(Value::is_number) => json!({ "min": a[0], "max": a[1] }),
+                    Value::Object(o) if o.get("min").is_some_and(Value::is_number) && o.get("max").is_some_and(Value::is_number) => json!({ "min": o["min"], "max": o["max"] }),
+                    _ => return Err(format!("'{k}' must be {{\"min\": n, \"max\": n}}, [min, max] or false")),
+                };
+                out.insert("autoFontSize".into(), range);
+            }
             "wrap" | "textWrap" | "wordWrap" => {
                 out.insert("textWrap".into(), v.clone());
             }
@@ -592,9 +601,9 @@ fn build_one(
         if node.layout_sizing_horizontal == crate::paint::SizingMode::Fill && !obj.contains_key("textAutoResize") {
             node.text_auto_resize = crate::paint::TextAutoResize::Height;
         }
-        // An overflow mode with a given height means a fixed box.
+        // An overflow mode or auto size with a given height means a fixed box.
         let given_h = obj.contains_key("height") || obj.contains_key("h");
-        if node.text_overflow != crate::paint::TextOverflow::Visible && given_h && !obj.contains_key("textAutoResize") {
+        if (node.text_overflow != crate::paint::TextOverflow::Visible || node.auto_font_size.is_some()) && given_h && !obj.contains_key("textAutoResize") {
             node.text_auto_resize = crate::paint::TextAutoResize::None;
         }
         let (_, w, h) = crate::text::estimate_layout(&node);
@@ -704,6 +713,8 @@ mod tests {
         assert_eq!(norm(NodeType::Text, json!({ "overflow": "masking" })).unwrap()["textOverflow"], json!("CLIP"));
         assert_eq!(norm(NodeType::Frame, json!({ "overflow": "hidden" })).unwrap()["clipsContent"], json!(true));
         assert!(norm(NodeType::Text, json!({ "overflow": "scroll" })).is_err());
+        assert_eq!(norm(NodeType::Text, json!({ "autoSize": [10, 24] })).unwrap()["autoFontSize"], json!({ "min": 10, "max": 24 }));
+        assert!(norm(NodeType::Text, json!({ "autoSize": true })).is_err());
     }
 
     #[test]

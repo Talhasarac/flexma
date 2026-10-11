@@ -500,6 +500,14 @@ pub enum TextOverflow {
     Truncate,
 }
 
+/// A font size range for text that shrinks to fit its box (TextMeshPro's
+/// Auto Size).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FontSizeRange {
+    pub min: f64,
+    pub max: f64,
+}
+
 /// What a STYLE node holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

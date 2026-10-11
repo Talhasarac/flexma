@@ -226,6 +226,9 @@ define_node! {
     text_wrap: bool = true => "textWrap",
     /// What happens to text that doesn't fit a fixed box.
     text_overflow: TextOverflow = TextOverflow::Visible => "textOverflow",
+    /// Fixed boxes: draw at the largest font size in this range that fits
+    /// (line height and letter spacing scale along). `fontSize` stays as set.
+    auto_font_size: Option<FontSizeRange> = None => "autoFontSize",
     text_decoration: Option<String> = None => "textDecoration",
     /// Set when the text box size is an estimate (e.g. created via MCP); the first
     /// editor that renders it measures it properly and clears the flag.

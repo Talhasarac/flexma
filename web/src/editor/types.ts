@@ -166,6 +166,8 @@ export interface NodeData {
   hideFill: boolean;
   textWrap: boolean;
   textOverflow: 'VISIBLE' | 'CLIP' | 'ELLIPSIS' | 'TRUNCATE';
+  /** Fixed boxes: shrink the font within this range to fit. */
+  autoFontSize?: { min: number; max: number } | null;
   characters: string;
   fontFamily: string;
   fontSize: number;

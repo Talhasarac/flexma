@@ -605,6 +605,11 @@ impl Writer<'_> {
     }
 
     fn text(&mut self, n: &Node) {
+        let fitted = match self.opts.measure_text {
+            Some(m) => crate::text::fitted(n, &mut |s| m(n, s)),
+            None => crate::text::fitted(n, &mut |s| crate::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight)),
+        };
+        let n: &Node = &fitted;
         let lines = match self.opts.measure_text {
             Some(m) => crate::text::layout_lines(n, &mut |s| m(n, s)),
             None => crate::text::estimate_layout(n).0,

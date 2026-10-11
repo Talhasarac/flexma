@@ -1438,6 +1438,11 @@ impl Editor {
         let m = self.scene.world_of(&id);
         let p = self.cam.to_screen(m.apply(Vec2::ZERO));
         let c = crate::text::text_color(n);
+        // Edit at the size it's drawn at.
+        let n = match self.text.as_mut() {
+            Some(t) => t.fitted(n),
+            None => std::borrow::Cow::Borrowed(n),
+        };
         json!({
             "id": id,
             "x": p.x, "y": p.y,

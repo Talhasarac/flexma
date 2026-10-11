@@ -197,7 +197,15 @@ impl TextEngine {
     }
 
     /// Draw the node's text into the shared canvas at `scale` device px per unit.
+    /// The node as drawn (auto font size applied).
+    pub fn fitted<'a>(&mut self, n: &'a Node) -> std::borrow::Cow<'a, Node> {
+        let mut m = |s: &str| self.measure(n, s);
+        flexma_doc::text::fitted(n, &mut m)
+    }
+
     pub fn rasterize(&mut self, n: &Node, mut scale: f64, max_px: u32) -> Option<Raster> {
+        let fitted = self.fitted(n);
+        let n: &Node = &fitted;
         let w = n.width.max(1.0);
         let h = n.height.max(1.0);
         let stroke = text_stroke(n);
