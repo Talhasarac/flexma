@@ -1,0 +1,7 @@
+{$FLEXMA_DOMAIN} {
+	encode zstd gzip
+	# WebSockets (multiplayer) and MCP streaming are proxied transparently.
+	reverse_proxy flexma:8080 {
+		flush_interval -1
+	}
+}

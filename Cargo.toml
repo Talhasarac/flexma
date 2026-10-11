@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/flexma-doc", "crates/flexma-engine", "crates/flexma-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/flexma/flexma"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# The wasm engine is built with its own size-tuned profile (see scripts/build-wasm.sh).
+[profile.wasm-release]
+inherits = "release"
+opt-level = 3
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,38 @@
+# Self-host Flexma with automatic HTTPS (Caddy + Let's Encrypt).
+#   1. Point a DNS A record (e.g. design.example.com) at this machine.
+#   2. cp .env.example .env  and set FLEXMA_DOMAIN.
+#   3. docker compose up -d --build
+services:
+  flexma:
+    build: .
+    image: flexma:latest
+    restart: unless-stopped
+    environment:
+      FLEXMA_PUBLIC_URL: https://${FLEXMA_DOMAIN:?set FLEXMA_DOMAIN in .env}
+      FLEXMA_ALLOW_SIGNUP: ${FLEXMA_ALLOW_SIGNUP:-false}
+      FLEXMA_INSTANCE_NAME: ${FLEXMA_INSTANCE_NAME:-Flexma}
+    volumes:
+      - flexma-data:/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - flexma
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      FLEXMA_DOMAIN: ${FLEXMA_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  flexma-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,211 @@
+//! Flexma server: a self-hosted collaborative design tool.
+//!
+//! Serves the web app, the JSON API (`/api`), real-time multiplayer sockets and
+//! an MCP endpoint (`/mcp`) so Claude Code, Codex and other agents can design
+//! alongside people.
+
+mod api_admin;
+mod api_auth;
+mod api_comments;
+mod api_files;
+mod api_tokens;
+mod api_versions;
+mod api_workspaces;
+mod auth;
+mod config;
+mod db;
+mod error;
+mod mcp;
+mod oauth;
+mod render;
+mod rooms;
+mod state;
+mod ws;
+
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::{header, HeaderValue};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{delete, get, patch, post};
+use axum::Router;
+use std::sync::Arc;
+use tower_http::compression::CompressionLayer;
+use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
+
+fn usage() -> ! {
+    eprintln!(
+        "flexma {}\n\nUSAGE:\n  flexma                       run the server\n  flexma reset-password EMAIL  set a new password for a user (prompts on stdin)\n\nENVIRONMENT:\n  FLEXMA_ADDR            listen address (default 0.0.0.0:8080)\n  FLEXMA_DATA_DIR        database + uploads (default ./data)\n  FLEXMA_WEB_DIR         built web app (default ./web/dist)\n  FLEXMA_PUBLIC_URL      public base URL, e.g. https://design.example.com\n  FLEXMA_ALLOW_SIGNUP    allow open sign-up (default false: invite-only after the first admin)\n  FLEXMA_INSTANCE_NAME   name shown on the login page\n  FLEXMA_MAX_UPLOAD_MB   image upload limit (default 25)\n  FLEXMA_FONTS_DIR       extra fonts for server-side PNG rendering",
+        env!("CARGO_PKG_VERSION")
+    );
+    std::process::exit(2)
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "flexma=info,tower_http=warn".into()),
+        )
+        .init();
+
+    let cfg = config::Config::from_env();
+    std::fs::create_dir_all(cfg.data_dir.join("assets")).expect("cannot create data directory");
+    let db = db::Db::open(&cfg.data_dir.join("flexma.db")).expect("cannot open database");
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => {}
+        Some("reset-password") => {
+            let email = args.get(1).cloned().unwrap_or_else(|| usage());
+            reset_password(&db, &email).await;
+            return;
+        }
+        Some(_) => usage(),
+    }
+
+    let rooms = rooms::Rooms::new(db.clone());
+    let state = state::AppState { cfg: Arc::new(cfg.clone()), db, rooms: rooms.clone() };
+
+    let api = Router::new()
+        .route("/setup", get(api_auth::setup))
+        .route("/auth/signup", post(api_auth::signup))
+        .route("/auth/login", post(api_auth::login))
+        .route("/auth/logout", post(api_auth::logout))
+        .route("/me", get(api_auth::me).patch(api_auth::update_me))
+        .route("/workspaces", get(api_workspaces::list).post(api_workspaces::create))
+        .route(
+            "/workspaces/{id}",
+            get(api_workspaces::get).patch(api_workspaces::update).delete(api_workspaces::delete),
+        )
+        .route("/workspaces/{id}/members", get(api_workspaces::members))
+        .route(
+            "/workspaces/{id}/members/{user}",
+            patch(api_workspaces::update_member).delete(api_workspaces::remove_member),
+        )
+        .route(
+            "/workspaces/{id}/invites",
+            get(api_workspaces::list_invites).post(api_workspaces::create_invite),
+        )
+        .route("/invites/{id}", delete(api_workspaces::delete_invite))
+        .route("/invites/by-token/{token}", get(api_workspaces::invite_info))
+        .route("/invites/by-token/{token}/accept", post(api_workspaces::accept_invite))
+        .route(
+            "/workspaces/{id}/projects",
+            get(api_workspaces::list_projects).post(api_workspaces::create_project),
+        )
+        .route("/workspaces/{id}/files", get(api_files::list_workspace_files))
+        .route(
+            "/projects/{id}",
+            patch(api_workspaces::update_project).delete(api_workspaces::delete_project),
+        )
+        .route("/projects/{id}/files", get(api_files::list_project_files).post(api_files::create_file))
+        .route(
+            "/files/{id}",
+            get(api_files::get_file).patch(api_files::update_file).delete(api_files::delete_file),
+        )
+        .route("/files/{id}/duplicate", post(api_files::duplicate_file))
+        .route("/files/{id}/document", get(api_files::get_document))
+        .route("/files/{id}/thumbnail.svg", get(api_files::thumbnail))
+        .route("/files/{id}/export.svg", get(api_files::export_svg))
+        .route("/files/{id}/export.png", get(api_files::export_png))
+        .route("/files/{id}/assets", post(api_files::upload_asset))
+        .route("/files/{id}/ws", get(ws::handler))
+        .route("/files/{id}/versions", get(api_versions::list).post(api_versions::create))
+        .route("/files/{id}/comments", get(api_comments::list).post(api_comments::create))
+        .route("/comments/{id}", patch(api_comments::update).delete(api_comments::delete))
+        .route("/files/{id}/versions/{vid}/preview.svg", get(api_versions::preview))
+        .route("/files/{id}/versions/{vid}/restore", post(api_versions::restore))
+        .route("/assets/{id}", get(api_files::get_asset))
+        .route("/tokens", get(api_tokens::list).post(api_tokens::create))
+        .route("/tokens/{id}", delete(api_tokens::delete))
+        .route("/agent-setup", get(api_tokens::agent_setup))
+        .route("/admin/users", get(api_admin::list_users))
+        .route("/admin/users/{id}", patch(api_admin::update_user).delete(api_admin::delete_user))
+        .route("/admin/users/{id}/reset-password", post(api_admin::reset_password))
+        .route("/admin/settings", get(api_admin::get_settings).patch(api_admin::update_settings))
+        .route("/health", get(|| async { "ok" }))
+        .fallback(|| async { error::AppError::not_found("endpoint") })
+        .layer(DefaultBodyLimit::max(cfg.max_upload_bytes + 1024 * 1024));
+
+    let index = cfg.web_dir.join("index.html");
+    let app = Router::new()
+        .nest("/api", api)
+        .route("/mcp", post(mcp::handle).get(mcp::get_not_allowed).delete(mcp::get_not_allowed))
+        .route("/.well-known/oauth-protected-resource", get(oauth::protected_resource))
+        .route("/.well-known/oauth-protected-resource/mcp", get(oauth::protected_resource))
+        .route("/.well-known/oauth-authorization-server", get(oauth::authorization_server))
+        .route("/.well-known/oauth-authorization-server/mcp", get(oauth::authorization_server))
+        .route("/.well-known/openid-configuration", get(oauth::authorization_server))
+        .route("/oauth/register", post(oauth::register))
+        .route("/oauth/authorize", get(oauth::authorize_get).post(oauth::authorize_post))
+        .route("/oauth/token", post(oauth::token))
+        .route("/oauth/revoke", post(oauth::revoke))
+        .route("/agents/install.sh", get(api_tokens::install_script))
+        .route("/agents/skills/flexma/{*path}", get(api_tokens::skill_file));
+
+    let app = if index.exists() {
+        app.fallback_service(ServeDir::new(&cfg.web_dir).fallback(ServeFile::new(&index)))
+    } else {
+        tracing::warn!("web app not found at {} — build it with `npm run build` in web/", cfg.web_dir.display());
+        app.fallback(|| async {
+            Html("<h1>Flexma server is running</h1><p>The web app is not built. Run <code>npm install && npm run build</code> in <code>web/</code>, or set FLEXMA_WEB_DIR.</p>")
+        })
+    };
+
+    let app = app
+        .layer(middleware::from_fn(cache_headers))
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(&cfg.addr).await.expect("cannot bind address");
+    tracing::info!("Flexma listening on http://{}", cfg.addr);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutting down");
+        })
+        .await
+        .expect("server error");
+    rooms.shutdown_all().await;
+}
+
+/// Long-lived caching for Vite's content-hashed bundles; never cache the HTML shell.
+async fn cache_headers(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    if path.starts_with("/assets/") {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    } else if !path.starts_with("/api/") && !path.starts_with("/mcp") && !path.starts_with("/oauth") && !h.contains_key(header::CACHE_CONTROL) {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert("referrer-policy", HeaderValue::from_static("same-origin"));
+    res.into_response()
+}
+
+async fn reset_password(db: &db::Db, email: &str) {
+    use std::io::BufRead;
+    eprint!("New password for {email}: ");
+    let mut pw = String::new();
+    std::io::stdin().lock().read_line(&mut pw).expect("read password");
+    let pw = pw.trim().to_string();
+    if pw.len() < 8 {
+        eprintln!("password must be at least 8 characters");
+        std::process::exit(1);
+    }
+    let hash = auth::hash_password(&pw).expect("hash");
+    let email = email.to_lowercase();
+    let n = db
+        .call(move |c| Ok(c.execute("UPDATE users SET password_hash = ?1 WHERE email = ?2", rusqlite::params![hash, email])?))
+        .await
+        .expect("db");
+    if n == 0 {
+        eprintln!("no user with that email");
+        std::process::exit(1);
+    }
+    eprintln!("password updated");
+}

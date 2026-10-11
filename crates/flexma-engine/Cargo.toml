@@ -1,0 +1,43 @@
+[package]
+name = "flexma-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flexma editor engine: scene, interaction and WebGL2 renderer, compiled to WebAssembly."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flexma-doc = { path = "../flexma-doc" }
+serde.workspace = true
+serde_json.workspace = true
+# Must match the installed wasm-bindgen CLI exactly (see scripts/build-wasm.sh).
+wasm-bindgen = "=0.2.129"
+js-sys = "0.3"
+lyon_tessellation = "1"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "console",
+  "Window",
+  "Document",
+  "Element",
+  "HtmlCanvasElement",
+  "HtmlImageElement",
+  "CanvasRenderingContext2d",
+  "TextMetrics",
+  "WebGl2RenderingContext",
+  "WebGlProgram",
+  "WebGlShader",
+  "WebGlBuffer",
+  "WebGlVertexArrayObject",
+  "WebGlTexture",
+  "WebGlUniformLocation",
+  "WebGlFramebuffer",
+  "WebGlRenderbuffer",
+  "WebGlContextAttributes",
+  "Performance",
+]

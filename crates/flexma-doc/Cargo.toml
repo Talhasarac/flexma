@@ -1,0 +1,10 @@
+[package]
+name = "flexma-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flexma document model: nodes, operations, ordering, geometry, layout and SVG export. Shared by the server and the wasm engine."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

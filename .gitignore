@@ -1,0 +1,8 @@
+/target
+/data
+node_modules
+/web/dist
+/web/tsconfig.tsbuildinfo
+/web/src/engine/pkg
+.env
+.DS_Store
