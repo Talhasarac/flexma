@@ -184,6 +184,7 @@ async fn main() {
         .route("/workspaces/{id}/fonts/google", post(api_fonts::add_google))
         .route("/font-uploads/{token}", post(api_fonts::upload_with_link))
         .route("/image-uploads/{token}", post(api_files::upload_image_with_link))
+        .route("/node-uploads/{token}", post(mcp::upload_nodes_with_link))
         .route("/fonts/{id}", get(api_fonts::file))
         .route("/google-fonts", get(api_fonts::google_catalogue))
         .route("/google-fonts/preview", get(api_fonts::google_preview))

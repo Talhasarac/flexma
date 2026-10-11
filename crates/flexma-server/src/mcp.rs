@@ -177,7 +177,7 @@ fn tools() -> Value {
             "type": "object",
             "properties": {
                 "file_id": file_id,
-                "files": { "type": "integer", "description": "How many font files you'll upload (one per style: Regular, Bold, Italic…). Default 1, max 20." }
+                "files": { "type": "integer", "description": "How many font files you'll upload (one per style: Regular, Bold, Italic…). Default 1, max 100." }
             },
             "required": ["file_id"]
         })),
@@ -185,7 +185,7 @@ fn tools() -> Value {
             "type": "object",
             "properties": {
                 "file_id": file_id,
-                "files": { "type": "integer", "description": "How many images you'll upload. Default 1, max 20." }
+                "files": { "type": "integer", "description": "How many images you'll upload. Default 1, max 100." }
             },
             "required": ["file_id"]
         })),
@@ -278,6 +278,16 @@ fn tools() -> Value {
                 "styles": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["file_id", "styles"]
+        })),
+        tool("upload_nodes", "Create a large node tree from a JSON file instead of pasting it into create_nodes (exports of many frames, generated layouts). Returns a curl command with a short-lived upload link; POST a JSON array of node specs (the same format as create_nodes' nodes) or {\"nodes\": [...]}, one batch per request.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "parent_id": { "type": "string", "description": "Page, FRAME or GROUP to create the nodes in (default: the first page)" },
+                "index": { "type": "integer" },
+                "files": { "type": "integer", "description": "How many JSON batches you'll upload. Default 1, max 100." }
+            },
+            "required": ["file_id"]
         })),
         tool("list_components", "List the main components in a file (the design system): id, name, size, page and instance count. Use them via create_nodes with {type:'instance', component:'<name or id>'}.", json!({
             "type": "object",
@@ -497,6 +507,7 @@ impl Ctx {
             "list_fonts" => self.list_fonts(args).await,
             "add_font" => self.add_font(args).await,
             "upload_font" => self.upload_font(args).await,
+            "upload_nodes" => self.upload_nodes(args).await,
             "list_styles" => self.list_styles(args).await,
             "create_styles" => self.write_styles(args, true).await,
             "update_styles" => self.write_styles(args, false).await,
@@ -714,11 +725,11 @@ impl Ctx {
         let parent = opt_s(args, "parent_id").map(str::to_string);
         let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
         let note = self.font_note(&fid, args).await;
-        self.create_specs(&fid, parent, index, specs, note).await
+        self.create_specs(&fid, parent, index, specs, note, 6).await
     }
 
     /// Create friendly specs (icons and images expanded) in one undoable step.
-    async fn create_specs(&self, fid: &str, parent: Option<String>, index: Option<usize>, specs: Vec<Value>, note: String) -> ToolResult {
+    async fn create_specs(&self, fid: &str, parent: Option<String>, index: Option<usize>, specs: Vec<Value>, note: String, depth: usize) -> ToolResult {
         if specs.is_empty() {
             return Err("'nodes' is empty".into());
         }
@@ -747,8 +758,11 @@ impl Ctx {
             }
             tx.relayout();
             let mut out = format!("Created {count} node(s) in {parent}:\n");
-            for id in &top {
-                outline(tx.doc, id, 0, 6, &mut out);
+            for id in top.iter().take(if depth == 0 { 200 } else { usize::MAX }) {
+                outline(tx.doc, id, 0, depth, &mut out);
+            }
+            if depth == 0 && top.len() > 200 {
+                out.push_str(&format!("…and {} more top-level nodes\n", top.len() - 200));
             }
             out.push_str(&note);
             Ok(json!(out))
@@ -1058,7 +1072,7 @@ impl Ctx {
         }
         let parent = opt_s(args, "parent_id").map(str::to_string);
         let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
-        self.create_specs(&fid, parent, index, vec![spec], note).await
+        self.create_specs(&fid, parent, index, vec![spec], note, 6).await
     }
 
     async fn search_icons(&self, args: &Value) -> ToolResult {
@@ -1526,6 +1540,28 @@ impl Ctx {
             styles.len(),
             if styles.len() == 1 { "style" } else { "styles" },
             styles.join(", ")
+        )))
+    }
+
+    async fn upload_nodes(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let files = args.get("files").and_then(Value::as_u64).unwrap_or(1).clamp(1, crate::uploads::MAX_FILES as u64) as u32;
+        let (uid, f2) = (self.user.id.clone(), fid.clone());
+        let ws = self.st.db.call(move |c| Ok(file_access(c, &uid, &f2, Role::Editor)?.0)).await.map_err(err_msg)?;
+        let kind = crate::uploads::Kind::Nodes {
+            file_id: fid,
+            parent_id: opt_s(args, "parent_id").map(str::to_string),
+            index: args.get("index").and_then(Value::as_u64).map(|v| v as usize),
+            token_name: self.user.token_name.clone(),
+        };
+        let token = crate::uploads::create(kind, &ws, &self.user.id, files);
+        let url = format!("{}/api/node-uploads/{token}", self.base);
+        Ok(text_result(format!(
+            "Upload link ready. It takes {files} JSON batch{} over the next 15 minutes. Write the node specs to a file (a JSON array, exactly like create_nodes' nodes, or {{\"nodes\": [...]}}), then run once per batch:\n\n\
+             curl -sS -H 'Content-Type: application/json' --data-binary @nodes.json {url}\n\n\
+             Each upload creates its nodes in one step (undo_agent_changes reverts a batch) and prints the top-level ids. \
+             Icons, images and styles work as in create_nodes. Up to {MAX_UPLOAD_NODES} nodes per batch; split bigger trees by screen. Don't share this link.",
+            if files == 1 { "" } else { "es" }
         )))
     }
 
@@ -2453,4 +2489,86 @@ fn icon_vector(doc: &flexma_doc::Document, id: &str) -> Option<NodeId> {
         return None;
     }
     doc.children(id).iter().find(|c| doc.get(c).map(|c| c.kind == NodeType::Vector).unwrap_or(false)).cloned()
+}
+
+// ---------------------------------------------------------------------------
+// upload_nodes: JSON node trees through an upload link
+// ---------------------------------------------------------------------------
+
+/// Most nodes (counting children) one uploaded batch may create.
+const MAX_UPLOAD_NODES: usize = 50_000;
+
+fn count_specs(specs: &[Value]) -> usize {
+    specs
+        .iter()
+        .map(|s| 1 + s.get("children").and_then(Value::as_array).map(|c| count_specs(c)).unwrap_or(0))
+        .sum()
+}
+
+/// `POST /api/node-uploads/{token}`: a JSON array of node specs (or
+/// `{"nodes": [...]}`), created like `create_nodes` as the agent that asked
+/// for the link. No sign-in: the link is the credential.
+pub async fn upload_nodes_with_link(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let fail = |status: StatusCode, msg: String| (status, axum::Json(json!({ "error": msg }))).into_response();
+    // Bad JSON doesn't use up an upload.
+    let parsed: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return fail(StatusCode::BAD_REQUEST, format!("the body isn't valid JSON: {e}")),
+    };
+    let specs = match parsed {
+        Value::Array(a) => a,
+        Value::Object(mut o) => match o.remove("nodes") {
+            Some(Value::Array(a)) => a,
+            _ => return fail(StatusCode::BAD_REQUEST, "send a JSON array of node specs, or {\"nodes\": [...]}".into()),
+        },
+        _ => return fail(StatusCode::BAD_REQUEST, "send a JSON array of node specs, or {\"nodes\": [...]}".into()),
+    };
+    if specs.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "the node list is empty".into());
+    }
+    let total = count_specs(&specs);
+    if total > MAX_UPLOAD_NODES {
+        return fail(StatusCode::PAYLOAD_TOO_LARGE, format!("{total} nodes is more than the {MAX_UPLOAD_NODES} allowed per batch; split it (e.g. one batch per screen)"));
+    }
+    let grant = match crate::uploads::take(&token, |k| matches!(k, crate::uploads::Kind::Nodes { .. }), "upload_nodes") {
+        Ok(g) => g,
+        Err(e) => return e.into_response(),
+    };
+    let crate::uploads::Kind::Nodes { file_id, parent_id, index, token_name } = grant.kind else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "wrong upload link kind".into());
+    };
+    let uid = grant.user_id.clone();
+    let user = st
+        .db
+        .call(move |c| {
+            Ok(c.query_row("SELECT id, email, name, is_admin, color FROM users WHERE id = ?1", rusqlite::params![uid], |r| {
+                Ok(AuthUser {
+                    id: r.get(0)?,
+                    email: r.get(1)?,
+                    name: r.get(2)?,
+                    is_admin: r.get::<_, i64>(3)? != 0,
+                    color: r.get(4)?,
+                    via_token: true,
+                    token_name,
+                })
+            })?)
+        })
+        .await;
+    let user = match user {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let ctx = Ctx { base: st.base_url(&headers), st, user };
+    match ctx.create_specs(&file_id, parent_id, index, specs, String::new(), 0).await {
+        Ok(v) => {
+            let text = v["content"][0]["text"].as_str().unwrap_or_default().to_string();
+            axum::Json(json!({ "created": total, "remainingUploads": grant.remaining, "result": text })).into_response()
+        }
+        Err(e) => fail(StatusCode::BAD_REQUEST, e),
+    }
 }

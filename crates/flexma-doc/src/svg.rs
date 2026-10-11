@@ -232,7 +232,28 @@ impl Writer<'_> {
                 self.defs.push_str("</linearGradient>");
                 Some(format!(r#" {attr}="url(#{id})""#))
             }
-            Paint::Image { asset, fit, opacity, tint, slice, .. } if attr == "fill" => {
+            Paint::Image { .. } if attr == "fill" => {
+                let content = self.image_content(p, w, h)?;
+                let id = self.id("p");
+                let _ = write!(
+                    self.defs,
+                    r#"<pattern id="{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}">{content}</pattern>"#,
+                    w = fmt_num(w),
+                    h = fmt_num(h),
+                );
+                Some(format!(r#" {attr}="url(#{id})""#))
+            }
+            _ => None,
+        }
+    }
+
+    /// An image paint drawn in a w×h box at the origin (opacity and tint
+    /// applied). Shapes clip it directly; patterns are only used where a fill
+    /// attribute is unavoidable (text), since renderers rasterize a pattern
+    /// tile first and cut off very large ones.
+    fn image_content(&mut self, p: &Paint, w: f64, h: f64) -> Option<String> {
+        match p {
+            Paint::Image { asset, fit, opacity, tint, slice, .. } => {
                 let href = escape(&(self.opts.resolve_asset)(asset)?);
                 let filter = match tint {
                     Some(t) if *t != Color::WHITE => {
@@ -253,24 +274,34 @@ impl Writer<'_> {
                 let sliced = slice.and_then(|s| (self.opts.image_size)(asset).map(|size| (s, size)));
                 let content = match sliced {
                     Some((s, (iw, ih))) => self.nine_slice(&href, &s, iw, ih, w, h),
-                    None => {
-                        let par = match (fit, slice) {
-                            (_, Some(_)) | (ImageFit::Stretch, _) => "none",
-                            (ImageFit::Fill, _) => "xMidYMid slice",
-                            (ImageFit::Fit, _) => "xMidYMid meet",
-                        };
-                        format!(r#"<image href="{href}" width="{}" height="{}" preserveAspectRatio="{par}"/>"#, fmt_num(w), fmt_num(h))
-                    }
+                    None => match (fit, slice, (self.opts.image_size)(asset)) {
+                        // Cover: show just the centered crop through a viewport, so
+                        // nothing spills outside the box (and no clip is needed).
+                        (ImageFit::Fill, None, Some((iw, ih))) if iw > 0.0 && ih > 0.0 && w > 0.0 && h > 0.0 => {
+                            let (cw, ch) = if iw / ih > w / h { (ih * w / h, ih) } else { (iw, iw * h / w) };
+                            format!(
+                                r#"<svg width="{}" height="{}" viewBox="{} {} {} {}" preserveAspectRatio="none"><image href="{href}" width="{}" height="{}"/></svg>"#,
+                                fmt_num(w),
+                                fmt_num(h),
+                                fmt_num((iw - cw) / 2.0),
+                                fmt_num((ih - ch) / 2.0),
+                                fmt_num(cw),
+                                fmt_num(ch),
+                                fmt_num(iw),
+                                fmt_num(ih)
+                            )
+                        }
+                        _ => {
+                            let par = match (fit, slice) {
+                                (_, Some(_)) | (ImageFit::Stretch, _) => "none",
+                                (ImageFit::Fill, _) => "xMidYMid slice",
+                                (ImageFit::Fit, _) => "xMidYMid meet",
+                            };
+                            format!(r#"<image href="{href}" width="{}" height="{}" preserveAspectRatio="{par}"/>"#, fmt_num(w), fmt_num(h))
+                        }
+                    },
                 };
-                let id = self.id("p");
-                let _ = write!(
-                    self.defs,
-                    r#"<pattern id="{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}"><g opacity="{op}"{filter}>{content}</g></pattern>"#,
-                    w = fmt_num(w),
-                    h = fmt_num(h),
-                    op = fmt_num(*opacity as f64),
-                );
-                Some(format!(r#" {attr}="url(#{id})""#))
+                Some(format!(r#"<g opacity="{}"{filter}>{content}</g>"#, fmt_num(*opacity as f64)))
             }
             _ => None,
         }
@@ -373,8 +404,28 @@ impl Writer<'_> {
                     let closed = n.kind != NodeType::Line;
                     if closed {
                         for p in fills.iter() {
-                            if let Some(attr) = self.paint_attr(p, n.width, n.height, "fill") {
-                                let rule = if n.fill_rule == FillRule::Evenodd { r#" fill-rule="evenodd""# } else { "" };
+                            let rule = if n.fill_rule == FillRule::Evenodd { r#" fill-rule="evenodd""# } else { "" };
+                            if matches!(p, Paint::Image { .. }) {
+                                if let Some(content) = self.image_content(p, n.width, n.height) {
+                                    // 9-slice, stretch and fit never leave the box, so a plain
+                                    // rectangle needs no clip. (resvg cuts off very large content
+                                    // under several nested clips, e.g. a full-screen sliced overlay
+                                    // inside a clipped frame.)
+                                    let spills = match p {
+                                        Paint::Image { asset, fit: ImageFit::Fill, slice: None, .. } => (self.opts.image_size)(asset).is_none(),
+                                        _ => false,
+                                    };
+                                    let plain = shape.starts_with("<rect") && !shape.contains("rx=");
+                                    if plain && !spills {
+                                        self.body.push_str(&content);
+                                    } else {
+                                        let clip = self.id("c");
+                                        let clip_rule = if rule.is_empty() { "" } else { r#" clip-rule="evenodd""# };
+                                        let _ = write!(self.defs, r#"<clipPath id="{clip}">{shape}{clip_rule}/></clipPath>"#);
+                                        let _ = write!(self.body, r#"<g clip-path="url(#{clip})">{content}</g>"#);
+                                    }
+                                }
+                            } else if let Some(attr) = self.paint_attr(p, n.width, n.height, "fill") {
                                 let _ = write!(self.body, "{shape}{attr}{rule}/>");
                             }
                         }

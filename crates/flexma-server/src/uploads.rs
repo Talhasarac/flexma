@@ -1,6 +1,7 @@
 //! Short-lived upload links for agents. MCP tool calls can't carry file bytes
-//! (a font or photo would flood the agent's context), so `upload_font` and
-//! `upload_image` hand out a link the agent posts files to with curl.
+//! (a font or photo would flood the agent's context), so `upload_font`,
+//! `upload_image` and `upload_nodes` hand out a link the agent posts files to
+//! with curl.
 //!
 //! A link is tied to a workspace (and a file, for images) and to the person
 //! who authorized the agent. It accepts a set number of files within 15
@@ -14,14 +15,17 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const TTL: Duration = Duration::from_secs(15 * 60);
-/// Most files one link accepts.
-pub const MAX_FILES: u32 = 20;
+/// Most files one link accepts (bulk exports upload hundreds of images).
+pub const MAX_FILES: u32 = 100;
 const TOKEN_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
     Font,
     Image { file_id: String },
+    /// A JSON node tree for `create_nodes`, created as the agent that asked
+    /// (its API token name, so undo and presence match its other edits).
+    Nodes { file_id: String, parent_id: Option<String>, index: Option<usize>, token_name: Option<String> },
 }
 
 impl Kind {
@@ -29,6 +33,7 @@ impl Kind {
         match self {
             Kind::Font => "upload_font",
             Kind::Image { .. } => "upload_image",
+            Kind::Nodes { .. } => "upload_nodes",
         }
     }
 }
@@ -119,7 +124,7 @@ mod tests {
 
     #[test]
     fn links_are_capped() {
-        let t = create(Kind::Font, "ws", "u", 99);
+        let t = create(Kind::Font, "ws", "u", 999);
         let links = links().lock().unwrap();
         assert_eq!(links.get(&t).unwrap().remaining, MAX_FILES);
         assert_eq!(t.len(), TOKEN_LEN);

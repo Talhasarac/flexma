@@ -138,6 +138,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `search_icons` | Find Lucide icons; place with `{type:"icon", icon:"<name>"}` |
 | `import_svg` | SVG markup → editable vector layers |
 | `fill_with_data` | One component instance or layer copy per data row |
+| `upload_nodes` | Big node trees from a JSON file (a `curl` link) instead of pasting them into `create_nodes` |
 | `list_fonts` | See the workspace's fonts (uploaded and Google Fonts) and their weights |
 | `add_font` | Add a Google Fonts family to the workspace so everyone sees it |
 | `upload_font` | Upload the user's own .ttf/.otf files: returns a 15-minute `curl` upload link |
@@ -188,7 +189,9 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - `x`/`y` on children of an auto-layout frame are ignored. To pin a child, set `absolute: true`.
 - Resizing a frame or instance moves children that have `constraints` (like Unity anchors). Children with the default `MIN`/`MIN` stay where they are.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
-- Images and fonts: upload files with `upload_image` / `upload_font` (run the `curl` command they return); don't paste file contents into tool calls. Without a real picture, use a neutral placeholder rectangle named "Image: …".
+- Images and fonts: upload files with `upload_image` / `upload_font` (run the `curl` command they return); don't paste file contents into tool calls.
+- Big trees (an exported game UI, hundreds of frames): write the specs to a JSON file and send it with `upload_nodes` instead of pasting huge `create_nodes` payloads. Each batch is one undoable step; split very large exports by screen.
+- Rendering limits: text `stroke` isn't drawn yet (no text outlines). Drop shadows on text, and shadow `spread`, show in exports and screenshots differently from the editor: the editor shadows a frame's box, exports shadow its painted content. Prefer simple shadows for things that must match everywhere. Without a real picture, use a neutral placeholder rectangle named "Image: …".
 - Styles win: if a spec has both `fillStyle` and `fill` (or `textStyle` and `size`), the style's values apply. To use a raw value, leave the style out (or set it to null).
 - Icons: recolor with `update_nodes {id:"<icon frame>", color:"#…", strokeWidth:1.5}`. `strokeWidth` is in Lucide's 24-unit grid and scales with the icon's size. Old icon names still work (`home` → `house`).
 - Large files: outline with `depth: 2` first, then zoom into the frames you need with `node_id`.

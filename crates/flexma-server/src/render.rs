@@ -213,3 +213,53 @@ mod tests {
         assert_eq!(p.pixel(50, 25).unwrap().alpha(), 0);
     }
 }
+
+#[cfg(test)]
+mod large_fill_tests {
+    use super::*;
+    use flexma_doc::{Color, ImageFit, NineSlice, Node, NodeType, Op, Paint};
+
+    /// Share of the rendered pixels that aren't the frame's #222 background.
+    fn image_coverage(svg: &str) -> f32 {
+        let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(480, 270).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(0.25, 0.25), &mut pm.as_mut());
+        let shown = pm.pixels().iter().filter(|p| p.red().abs_diff(0x22) > 4 || p.green().abs_diff(0x22) > 4).count();
+        shown as f32 / (480.0 * 270.0)
+    }
+
+    /// A Unity-style full-screen dim overlay: a huge 9-sliced rect inside a
+    /// clipped 1920×1080 frame used to come out cut off in screenshots.
+    #[test]
+    fn huge_image_fills_render_fully_in_clipped_frames() {
+        let mut pm = resvg::tiny_skia::Pixmap::new(64, 40).unwrap();
+        pm.fill(resvg::tiny_skia::Color::from_rgba8(220, 120, 120, 255));
+        use base64::Engine;
+        let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(pm.encode_png().unwrap()));
+        let slice = NineSlice { top: 2.0, right: 2.0, bottom: 3.0, left: 2.0, scale: 1.0, fill_center: true };
+        for (slice, fit) in [(Some(slice), ImageFit::Stretch), (None, ImageFit::Stretch), (None, ImageFit::Fill)] {
+            let mut doc = Document::new_empty();
+            let mut frame = Node::new("f:1", NodeType::Frame);
+            frame.parent = Some("0:1".into());
+            frame.width = 1920.0;
+            frame.height = 1080.0;
+            frame.clips_content = true;
+            frame.fills = vec![Paint::solid(Color::parse("#222222").unwrap())];
+            doc.apply(&Op::Create { node: frame }).unwrap();
+            let mut dim = Node::new("r:1", NodeType::Rectangle);
+            dim.parent = Some("f:1".into());
+            dim.x = -2500.0;
+            dim.y = -2500.0;
+            dim.width = 6000.0;
+            dim.height = 6000.0;
+            dim.fills = vec![Paint::Image { asset: "a".into(), fit, tint: None, slice, opacity: 1.0, visible: true }];
+            doc.apply(&Op::Create { node: dim }).unwrap();
+            let resolve = |_: &str| Some(uri.clone());
+            let size = |_: &str| Some((64.0, 40.0));
+            let opts = SvgOptions { resolve_asset: &resolve, image_size: &size, ..SvgOptions::default() };
+            let (svg, _) = export(&doc, &["f:1".to_string()], &opts).unwrap();
+            let cov = image_coverage(&svg);
+            assert!(cov > 0.99, "{slice:?} {fit:?}: only {:.0}% of the frame shows the image", cov * 100.0);
+        }
+    }
+}
