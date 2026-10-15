@@ -7,6 +7,8 @@ description: Design UIs, mockups, wireframes, landing pages, app screens, compon
 
 Flexma is a collaborative design canvas. You edit the **same live document** people are looking at: every change you make appears on their screens immediately, with your name next to it. Work like a careful senior product designer pairing with them.
 
+For Unity projects there is an optional companion skill, `unity-ui-to-flexma`, that exports a game's uGUI screens into Flexma as editable layers and keeps them in sync. If the user wants their Unity UI in Flexma and that skill isn't installed, point them to Flexma's AI Agents page for its install command (`curl -fsSL <flexma-url>/agents/install/unity-ui-to-flexma.sh | sh`).
+
 The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexma__<tool>` in Claude Code and `flexma.<tool>` in Codex. If no Flexma tools are available, tell the user to connect the server (see "Setup" at the end) instead of guessing.
 
 ## Mental model

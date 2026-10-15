@@ -82,6 +82,8 @@ pub fn setup_snippets(base: &str) -> Value {
     json!({
         "mcpUrl": mcp,
         "skillInstallCommand": format!("curl -fsSL {base}/agents/install.sh | sh"),
+        // Optional: Unity projects (installs the flexma skill too).
+        "unitySkillInstallCommand": format!("curl -fsSL {base}/agents/install/unity-ui-to-flexma.sh | sh"),
         // OAuth (recommended): the client opens a browser to sign in, like hosted MCP servers.
         "claudeCommand": format!("claude mcp add --scope user --transport http flexma {mcp}"),
         "codexCommand": format!("codex mcp add flexma --url {mcp} && codex mcp login flexma"),
@@ -99,6 +101,7 @@ pub fn setup_snippets(base: &str) -> Value {
         // Windows PowerShell variants (5.1 has no `&&`, and no `sh` to pipe into).
         "windows": {
             "skillInstallCommand": format!("irm {base}/agents/install.ps1 | iex"),
+            "unitySkillInstallCommand": format!("irm {base}/agents/install/unity-ui-to-flexma.ps1 | iex"),
             "claudeCommand": format!("claude mcp add --scope user --transport http flexma {mcp}"),
             "codexCommand": format!("codex mcp add flexma --url {mcp}; codex mcp login flexma"),
             "claudeTokenCommand": format!(
@@ -115,43 +118,111 @@ pub async fn agent_setup(State(st): State<AppState>, headers: HeaderMap, _user: 
 
 // ---------- skill files ----------
 
-/// The Flexma skill, embedded at build time from `skills/flexma`.
-pub const SKILL_FILES: &[(&str, &str)] = &[
-    ("SKILL.md", include_str!("../../../skills/flexma/SKILL.md")),
-    ("references/node-spec.md", include_str!("../../../skills/flexma/references/node-spec.md")),
-    ("references/recipes.md", include_str!("../../../skills/flexma/references/recipes.md")),
-];
+/// An agent skill, embedded at build time from `skills/<name>`.
+pub struct Skill {
+    pub name: &'static str,
+    /// Path inside the skill folder, and the file's text.
+    pub files: &'static [(&'static str, &'static str)],
+}
 
-pub async fn skill_file(Path(path): Path<String>) -> Response {
-    match SKILL_FILES.iter().find(|(p, _)| *p == path) {
-        Some((_, body)) => ([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], *body).into_response(),
+/// Everyone installs this one.
+pub const FLEXMA_SKILL: Skill = Skill {
+    name: "flexma",
+    files: &[
+        ("SKILL.md", include_str!("../../../skills/flexma/SKILL.md")),
+        ("references/node-spec.md", include_str!("../../../skills/flexma/references/node-spec.md")),
+        ("references/recipes.md", include_str!("../../../skills/flexma/references/recipes.md")),
+    ],
+};
+
+/// Optional: exports a Unity project's uGUI screens into Flexma. Ships the
+/// editor scripts the agent copies into the project.
+pub const UNITY_SKILL: Skill = Skill {
+    name: "unity-ui-to-flexma",
+    files: &[
+        ("SKILL.md", include_str!("../../../skills/unity-ui-to-flexma/SKILL.md")),
+        ("scripts/FlexmaUIExporter.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUIExporter.cs")),
+        ("scripts/FlexmaUploader.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUploader.cs")),
+        ("scripts/FlexmaClient.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaClient.cs")),
+        ("scripts/FlexmaUIExporterWindow.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUIExporterWindow.cs")),
+    ],
+};
+
+pub const SKILLS: &[&Skill] = &[&FLEXMA_SKILL, &UNITY_SKILL];
+
+/// Optional installers, `/agents/install/<name>.sh|.ps1`: each also installs
+/// (or updates) the `flexma` skill it builds on.
+const ADD_ONS: &[&Skill] = &[&UNITY_SKILL];
+
+pub async fn skill_file(Path((skill, path)): Path<(String, String)>) -> Response {
+    let file = SKILLS.iter().find(|s| s.name == skill).and_then(|s| s.files.iter().find(|(p, _)| *p == path));
+    match file {
+        Some((p, body)) => {
+            let kind = if p.ends_with(".md") { "text/markdown; charset=utf-8" } else { "text/plain; charset=utf-8" };
+            ([(header::CONTENT_TYPE, kind)], *body).into_response()
+        }
         None => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
 pub async fn install_script(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let base = st.base_url(&headers);
-    let snippets = setup_snippets(&base);
-    let mut files = String::new();
-    for (p, _) in SKILL_FILES {
-        files.push_str(&format!("  fetch \"{p}\"\n"));
+    ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], install_sh(&base, &[&FLEXMA_SKILL])).into_response()
+}
+
+/// The same installer for Windows: `irm <base>/agents/install.ps1 | iex`.
+pub async fn install_script_ps1(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let base = st.base_url(&headers);
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], install_ps1(&base, &[&FLEXMA_SKILL])).into_response()
+}
+
+/// An optional skill's installer: `/agents/install/unity-ui-to-flexma.sh` (or `.ps1`).
+pub async fn add_on_installer(State(st): State<AppState>, headers: HeaderMap, Path(file): Path<String>) -> Response {
+    let base = st.base_url(&headers);
+    let find = |name: &str| ADD_ONS.iter().copied().find(|s| s.name == name);
+    if let Some(skill) = file.strip_suffix(".sh").and_then(find) {
+        return ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], install_sh(&base, &[&FLEXMA_SKILL, skill])).into_response();
     }
-    let script = format!(
+    if let Some(skill) = file.strip_suffix(".ps1").and_then(find) {
+        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], install_ps1(&base, &[&FLEXMA_SKILL, skill])).into_response();
+    }
+    (axum::http::StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+fn names(skills: &[&Skill]) -> String {
+    let n: Vec<String> = skills.iter().map(|s| format!("\"{}\"", s.name)).collect();
+    match n.len() {
+        1 => format!("the {} skill", n[0]),
+        _ => format!("the {} skills", n.join(" and ")),
+    }
+}
+
+fn install_sh(base: &str, skills: &[&Skill]) -> String {
+    let snippets = setup_snippets(base);
+    let mut fetches = String::new();
+    for s in skills {
+        for (p, _) in s.files {
+            fetches.push_str(&format!("  fetch {} \"{p}\"\n", s.name));
+        }
+    }
+    let what = names(skills);
+    format!(
         r#"#!/bin/sh
 # Flexma skill installer for Claude Code and Codex.
-# Installs the "flexma" skill into ~/.claude/skills and ~/.codex/skills.
+# Installs {what} into ~/.claude/skills and ~/.codex/skills.
 set -e
 BASE="{base}"
 install_to() {{
-  DEST="$1/flexma"
-  mkdir -p "$DEST/references"
+  ROOT="$1"
   fetch() {{
-    if command -v curl >/dev/null 2>&1; then curl -fsSL "$BASE/agents/skills/flexma/$1" -o "$DEST/$1"
-    else wget -q "$BASE/agents/skills/flexma/$1" -O "$DEST/$1"; fi
+    OUT="$ROOT/$1/$2"
+    mkdir -p "$(dirname "$OUT")"
+    if command -v curl >/dev/null 2>&1; then curl -fsSL "$BASE/agents/skills/$1/$2" -o "$OUT"
+    else wget -q "$BASE/agents/skills/$1/$2" -O "$OUT"; fi
   }}
-{files}  echo "  installed skill -> $DEST"
+{fetches}  echo "  installed -> $ROOT"
 }}
-echo "Installing the Flexma skill from $BASE"
+echo "Installing {what} from $BASE"
 install_to "$HOME/.claude/skills"
 install_to "$HOME/.codex/skills"
 echo ""
@@ -166,37 +237,34 @@ echo ""
 "#,
         claude = snippets["claudeCommand"].as_str().unwrap_or_default().replace('\'', "'\\''"),
         codex = snippets["codexCommand"].as_str().unwrap_or_default().replace('\'', "'\\''"),
-    );
-    ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], script).into_response()
+    )
 }
 
-/// The same installer for Windows: `irm <base>/agents/install.ps1 | iex`.
-pub async fn install_script_ps1(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    let base = st.base_url(&headers);
-    let snippets = setup_snippets(&base);
+fn install_ps1(base: &str, skills: &[&Skill]) -> String {
+    let snippets = setup_snippets(base);
     let ps = |s: &str| s.replace('\'', "''");
-    let files: Vec<String> = SKILL_FILES.iter().map(|(p, _)| format!("'{p}'")).collect();
-    let script = format!(
+    let files: Vec<String> = skills.iter().flat_map(|s| s.files.iter().map(move |(p, _)| format!("'{}/{p}'", s.name))).collect();
+    let what = names(skills);
+    format!(
         r#"# Flexma skill installer for Claude Code and Codex (Windows PowerShell).
-# Installs the "flexma" skill into ~\.claude\skills and ~\.codex\skills.
+# Installs {what} into ~\.claude\skills and ~\.codex\skills.
 # Runs in its own scope so nothing leaks into your session.
 & {{
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $FlexmaBase = '{base}'
 $FlexmaFiles = @({files})
-function Install-FlexmaSkill([string]$Root) {{
-  $Dest = Join-Path $Root 'flexma'
-  New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'references') | Out-Null
+function Install-FlexmaSkills([string]$Root) {{
   foreach ($File in $FlexmaFiles) {{
-    $Out = Join-Path $Dest ($File -replace '/', '\')
-    Invoke-WebRequest -UseBasicParsing -Uri "$FlexmaBase/agents/skills/flexma/$File" -OutFile $Out
+    $Out = Join-Path $Root ($File -replace '/', '\')
+    New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri "$FlexmaBase/agents/skills/$File" -OutFile $Out
   }}
-  Write-Host "  installed skill -> $Dest"
+  Write-Host "  installed -> $Root"
 }}
-Write-Host "Installing the Flexma skill from $FlexmaBase"
-Install-FlexmaSkill (Join-Path $HOME '.claude\skills')
-Install-FlexmaSkill (Join-Path $HOME '.codex\skills')
+Write-Host "Installing {what} from $FlexmaBase"
+Install-FlexmaSkills (Join-Path $HOME '.claude\skills')
+Install-FlexmaSkills (Join-Path $HOME '.codex\skills')
 Write-Host ''
 Write-Host 'Next, connect the Flexma MCP server (your agent will open a browser to sign in):'
 Write-Host ''
@@ -208,10 +276,38 @@ Write-Host '    {codex}'
 Write-Host ''
 }}
 "#,
-        base = ps(&base),
+        what = ps(&what),
+        base = ps(base),
         files = files.join(", "),
         claude = ps(snippets["windows"]["claudeCommand"].as_str().unwrap_or_default()),
         codex = ps(snippets["windows"]["codexCommand"].as_str().unwrap_or_default()),
-    );
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], script).into_response()
+    )
+}
+
+#[cfg(test)]
+mod skill_tests {
+    use super::*;
+
+    #[test]
+    fn installers_fetch_every_file() {
+        let sh = install_sh("https://f.example", &[&FLEXMA_SKILL, &UNITY_SKILL]);
+        for s in [&FLEXMA_SKILL, &UNITY_SKILL] {
+            for (p, body) in s.files {
+                assert!(sh.contains(&format!("fetch {} \"{p}\"", s.name)), "{p}");
+                assert!(!body.is_empty());
+            }
+        }
+        let ps = install_ps1("https://f.example", &[&FLEXMA_SKILL, &UNITY_SKILL]);
+        assert!(ps.contains("'unity-ui-to-flexma/scripts/FlexmaClient.cs'"));
+        // The default installer stays flexma-only.
+        assert!(!install_sh("https://f.example", &[&FLEXMA_SKILL]).contains("unity-ui-to-flexma"));
+    }
+
+    #[test]
+    fn skill_frontmatter_names_match() {
+        for s in SKILLS {
+            let md = s.files.iter().find(|(p, _)| *p == "SKILL.md").expect("SKILL.md").1;
+            assert!(md.contains(&format!("\nname: {}\n", s.name)), "{} frontmatter", s.name);
+        }
+    }
 }

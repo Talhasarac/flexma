@@ -227,7 +227,8 @@ async fn main() {
         .route("/oauth/revoke", post(oauth::revoke))
         .route("/agents/install.sh", get(api_tokens::install_script))
         .route("/agents/install.ps1", get(api_tokens::install_script_ps1))
-        .route("/agents/skills/flexma/{*path}", get(api_tokens::skill_file));
+        .route("/agents/install/{file}", get(api_tokens::add_on_installer))
+        .route("/agents/skills/{skill}/{*path}", get(api_tokens::skill_file));
 
     let app = if index.exists() {
         app.fallback_service(ServeDir::new(&cfg.web_dir).fallback(ServeFile::new(&index)))

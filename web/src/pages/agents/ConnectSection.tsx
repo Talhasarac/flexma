@@ -146,6 +146,11 @@ export function SkillSection({ setup, os }: ConnectProps) {
       <p className="text-muted text-sm">
         Installs the <code>flexma</code> skill into <code>{o.skillDirs[0]}</code> and <code>{o.skillDirs[1]}</code>.
       </p>
+      <p className="text-muted">
+        Unity projects: also install <code>unity-ui-to-flexma</code>, which exports a game's uGUI screens into Flexma and
+        keeps them in sync.
+      </p>
+      <CopyField value={o.unitySkillInstallCommand} multiline toastMessage="Command copied" />
     </div>
   );
 }

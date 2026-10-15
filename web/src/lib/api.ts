@@ -170,6 +170,8 @@ export interface BackupInfo {
 export interface AgentSetup {
   mcpUrl: string;
   skillInstallCommand: string;
+  /** Optional skill for Unity projects (also installs the flexma skill). */
+  unitySkillInstallCommand: string;
   /** OAuth (browser sign-in) variants — recommended. */
   claudeCommand: string;
   codexConfig: string;
@@ -181,6 +183,7 @@ export interface AgentSetup {
   /** Windows PowerShell variants. */
   windows?: {
     skillInstallCommand: string;
+    unitySkillInstallCommand: string;
     claudeCommand: string;
     codexCommand: string;
     claudeTokenCommand: string;

@@ -42,6 +42,10 @@ export function AgentDialog({ open, onClose, fileId, fileName }: { open: boolean
                 No curl? Use <code>{s.skillInstallFallback}</code>
               </p>
             )}
+            <p className="text-muted text-sm">
+              Unity project? Install <code>unity-ui-to-flexma</code> instead, to export its UI screens:
+            </p>
+            <CopyField value={s.unitySkillInstallCommand} multiline toastMessage="Command copied" />
           </div>
           <div className="field">
             <div className="field-label">3. Ask away, e.g.</div>

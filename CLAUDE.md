@@ -11,7 +11,8 @@ Flexma is a self-hosted, Figma-like collaborative design tool. It has three Rust
 | `crates/flexma-server` | The axum server. `rooms.rs` has one actor per open document. `mcp.rs` is the MCP tools, `oauth.rs` is the OAuth 2.1 server for MCP clients, and the `api_*.rs` files are REST. `paint.rs` stores brush strokes and tile snapshots. |
 | `web/src/editor` | Editor UI. `store.ts` bridges engine and socket into React via version counters. |
 | `web/src/{pages,components,lib}` | Dashboard, auth and settings. |
-| `skills/flexma` | The skill served at `/agents/skills/flexma/*` and embedded in the server binary with `include_str!`. Rebuild the server after editing it. |
+| `skills/flexma` | The skill served at `/agents/skills/flexma/*` and embedded in the server binary with `include_str!` (`api_tokens.rs`). Rebuild the server after editing it. |
+| `skills/unity-ui-to-flexma` | An optional skill (Unity uGUI export, with the editor scripts it installs), served the same way and installed by `/agents/install/unity-ui-to-flexma.sh` or `.ps1`. Every file in a skill folder must be listed in `api_tokens.rs`. |
 
 ## Commands
 
