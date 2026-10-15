@@ -29,9 +29,66 @@ pub enum ImageSource<'a> {
 /// The two rows of a 2D affine transform: (a, c, e) and (b, d, f).
 pub type Rows = ([f32; 3], [f32; 3]);
 
-/// Floats per brush dab: x, y, radius, hardness (texel space), then the
-/// premultiplied color.
-pub const DAB_FLOATS: usize = 8;
+/// Floats per brush dab: x, y, radius, hardness (texel space), the
+/// premultiplied color, then the tip angle (radians) and three spare floats.
+pub const DAB_FLOATS: usize = 12;
+
+/// Side of a smudge stroke's pickup buffer, in texels (it covers the tip).
+pub const SMUDGE_BUF: u32 = 128;
+
+/// How dabs look beyond a plain round stamp. Grain and tint textures are
+/// fixed to the layer; `origin` is the tile's top-left in layer px.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DabStyle {
+    pub tip: Option<TexId>,
+    /// The tip's half-extents as a fraction of the dab radius (longer side 1),
+    /// and its size in texels (for picking a mip level).
+    pub tip_extent: [f32; 2],
+    pub tip_px: [f32; 2],
+    /// Stamp the tip's colors instead of the brush color.
+    pub tip_color: bool,
+    pub grain: Option<TexId>,
+    /// The grain texture's size in layer px (it repeats).
+    pub grain_size: [f32; 2],
+    pub grain_strength: f32,
+    /// Grain and tint texture sizes in texels (mip levels).
+    pub grain_px: [f32; 2],
+    pub tint_px: [f32; 2],
+    pub tint: Option<TexId>,
+    pub tint_size: [f32; 2],
+    pub tint_strength: f32,
+    pub origin: [f32; 2],
+}
+
+/// A layer tile under a smudge dab.
+#[derive(Clone, Copy, Debug)]
+pub struct SmudgeTile {
+    /// None: not painted yet (reads as transparent, never written).
+    pub tex: Option<TexId>,
+    /// Top-left in layer px.
+    pub origin: [f32; 2],
+    pub write: bool,
+}
+
+/// One smudge dab: the layer under the dab is blended into the stroke's
+/// pickup buffer, which is then laid down through the tip.
+pub struct SmudgeDab<'a> {
+    pub tiles: &'a [SmudgeTile],
+    /// One dab (`DAB_FLOATS`), in layer px.
+    pub dab: [f32; DAB_FLOATS],
+    /// Tip and grain (`origin` unused: each tile has its own).
+    pub style: DabStyle,
+    /// The stroke's pickup buffer (a `SMUDGE_BUF` paint texture).
+    pub buffer: TexId,
+    /// The stroke's first dab: the buffer starts as the paint under it.
+    pub first: bool,
+    /// How much of the carried paint survives each dab.
+    pub keep: f32,
+    /// Premultiplied brush color mixed into the carried paint, and how much.
+    pub paint: [f32; 4],
+    pub mix: f32,
+    pub alpha_lock: bool,
+}
 
 /// How brush dabs blend into a paint tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,6 +123,8 @@ pub trait Backend {
     /// fills get mipmaps.
     fn upload_texture(&mut self, reuse: Option<TexId>, src: ImageSource, w: u32, h: u32, mipmaps: bool) -> Option<TexId>;
     fn delete_texture(&mut self, t: TexId);
+    /// A brush tip or texture (mipmapped); `repeat` tiles it (grain, tint).
+    fn upload_brush_texture(&mut self, src: ImageSource, w: u32, h: u32, repeat: bool) -> Option<TexId>;
     fn create_mesh(&mut self, vertices: &[f32], indices: &[u32]) -> Option<MeshId>;
     fn delete_mesh(&mut self, m: MeshId);
     /// The scene's shape instances (`gl::INST_FLOATS` floats each), drawn by index below.
@@ -103,9 +162,18 @@ pub trait Backend {
     fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool;
     fn clear_paint_texture(&mut self, tex: TexId, size: u32);
     /// Stamp dabs (`DAB_FLOATS` each, texel space) into a paint texture.
-    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode);
+    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode, style: &DabStyle);
+    /// Smudge dabs, in order (each one reads what the ones before it left).
+    fn smudge(&mut self, dabs: &[SmudgeDab]);
     fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32);
     /// Read a paint texture back: premultiplied RGBA rows, top first. `done`
     /// may run later (WebGPU maps buffers asynchronously).
     fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>);
+}
+
+/// Mip levels for the grain and tint textures: where a texel is about a layer
+/// pixel. Computed once here so both backends sample the same level.
+pub fn texture_lods(st: &DabStyle) -> [f32; 2] {
+    let lod = |px: [f32; 2], size: [f32; 2]| if size[0] > 0.0 && px[0] > 0.0 { (px[0] / size[0]).log2().max(0.0) } else { 0.0 };
+    [lod(st.grain_px, st.grain_size), lod(st.tint_px, st.tint_size)]
 }

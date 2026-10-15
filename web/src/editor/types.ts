@@ -35,6 +35,30 @@ export interface BrushSettings {
   pressureFlow: boolean;
   /** Stabilizer, 0…0.95. */
   smoothing: number;
+  /** Built-in tip image id (null: round). */
+  tip: string | null;
+  /** Stamp the tip's own colors (photo stamps). */
+  tipColor: boolean;
+  /** Tip rotation in degrees, and how far it turns with the stroke (0…1). */
+  angle: number;
+  follow: number;
+  /** Random variation per dab. */
+  sizeJitter: number;
+  angleJitter: number;
+  flowJitter: number;
+  scatter: number;
+  /** Paper grain fixed to the layer. */
+  grain: string | null;
+  grainScale: number;
+  grainStrength: number;
+  /** Color variation fixed to the layer. */
+  tint: string | null;
+  tintScale: number;
+  tintStrength: number;
+  /** Above 0: picks up and drags the paint under it; this much survives each dab. */
+  smudge: number;
+  /** Brush color mixed in while smudging. */
+  mix: number;
 }
 
 export interface LayerNode {

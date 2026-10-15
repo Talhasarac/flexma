@@ -582,6 +582,14 @@
   flex-wrap: wrap;
 }
 /* Brush panel */
+.brush-group-label {
+  margin: 2px 0 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 .brush-presets {
   display: flex;
   flex-wrap: wrap;

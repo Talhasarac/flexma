@@ -37,7 +37,46 @@ pub struct Brush {
     /// Stabilizer 0…1: how much the input path is smoothed (applied while
     /// painting; strokes store the smoothed points).
     pub smoothing: f32,
+
+    // ---- textured brushes (all off by default: a plain round brush) ----
+    /// Stamp image: a built-in tip id (see `TIPS`). None: round.
+    pub tip: Option<String>,
+    /// Stamp the tip's own colors (a photo) instead of the brush color.
+    pub tip_color: bool,
+    /// Tip rotation, degrees.
+    pub angle: f32,
+    /// 0…1: how far the tip turns to follow the stroke's direction.
+    pub follow: f32,
+    /// Random variation per dab: size and flow as a fraction, angle in degrees.
+    pub size_jitter: f32,
+    pub angle_jitter: f32,
+    pub flow_jitter: f32,
+    /// Random offset from the path, as a fraction of the diameter.
+    pub scatter: f32,
+    /// Paper grain fixed to the layer: a built-in texture id (see `TEXTURES`).
+    pub grain: Option<String>,
+    /// Grain size (1 = one texture pixel per layer pixel) and strength 0…1.
+    pub grain_scale: f32,
+    pub grain_strength: f32,
+    /// Color variation fixed to the layer: a built-in color texture id.
+    pub tint: Option<String>,
+    pub tint_scale: f32,
+    pub tint_strength: f32,
+    /// Smudge 0…1: above 0 the brush picks up the paint under it and drags
+    /// it along; this much of the carried paint survives each dab.
+    pub smudge: f32,
+    /// While smudging, how much of the brush color is mixed into the carried
+    /// paint each dab (mixer brushes).
+    pub mix: f32,
 }
+
+/// Built-in brush tips: id → file under `/brushes/`. An image never changes
+/// once shipped (strokes replay against it); a new look gets a new id.
+pub const TIPS: &[&str] = &["chalk-1", "roller-1", "knife-1", "cloud-1", "scribble-1", "speckle-1", "potato-1"];
+/// Built-in grain and color textures (tiled across the layer).
+pub const TEXTURES: &[&str] = &["paper-1", "drip-1", "noise-1", "colour-1"];
+/// Largest smudge dab diameter: a smudge dab reads the layer under it.
+pub const MAX_SMUDGE_SIZE: f32 = 400.0;
 
 impl Default for Brush {
     fn default() -> Self {
@@ -51,6 +90,22 @@ impl Default for Brush {
             pressure_size: true,
             pressure_flow: false,
             smoothing: 0.35,
+            tip: None,
+            tip_color: false,
+            angle: 0.0,
+            follow: 0.0,
+            size_jitter: 0.0,
+            angle_jitter: 0.0,
+            flow_jitter: 0.0,
+            scatter: 0.0,
+            grain: None,
+            grain_scale: 1.0,
+            grain_strength: 0.0,
+            tint: None,
+            tint_scale: 1.0,
+            tint_strength: 0.0,
+            smudge: 0.0,
+            mix: 0.0,
         }
     }
 }
@@ -73,11 +128,20 @@ impl Brush {
         (self.spacing.clamp(0.02, 2.0) * self.diameter(pressure)).max(0.5)
     }
 
-    /// Clamp to sane values (input from clients).
+    /// A smudging brush (it reads the layer under each dab).
+    pub fn smudges(&self) -> bool {
+        self.smudge > 0.0 && !self.erase
+    }
+
+    /// Clamp to sane values (input from clients). Unknown tips and textures
+    /// are dropped.
     pub fn sanitized(&self) -> Brush {
         let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        let known = |v: &Option<String>, list: &[&str]| v.clone().filter(|id| list.contains(&id.as_str()));
+        let smudge = f(self.smudge, 0.0, 1.0, 0.0);
+        let max_size = if smudge > 0.0 { MAX_SMUDGE_SIZE } else { 2000.0 };
         Brush {
-            size: f(self.size, 0.5, 2000.0, 12.0),
+            size: f(self.size, 0.5, max_size, 12.0),
             hardness: f(self.hardness, 0.0, 1.0, 0.8),
             flow: f(self.flow, 0.0, 1.0, 1.0),
             spacing: f(self.spacing, 0.02, 2.0, 0.1),
@@ -86,6 +150,22 @@ impl Brush {
             pressure_size: self.pressure_size,
             pressure_flow: self.pressure_flow,
             smoothing: f(self.smoothing, 0.0, 0.95, 0.0),
+            tip: known(&self.tip, TIPS),
+            tip_color: self.tip_color,
+            angle: f(self.angle, -360.0, 360.0, 0.0),
+            follow: f(self.follow, 0.0, 1.0, 0.0),
+            size_jitter: f(self.size_jitter, 0.0, 1.0, 0.0),
+            angle_jitter: f(self.angle_jitter, 0.0, 180.0, 0.0),
+            flow_jitter: f(self.flow_jitter, 0.0, 1.0, 0.0),
+            scatter: f(self.scatter, 0.0, 4.0, 0.0),
+            grain: known(&self.grain, TEXTURES),
+            grain_scale: f(self.grain_scale, 0.05, 20.0, 1.0),
+            grain_strength: f(self.grain_strength, 0.0, 1.0, 0.0),
+            tint: known(&self.tint, TEXTURES),
+            tint_scale: f(self.tint_scale, 0.05, 20.0, 1.0),
+            tint_strength: f(self.tint_strength, 0.0, 1.0, 0.0),
+            smudge,
+            mix: f(self.mix, 0.0, 1.0, 0.0),
         }
     }
 }
@@ -108,7 +188,16 @@ pub struct Stroke {
 impl Stroke {
     /// Layer-pixel bounds of everything the stroke can touch: (x0, y0, x1, y1).
     pub fn bounds(&self) -> [f32; 4] {
-        let r = self.brush.diameter(1.0) / 2.0 + 2.0;
+        let b = &self.brush;
+        // Round dabs stay within half the diameter; tips are drawn with the
+        // longer side at the diameter and may be rotated; jitter and scatter
+        // reach further.
+        let reach = if b.tip.is_some() || b.size_jitter > 0.0 || b.scatter > 0.0 {
+            b.diameter(1.0) * ((1.0 + b.size_jitter) * std::f32::consts::FRAC_1_SQRT_2 + b.scatter)
+        } else {
+            b.diameter(1.0) / 2.0
+        };
+        let r = reach + 2.0;
         let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
         for p in &self.points {
             b[0] = b[0].min(p[0] - r);
@@ -160,14 +249,17 @@ pub fn tiles_in(b: [f32; 4], w: f64, h: f64) -> Vec<(i32, i32)> {
     out
 }
 
-/// One round brush stamp, in layer px.
+/// One brush stamp, in layer px.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dab {
     pub x: f32,
     pub y: f32,
+    /// Half the diameter (for tips: half the longer side).
     pub radius: f32,
     /// 0…1, before the color's alpha.
     pub alpha: f32,
+    /// Tip rotation, radians.
+    pub angle: f32,
 }
 
 /// Where dab placement left off, so a live stroke can be stamped as its
@@ -178,6 +270,65 @@ pub struct DabCursor {
     next: usize,
     /// Distance still to go along the path before the next dab.
     to_next: f32,
+    /// Jitter is random per dab but the same on every client: seeded by the
+    /// stroke id and numbered by dab.
+    seed: u64,
+    count: u32,
+}
+
+impl DabCursor {
+    /// A cursor for `stroke_id` (its jitter sequence).
+    pub fn new(stroke_id: &str) -> DabCursor {
+        // FNV-1a.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in stroke_id.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        DabCursor { seed: h, ..DabCursor::default() }
+    }
+
+    /// Dabs placed so far.
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+}
+
+/// A random number in [0, 1) for dab `i`, channel `k` (SplitMix64).
+fn rand01(seed: u64, i: u32, k: u32) -> f32 {
+    let mut z = seed ^ ((i as u64) << 8 | k as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    (z >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// Jitter, scatter and rotation for a dab placed at (x, y) with pressure `pr`,
+/// travelling in `dir` (radians; None for the first dab).
+fn make_dab(brush: &Brush, cursor: &mut DabCursor, x: f32, y: f32, pr: f32, dir: Option<f32>) -> Dab {
+    let i = cursor.count;
+    cursor.count += 1;
+    let mut dab = Dab { x, y, radius: brush.diameter(pr) / 2.0, alpha: brush.alpha(pr), angle: 0.0 };
+    let textured = brush.tip.is_some() || brush.size_jitter > 0.0 || brush.flow_jitter > 0.0 || brush.angle_jitter > 0.0 || brush.scatter > 0.0;
+    if !textured {
+        // A plain round brush: exactly the dabs it always had.
+        return dab;
+    }
+    let r = |k: u32| rand01(cursor.seed, i, k);
+    if brush.size_jitter > 0.0 {
+        dab.radius *= 1.0 + brush.size_jitter * (r(0) * 2.0 - 1.0);
+    }
+    if brush.flow_jitter > 0.0 {
+        dab.alpha *= 1.0 - brush.flow_jitter * r(1);
+    }
+    if brush.scatter > 0.0 {
+        let (a, d) = (r(2) * std::f32::consts::TAU, r(3).sqrt() * brush.scatter * brush.diameter(pr));
+        dab.x += a.cos() * d;
+        dab.y += a.sin() * d;
+    }
+    let follow = dir.map(|d| d * brush.follow).unwrap_or(0.0);
+    dab.angle = brush.angle.to_radians() + follow + brush.angle_jitter.to_radians() * (r(4) * 2.0 - 1.0);
+    dab
 }
 
 /// Dabs for `points[cursor..]`, continuing from `cursor`.
@@ -188,7 +339,7 @@ pub fn dabs(brush: &Brush, points: &[[f32; 3]], cursor: &mut DabCursor) -> Vec<D
     }
     if cursor.next == 0 {
         let p = points[0];
-        out.push(Dab { x: p[0], y: p[1], radius: brush.diameter(p[2]) / 2.0, alpha: brush.alpha(p[2]) });
+        out.push(make_dab(brush, cursor, p[0], p[1], p[2], None));
         cursor.to_next = brush.step(p[2]);
         cursor.next = 1;
     }
@@ -196,18 +347,14 @@ pub fn dabs(brush: &Brush, points: &[[f32; 3]], cursor: &mut DabCursor) -> Vec<D
         let a = points[cursor.next - 1];
         let b = points[cursor.next];
         let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        let dir = (b[1] - a[1]).atan2(b[0] - a[0]);
         let mut d = 0.0;
         // Stamp along the segment, every `step` (which follows the pressure).
         while cursor.to_next <= len - d && len > 0.0 {
             d += cursor.to_next;
             let t = d / len;
             let pr = a[2] + (b[2] - a[2]) * t;
-            out.push(Dab {
-                x: a[0] + (b[0] - a[0]) * t,
-                y: a[1] + (b[1] - a[1]) * t,
-                radius: brush.diameter(pr) / 2.0,
-                alpha: brush.alpha(pr),
-            });
+            out.push(make_dab(brush, cursor, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, pr, Some(dir)));
             cursor.to_next = brush.step(pr);
         }
         cursor.to_next -= len - d;
@@ -218,7 +365,7 @@ pub fn dabs(brush: &Brush, points: &[[f32; 3]], cursor: &mut DabCursor) -> Vec<D
 
 /// Every dab of a finished stroke.
 pub fn all_dabs(stroke: &Stroke) -> Vec<Dab> {
-    dabs(&stroke.brush, &stroke.points, &mut DabCursor::default())
+    dabs(&stroke.brush, &stroke.points, &mut DabCursor::new(&stroke.id))
 }
 
 #[cfg(test)]
@@ -273,6 +420,67 @@ mod tests {
         assert_eq!(s.tiles(300.0, 100.0), vec![(0, 0), (1, 0)]);
     }
 
+    /// Round brushes place exactly the dabs they did before textured brushes
+    /// existed, so saved paintings replay onto their tile snapshots.
+    #[test]
+    fn round_dabs_are_pinned() {
+        let s = Stroke {
+            id: "pin".into(),
+            layer: "l".into(),
+            brush: Brush { size: 14.0, spacing: 0.15, pressure_size: true, pressure_flow: true, flow: 0.7, ..Brush::default() },
+            points: vec![[3.0, 4.0, 0.2], [40.5, 9.25, 0.9], [41.0, 60.0, 0.5], [90.0, 61.0, 1.0]],
+            alpha_lock: false,
+        };
+        let d = all_dabs(&s);
+        assert_eq!(d.len(), 101);
+        let pins: [(usize, [u32; 4]); 5] = [
+            (0, [1077936128, 1082130432, 1072466756, 1041194025]),
+            (1, [1080238992, 1082291632, 1073020426, 1041675477]),
+            (7, [1089010195, 1083387200, 1075262580, 1044947573]),
+            (50, [1109590161, 1107999054, 1084364233, 1056618703]),
+            (100, [1118918968, 1114891339, 1088239184, 1060161178]),
+        ];
+        for (i, bits) in pins {
+            assert_eq!([d[i].x.to_bits(), d[i].y.to_bits(), d[i].radius.to_bits(), d[i].alpha.to_bits()], bits, "dab {i}");
+            assert_eq!(d[i].angle, 0.0);
+        }
+    }
+
+    #[test]
+    fn jitter_is_the_same_everywhere_and_incremental() {
+        let brush = Brush { tip: Some("chalk-1".into()), size: 30.0, size_jitter: 0.4, angle_jitter: 90.0, flow_jitter: 0.5, scatter: 0.3, follow: 1.0, ..Brush::default() };
+        let pts: Vec<[f32; 3]> = (0..30).map(|i| [i as f32 * 5.0, (i as f32 * 0.3).sin() * 30.0, 1.0]).collect();
+        let s = Stroke { id: "j1".into(), layer: "l".into(), brush: brush.clone(), points: pts.clone(), alpha_lock: false };
+        let a = all_dabs(&s);
+        assert_eq!(a, all_dabs(&s.clone()));
+        let mut cur = DabCursor::new("j1");
+        let mut live = Vec::new();
+        for n in [1, 3, 4, 17, 30] {
+            live.extend(dabs(&brush, &pts[..n], &mut cur));
+        }
+        assert_eq!(live, a);
+        // Another stroke gets other jitter; the radii really vary.
+        let b = all_dabs(&Stroke { id: "j2".into(), ..s });
+        assert_ne!(a[3].radius, b[3].radius);
+        assert!(a.iter().any(|d| d.radius > 15.5) && a.iter().any(|d| d.radius < 14.5));
+    }
+
+    #[test]
+    fn unknown_tips_are_dropped() {
+        let b = Brush { tip: Some("../../etc".into()), grain: Some("paper-1".into()), smudge: 0.5, size: 900.0, ..Brush::default() }.sanitized();
+        assert_eq!(b.tip, None);
+        assert_eq!(b.grain.as_deref(), Some("paper-1"));
+        assert_eq!(b.size, MAX_SMUDGE_SIZE);
+    }
+
+    #[test]
+    fn old_brush_json_still_reads() {
+        let b: Brush = serde_json::from_str(r#"{"size":20,"hardness":0.5,"flow":1,"spacing":0.1,"color":[0,0,0,1],"erase":false,"pressureSize":true,"pressureFlow":false,"smoothing":0.3}"#).unwrap();
+        assert_eq!(b.tip, None);
+        assert_eq!(b.grain_scale, 1.0);
+        assert!(!b.smudges());
+    }
+
     #[test]
     fn rejects_bad_strokes() {
         assert!(stroke(vec![]).validate().is_err());
@@ -280,3 +488,4 @@ mod tests {
         assert!(stroke(vec![[1.0, 2.0, 0.5]]).validate().is_ok());
     }
 }
+

@@ -670,6 +670,9 @@ impl FlexmaEditor {
         }
         if let Ok(b) = serde_json::from_value::<flexma_doc::raster::Brush>(v) {
             *target = flexma_doc::raster::Brush { erase: eraser, ..b.sanitized() };
+            // Load its images now, before the first stroke needs them.
+            let b = target.clone();
+            self.ed.paint.preload(&b);
         }
         self.ed.ui_version += 1;
         self.ed.dirty = true;

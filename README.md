@@ -30,7 +30,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Workspace fonts: upload .ttf/.otf files or add any of the ~1,950 Google Fonts families (served by your own server, not Google). Everyone in the workspace, share-link viewers and exports get the same fonts, and missing fonts are flagged with one-click fixes.
 - Shared color and text styles: change one and every layer using it updates, for everyone.
 - Export to PNG and SVG.
-- Painting files: paint layers with a GPU brush and eraser, pen pressure, a stabilizer, presets and locked transparency. Several people can paint on the same layer at once and see each other's strokes as they're drawn.
+- Painting files: paint layers with GPU brushes (round, chalk, pencil, cloud, roller, palette knife and stamp tips with paper grain and color variation), real smudge and color-mixing brushes, erasers, pen pressure, a stabilizer and locked transparency. Several people can paint on the same layer at once and see each other's strokes as they're drawn.
 
 **Collaboration**
 - Real-time multiplayer with live cursors, selections and presence.

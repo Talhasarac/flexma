@@ -13,9 +13,15 @@
 //! client that painted the last one uploads a new base (leaving the newest
 //! strokes out so they can still be undone), and after a quiet moment it
 //! uploads the tile's latest look for exports and thumbnails.
+//!
+//! Textured brushes stamp built-in tip images and read grain and color
+//! textures (loaded from `/brushes/` before any stroke that needs them is
+//! drawn). Smudge strokes read the layer under each dab, so they run dab by
+//! dab across tiles with a pickup buffer per stroke; a tile they touch is
+//! only ever redrawn together with every other tile they touch.
 
-use crate::backend::{Backend, ImageSource, PaintMode, TexId};
-use flexma_doc::raster::{self, Dab, DabCursor, Stroke, TILE};
+use crate::backend::{Backend, DabStyle, ImageSource, PaintMode, SmudgeDab, SmudgeTile, TexId, DAB_FLOATS, SMUDGE_BUF};
+use flexma_doc::raster::{self, Brush, Dab, DabCursor, Stroke, TILE};
 use flexma_doc::{Document, NodeType};
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
@@ -35,6 +41,24 @@ const UNDO_KEEP: usize = 12;
 const VIEW_AFTER_MS: f64 = 2500.0;
 /// Others' live strokes that stop updating are dropped after this long.
 const LIVE_TIMEOUT_MS: f64 = 15_000.0;
+
+/// A brush tip or texture image (see `raster::TIPS` and `raster::TEXTURES`).
+struct Asset {
+    tex: Option<TexId>,
+    w: f32,
+    h: f32,
+    /// Loaded, or failed (then dabs fall back to a round tip, no texture).
+    ready: bool,
+}
+
+/// GPU work queued as strokes come in, done in order by `apply_gpu`.
+enum Work {
+    /// Dabs for one tile.
+    Dabs { layer: String, key: Key, data: Vec<f32>, brush: Rc<Brush>, mode: PaintMode },
+    /// Smudge dabs (layer px), one after another across tiles. `keys`: the
+    /// tiles they cover.
+    Smudge { layer: String, id: String, brush: Rc<Brush>, alpha_lock: bool, dabs: Vec<Dab>, first: bool, keys: Vec<Key> },
+}
 
 #[derive(Clone)]
 struct Committed {
@@ -123,8 +147,14 @@ pub struct PaintState {
     /// Points of the active stroke already sent live.
     live_sent: usize,
     live: HashMap<String, Live>,
-    /// Dabs to stamp: (layer, tile, instance data, mode).
-    queue: Vec<(String, Key, Vec<f32>, PaintMode)>,
+    queue: Vec<Work>,
+    /// Brush images by id, and loads that finished (id, image).
+    assets: HashMap<String, Asset>,
+    asset_loads: Rc<RefCell<Vec<(String, Key, String, Option<HtmlImageElement>)>>>,
+    /// URL prefix of brush images (`{asset_base}{id}.png`).
+    pub asset_base: String,
+    /// Pickup buffers of smudge strokes in progress, by stroke id.
+    buffers: HashMap<String, TexId>,
     outbox: Vec<String>,
     loaded: bool,
     early: Vec<Value>,
@@ -145,54 +175,80 @@ pub struct PaintState {
     doc_version: u64,
 }
 
-fn premul(stroke: &Stroke, d: &Dab) -> [f32; 4] {
-    let c = stroke.brush.color;
-    if stroke.brush.erase {
+fn premul(brush: &Brush, d: &Dab) -> [f32; 4] {
+    let c = brush.color;
+    if brush.erase {
         return [0.0, 0.0, 0.0, d.alpha];
     }
     let a = (c[3] * d.alpha).clamp(0.0, 1.0);
     [c[0] * a, c[1] * a, c[2] * a, a]
 }
 
-fn mode_of(s: &Stroke) -> PaintMode {
-    if s.brush.erase {
+fn mode_of(brush: &Brush, alpha_lock: bool) -> PaintMode {
+    if brush.erase {
         PaintMode::Erase
-    } else if s.alpha_lock {
+    } else if alpha_lock {
         PaintMode::AlphaLock
     } else {
         PaintMode::Paint
     }
 }
 
-/// Per-tile dab instance data for `dabs`, limited to `only` tiles.
-fn bucket(stroke: &Stroke, dabs: &[Dab], layer: &Layer, only: Option<&HashSet<Key>>) -> HashMap<Key, Vec<f32>> {
+/// How far a dab can reach from its center: a tip's longer side is the
+/// diameter, and it may be rotated.
+fn dab_reach(brush: &Brush, d: &Dab) -> f32 {
+    if brush.tip.is_some() {
+        d.radius * std::f32::consts::SQRT_2
+    } else {
+        d.radius
+    }
+}
+
+/// Tiles of `layer` a dab covers.
+fn dab_tiles(brush: &Brush, d: &Dab, layer: &Layer) -> impl Iterator<Item = Key> {
     let t = TILE as f32;
-    let mut out: HashMap<Key, Vec<f32>> = HashMap::new();
     let max_x = ((layer.w as f32 / t).ceil() as i32 - 1).max(0);
     let max_y = ((layer.h as f32 / t).ceil() as i32 - 1).max(0);
-    let hardness = stroke.brush.hardness;
+    let r = dab_reach(brush, d) + 1.5;
+    let (x0, x1) = (((d.x - r) / t).floor() as i32, ((d.x + r) / t).floor() as i32);
+    let (y0, y1) = (((d.y - r) / t).floor() as i32, ((d.y + r) / t).floor() as i32);
+    (y0.max(0)..=y1.min(max_y)).flat_map(move |ty| (x0.max(0)..=x1.min(max_x)).map(move |tx| (tx, ty)))
+}
+
+/// Per-tile dab instance data for `dabs`, limited to `only` tiles.
+fn bucket(brush: &Brush, dabs: &[Dab], layer: &Layer, only: Option<&HashSet<Key>>) -> HashMap<Key, Vec<f32>> {
+    let t = TILE as f32;
+    let mut out: HashMap<Key, Vec<f32>> = HashMap::new();
     for d in dabs {
-        let col = premul(stroke, d);
-        let r = d.radius + 1.5;
-        let (x0, x1) = (((d.x - r) / t).floor() as i32, ((d.x + r) / t).floor() as i32);
-        let (y0, y1) = (((d.y - r) / t).floor() as i32, ((d.y + r) / t).floor() as i32);
-        for ty in y0.max(0)..=y1.min(max_y) {
-            for tx in x0.max(0)..=x1.min(max_x) {
-                if only.is_some_and(|o| !o.contains(&(tx, ty))) {
-                    continue;
-                }
-                let v = out.entry((tx, ty)).or_default();
-                v.extend_from_slice(&[d.x - tx as f32 * t, d.y - ty as f32 * t, d.radius, hardness]);
-                v.extend_from_slice(&col);
+        let col = premul(brush, d);
+        for (tx, ty) in dab_tiles(brush, d, layer) {
+            if only.is_some_and(|o| !o.contains(&(tx, ty))) {
+                continue;
             }
+            let v = out.entry((tx, ty)).or_default();
+            v.extend_from_slice(&[d.x - tx as f32 * t, d.y - ty as f32 * t, d.radius, brush.hardness]);
+            v.extend_from_slice(&col);
+            v.extend_from_slice(&[d.angle, 0.0, 0.0, 0.0]);
         }
     }
     out
 }
 
+/// One smudge dab's instance data, in layer px (the color slot carries only
+/// the flow).
+fn smudge_dab(brush: &Brush, d: &Dab) -> [f32; DAB_FLOATS] {
+    [d.x, d.y, d.radius, brush.hardness, 0.0, 0.0, 0.0, d.alpha, d.angle, 0.0, 0.0, 0.0]
+}
+
+/// The brush color, premultiplied (what mixer brushes add while smudging).
+fn paint_color(brush: &Brush) -> [f32; 4] {
+    let c = brush.color;
+    [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]
+}
+
 impl PaintState {
     pub fn new() -> PaintState {
-        PaintState::default()
+        PaintState { asset_base: "/brushes/".into(), ..PaintState::default() }
     }
 
     /// Forget the file's paint (a reconnect reloads it), keeping our own
@@ -220,6 +276,10 @@ impl PaintState {
             images: old.images,
             snapshots: old.snapshots,
             trash: old.trash,
+            assets: old.assets,
+            asset_loads: old.asset_loads,
+            asset_base: old.asset_base,
+            buffers: old.buffers,
             ..PaintState::default()
         };
         self.dirty = true;
@@ -286,29 +346,100 @@ impl PaintState {
         self.layers.get_mut(layer).map(|l| l.tiles.entry(k).or_default())
     }
 
-    /// Stamp `dabs` of `stroke` (or mark tiles for rebuild when they can't take
-    /// dabs yet). `provisional` records the stroke on the tiles it touches.
-    fn stamp(&mut self, stroke: &Stroke, dabs: &[Dab], provisional: bool) {
-        let Some(layer) = self.layers.get(&stroke.layer) else { return };
-        let buckets = bucket(stroke, dabs, layer, None);
-        let mode = mode_of(stroke);
+    /// Stamp `dabs` of a stroke (or mark tiles for rebuild when they can't
+    /// take dabs yet). `provisional` records the stroke on the tiles it
+    /// touches; `first`: the dabs start the stroke (smudge pickup).
+    #[allow(clippy::too_many_arguments)]
+    fn stamp(&mut self, id: &str, layer_id: &str, brush: &Brush, alpha_lock: bool, dabs: &[Dab], provisional: bool, first: bool) {
+        let assets = self.ensure_assets(brush);
+        let Some(layer) = self.layers.get(layer_id) else { return };
+        let smudge = brush.smudges();
+        let buckets = bucket(brush, dabs, layer, None);
+        let keys: Vec<Key> = buckets.keys().copied().collect();
+        let mode = mode_of(brush, alpha_lock);
+        let shared = Rc::new(brush.clone());
         for (k, data) in buckets {
-            let Some(t) = self.tile_mut(&stroke.layer, k) else { continue };
+            let Some(t) = self.tile_mut(layer_id, k) else { continue };
             if provisional {
-                match t.provisional.iter().position(|p| *p == stroke.id) {
-                    None => t.provisional.push(stroke.id.clone()),
+                match t.provisional.iter().position(|p| p == id) {
+                    None => t.provisional.push(id.to_string()),
                     // Someone else's stroke went down since this one started here.
                     Some(i) if i + 1 != t.provisional.len() => t.interleaved = true,
                     Some(_) => {}
                 }
             }
-            if t.ready() {
-                self.queue.push((stroke.layer.clone(), k, data, mode));
-            } else {
+            if !assets || !(t.ready() || (smudge && t.tex.is_none() && !t.loading && t.base_url.is_none() && !t.needs_rebuild)) {
                 t.needs_rebuild = true;
+            } else if !smudge {
+                self.queue.push(Work::Dabs { layer: layer_id.to_string(), key: k, data, brush: shared.clone(), mode });
             }
         }
+        if smudge && assets && !dabs.is_empty() {
+            self.queue.push(Work::Smudge {
+                layer: layer_id.to_string(),
+                id: id.to_string(),
+                brush: shared,
+                alpha_lock,
+                dabs: dabs.to_vec(),
+                first,
+                keys,
+            });
+        }
         self.dirty = true;
+    }
+
+    // ---------------------------------------------------------------- brush images
+
+    /// Whether every image `brush` uses is loaded; starts loading the rest.
+    fn ensure_assets(&mut self, brush: &Brush) -> bool {
+        let mut ready = true;
+        for id in [&brush.tip, &brush.grain, &brush.tint].into_iter().flatten() {
+            match self.assets.get(id) {
+                Some(a) => ready &= a.ready,
+                None => {
+                    self.assets.insert(id.clone(), Asset { tex: None, w: 0.0, h: 0.0, ready: false });
+                    let url = format!("{}{id}.png", self.asset_base);
+                    start_image_load(url, id.clone(), (0, 0), self.asset_loads.clone(), self.wake.clone());
+                    ready = false;
+                }
+            }
+        }
+        ready
+    }
+
+    /// Start loading a brush's images (before its first stroke).
+    pub fn preload(&mut self, brush: &Brush) {
+        self.ensure_assets(brush);
+    }
+
+    /// How `brush` draws on tile `k`.
+    fn style_for(&self, brush: &Brush, k: Key) -> DabStyle {
+        let loaded = |id: &Option<String>| id.as_ref().and_then(|i| self.assets.get(i)).filter(|a| a.ready && a.tex.is_some());
+        let tip = loaded(&brush.tip);
+        let grain = loaded(&brush.grain).filter(|_| brush.grain_strength > 0.0);
+        let tint = loaded(&brush.tint).filter(|_| brush.tint_strength > 0.0);
+        let (tip_extent, tip_px) = match tip {
+            Some(a) => {
+                let m = a.w.max(a.h).max(1.0);
+                ([a.w / m, a.h / m], [a.w, a.h])
+            }
+            None => ([1.0, 1.0], [0.0, 0.0]),
+        };
+        DabStyle {
+            tip: tip.and_then(|a| a.tex),
+            tip_extent,
+            tip_px,
+            tip_color: brush.tip_color && tip.is_some(),
+            grain: grain.and_then(|a| a.tex),
+            grain_size: grain.map(|a| [a.w * brush.grain_scale, a.h * brush.grain_scale]).unwrap_or_default(),
+            grain_px: grain.map(|a| [a.w, a.h]).unwrap_or_default(),
+            grain_strength: brush.grain_strength,
+            tint: tint.and_then(|a| a.tex),
+            tint_size: tint.map(|a| [a.w * brush.tint_scale, a.h * brush.tint_scale]).unwrap_or_default(),
+            tint_px: tint.map(|a| [a.w, a.h]).unwrap_or_default(),
+            tint_strength: brush.tint_strength,
+            origin: [k.0 as f32 * TILE as f32, k.1 as f32 * TILE as f32],
+        }
     }
 
     fn rebuild(&mut self, layer: &str, keys: impl IntoIterator<Item = Key>) {
@@ -467,15 +598,20 @@ impl PaintState {
                     !self.was_provisional(&stroke.id, &stroke.layer, *k)
                 })
                 .collect();
-            if !fresh.is_empty() {
+            // A smudge stroke reads what's under it as it goes: only a
+            // replay in order gets it right.
+            if !fresh.is_empty() && (stroke.brush.smudges() || !self.ensure_assets(&stroke.brush)) {
+                needs.extend(fresh);
+            } else if !fresh.is_empty() {
                 let only: HashSet<Key> = fresh.into_iter().collect();
                 let dabs = raster::all_dabs(&stroke);
                 if let Some(layer) = self.layers.get(&stroke.layer) {
-                    let mode = mode_of(&stroke);
-                    for (k, data) in bucket(&stroke, &dabs, layer, Some(&only)) {
+                    let mode = mode_of(&stroke.brush, stroke.alpha_lock);
+                    let brush = Rc::new(stroke.brush.clone());
+                    for (k, data) in bucket(&stroke.brush, &dabs, layer, Some(&only)) {
                         let ready = self.layers.get(&stroke.layer).and_then(|l| l.tiles.get(&k)).is_some_and(Tile::ready);
                         if ready {
-                            self.queue.push((stroke.layer.clone(), k, data, mode));
+                            self.queue.push(Work::Dabs { layer: stroke.layer.clone(), key: k, data, brush: brush.clone(), mode });
                         } else {
                             needs.push(k);
                         }
@@ -513,17 +649,20 @@ impl PaintState {
                 // A live stroke we watched: stamp what the live chunks missed
                 // (it stays "live" until committed below, so it counts as drawn).
                 let mut rest = Vec::new();
+                let mut first = false;
                 if let Some(l) = self.live.get_mut(&id) {
-                    rest = raster::dabs(&stroke.brush, &stroke.points, &mut l.cursor);
-                    l.stroke = stroke.clone();
+                    first = l.cursor.count() == 0;
+                    rest = raster::dabs(&l.stroke.brush, &stroke.points, &mut l.cursor);
+                    l.stroke.points = stroke.points.clone();
                     if let Some(layer) = self.layers.get(&stroke.layer) {
-                        for k in bucket(&stroke, &rest, layer, None).keys() {
-                            l.touched.insert(*k);
+                        for d in &rest {
+                            l.touched.extend(dab_tiles(&l.stroke.brush, d, layer));
                         }
                     }
                 }
                 if !rest.is_empty() {
-                    self.stamp(&stroke, &rest, true);
+                    let brush = self.live.get(&id).map(|l| l.stroke.brush.clone()).unwrap_or_else(|| stroke.brush.clone());
+                    self.stamp(&id, &stroke.layer, &brush, stroke.alpha_lock, &rest, true, first);
                 }
                 let ours = mine || self.pending.iter().any(|p| p.id == id);
                 let undone_early = self.undo_on_ack.remove(&id);
@@ -619,20 +758,22 @@ impl PaintState {
             let Some(brush) = m.get("brush").and_then(|b| serde_json::from_value::<raster::Brush>(b.clone()).ok()) else { return };
             let alpha_lock = m.get("alphaLock").and_then(Value::as_bool).unwrap_or(false);
             let stroke = Stroke { id: id.to_string(), layer: layer.to_string(), brush: brush.sanitized(), points: Vec::new(), alpha_lock };
-            self.live.insert(id.to_string(), Live { stroke, cursor: DabCursor::default(), from: from.to_string(), touched: HashSet::new(), last_ms: now });
+            self.live.insert(id.to_string(), Live { stroke, cursor: DabCursor::new(id), from: from.to_string(), touched: HashSet::new(), last_ms: now });
         }
         let Some(mut l) = self.live.remove(id) else { return };
-        l.stroke.points.extend(points.into_iter().filter(|p| p.iter().all(|v| v.is_finite())).take(raster::MAX_POINTS));
+        let room = raster::MAX_POINTS.saturating_sub(l.stroke.points.len());
+        l.stroke.points.extend(points.into_iter().filter(|p| p.iter().all(|v| v.is_finite())).take(room));
         l.last_ms = now;
+        let first = l.cursor.count() == 0;
         let dabs = raster::dabs(&l.stroke.brush, &l.stroke.points, &mut l.cursor);
         if let Some(layer) = self.layers.get(&l.stroke.layer) {
-            for k in bucket(&l.stroke, &dabs, layer, None).keys() {
-                l.touched.insert(*k);
+            for d in &dabs {
+                l.touched.extend(dab_tiles(&l.stroke.brush, d, layer));
             }
         }
-        let stroke = l.stroke.clone();
+        let (layer, brush, alpha_lock) = (l.stroke.layer.clone(), l.stroke.brush.clone(), l.stroke.alpha_lock);
         self.live.insert(id.to_string(), l);
-        self.stamp(&stroke, &dabs, true);
+        self.stamp(id, &layer, &brush, alpha_lock, &dabs, true, first);
     }
 
     /// Someone left: drop their unfinished strokes.
@@ -707,16 +848,16 @@ impl PaintState {
 
     pub fn begin(&mut self, stroke: Stroke, now: f64) {
         self.live_sent = 0;
-        let dabs_stroke = stroke.clone();
-        let mut l = Live { stroke, cursor: DabCursor::default(), from: self.client_id.clone(), touched: HashSet::new(), last_ms: now };
+        let mut l = Live { cursor: DabCursor::new(&stroke.id), stroke, from: self.client_id.clone(), touched: HashSet::new(), last_ms: now };
         let dabs = raster::dabs(&l.stroke.brush, &l.stroke.points, &mut l.cursor);
         if let Some(layer) = self.layers.get(&l.stroke.layer) {
-            for k in bucket(&l.stroke, &dabs, layer, None).keys() {
-                l.touched.insert(*k);
+            for d in &dabs {
+                l.touched.extend(dab_tiles(&l.stroke.brush, d, layer));
             }
         }
+        let (id, layer, brush, alpha_lock) = (l.stroke.id.clone(), l.stroke.layer.clone(), l.stroke.brush.clone(), l.stroke.alpha_lock);
         self.active = Some(l);
-        self.stamp(&dabs_stroke, &dabs, true);
+        self.stamp(&id, &layer, &brush, alpha_lock, &dabs, true, true);
     }
 
     pub fn add_point(&mut self, p: [f32; 3]) {
@@ -728,14 +869,14 @@ impl PaintState {
         a.stroke.points.push(p);
         let dabs = raster::dabs(&a.stroke.brush, &a.stroke.points, &mut a.cursor);
         if let Some(layer) = self.layers.get(&a.stroke.layer) {
-            for k in bucket(&a.stroke, &dabs, layer, None).keys() {
-                a.touched.insert(*k);
+            for d in &dabs {
+                a.touched.extend(dab_tiles(&a.stroke.brush, d, layer));
             }
         }
-        let stroke = a.stroke.clone();
+        let (id, layer, brush, alpha_lock) = (a.stroke.id.clone(), a.stroke.layer.clone(), a.stroke.brush.clone(), a.stroke.alpha_lock);
         self.active = Some(a);
         if !dabs.is_empty() {
-            self.stamp(&stroke, &dabs, true);
+            self.stamp(&id, &layer, &brush, alpha_lock, &dabs, true, false);
         }
     }
 
@@ -809,10 +950,25 @@ impl PaintState {
 
     // ---------------------------------------------------------------- GPU
 
-    /// Run pending GPU work: base images, rebuilds, queued dabs, snapshots.
+    /// Run pending GPU work: brush images, base images, rebuilds, queued
+    /// dabs, snapshots.
     pub fn apply_gpu(&mut self, gpu: &mut dyn Backend, now: f64) {
         for tex in self.freed.drain(..).chain(self.trash.borrow_mut().drain(..)) {
             gpu.delete_texture(tex);
+        }
+        // Brush images that finished loading (a failed one counts as ready:
+        // its strokes fall back to a round tip).
+        let loaded: Vec<_> = self.asset_loads.borrow_mut().drain(..).collect();
+        for (id, _, _, img) in loaded {
+            let Some(a) = self.assets.get_mut(&id) else { continue };
+            if let Some(img) = img {
+                let (w, h) = (img.natural_width(), img.natural_height());
+                let repeat = raster::TEXTURES.contains(&id.as_str());
+                a.tex = gpu.upload_brush_texture(ImageSource::Image(&img), w, h, repeat);
+                (a.w, a.h) = (w as f32, h as f32);
+            }
+            a.ready = true;
+            self.dirty = true;
         }
         // Base images that finished loading.
         let loaded: Vec<_> = self.images.borrow_mut().drain(..).collect();
@@ -848,40 +1004,174 @@ impl PaintState {
                 rebuild.entry(lid.clone()).or_default().insert(*k);
             }
         }
-        for (lid, keys) in &rebuild {
-            self.rebuild_tiles(gpu, lid, keys);
-        }
-        for (lid, k, data, mode) in std::mem::take(&mut self.queue) {
-            if rebuild.get(&lid).is_some_and(|r| r.contains(&k)) {
+        let mut rebuilt: HashMap<String, HashSet<Key>> = HashMap::new();
+        for (lid, mut keys) in rebuild {
+            // Smudge strokes read neighboring tiles: redraw all of theirs together.
+            self.smudge_closure(&lid, &mut keys);
+            if self.wait_for_bases(&lid, &keys) || !self.rebuild_tiles(gpu, &lid, &keys) {
                 continue;
             }
-            let Some(t) = self.layers.get_mut(&lid).filter(|l| l.present).and_then(|l| l.tiles.get_mut(&k)) else { continue };
-            if t.tex.is_none() && !t.loading && t.base_url.is_none() {
-                t.tex = gpu.create_paint_texture(TILE);
+            rebuilt.insert(lid, keys);
+        }
+        let covered = |lid: &str, k: &Key| rebuilt.get(lid).is_some_and(|r| r.contains(k));
+        for work in std::mem::take(&mut self.queue) {
+            match work {
+                Work::Dabs { layer, key, data, brush, mode } => {
+                    if covered(&layer, &key) {
+                        continue;
+                    }
+                    let style = self.style_for(&brush, key);
+                    let Some(t) = self.layers.get_mut(&layer).filter(|l| l.present).and_then(|l| l.tiles.get_mut(&key)) else { continue };
+                    if t.tex.is_none() && !t.loading && t.base_url.is_none() {
+                        t.tex = gpu.create_paint_texture(TILE);
+                    }
+                    match t.tex {
+                        Some(tex) if !t.loading && !t.needs_rebuild => gpu.paint_dabs(tex, TILE, &data, mode, &style),
+                        _ => t.needs_rebuild = true,
+                    }
+                }
+                Work::Smudge { layer, id, brush, alpha_lock, dabs, first, keys } => {
+                    // A rebuild that touched this stroke already replayed it whole.
+                    if keys.iter().any(|k| covered(&layer, k)) {
+                        continue;
+                    }
+                    let Some(buffer) = self.buffer_for(gpu, &id) else { continue };
+                    self.run_smudge(gpu, &layer, &brush, alpha_lock, &dabs, first, buffer, None, None);
+                }
             }
-            match t.tex {
-                Some(tex) if !t.loading && !t.needs_rebuild => gpu.paint_dabs(tex, TILE, &data, mode),
-                _ => t.needs_rebuild = true,
+        }
+        // Pickup buffers of strokes no longer being painted.
+        let painting: HashSet<&String> = self.active.iter().map(|a| &a.stroke.id).chain(self.live.keys()).collect();
+        let done: Vec<String> = self.buffers.keys().filter(|id| !painting.contains(id)).cloned().collect();
+        for id in done {
+            if let Some(t) = self.buffers.remove(&id) {
+                gpu.delete_texture(t);
             }
         }
         self.snapshot(gpu, now);
     }
 
-    fn rebuild_tiles(&mut self, gpu: &mut dyn Backend, layer_id: &str, keys: &HashSet<Key>) {
-        let Some(layer) = self.layers.get_mut(layer_id) else { return };
-        for k in keys {
-            let t = layer.tiles.get_mut(k).unwrap();
-            if t.tex.is_none() {
-                t.tex = gpu.create_paint_texture(TILE);
-            }
-            let Some(tex) = t.tex else { continue };
-            match &t.base_img {
-                Some(img) if gpu.load_paint_texture(tex, ImageSource::Image(img), TILE) => {}
-                _ => gpu.clear_paint_texture(tex, TILE),
-            }
-            t.needs_rebuild = false;
+    /// The pickup buffer of a smudge stroke being painted.
+    fn buffer_for(&mut self, gpu: &mut dyn Backend, id: &str) -> Option<TexId> {
+        if let Some(t) = self.buffers.get(id) {
+            return Some(*t);
         }
-        let bases: HashMap<Key, u64> = keys.iter().map(|k| (*k, layer.tiles[k].base_seq)).collect();
+        let t = gpu.create_paint_texture(SMUDGE_BUF)?;
+        self.buffers.insert(id.to_string(), t);
+        Some(t)
+    }
+
+    /// Smudge `dabs` across the layer's tiles in order. Writes go to tiles in
+    /// `only` (default: every tile that can take dabs); `scratch` stands in
+    /// for one tile (base snapshots render a tile off screen).
+    #[allow(clippy::too_many_arguments)]
+    fn run_smudge(
+        &mut self,
+        gpu: &mut dyn Backend,
+        layer_id: &str,
+        brush: &Brush,
+        alpha_lock: bool,
+        dabs: &[Dab],
+        first: bool,
+        buffer: TexId,
+        only: Option<&HashSet<Key>>,
+        scratch: Option<(Key, TexId)>,
+    ) {
+        let style = self.style_for(brush, (0, 0));
+        let Some(layer) = self.layers.get_mut(layer_id) else { return };
+        let t = TILE as f32;
+        let mut plans: Vec<(Vec<SmudgeTile>, &Dab)> = Vec::with_capacity(dabs.len());
+        for d in dabs {
+            let mut tiles = Vec::new();
+            for k in dab_tiles(brush, d, layer) {
+                let origin = [k.0 as f32 * t, k.1 as f32 * t];
+                if let Some((sk, tex)) = scratch.filter(|(sk, _)| *sk == k) {
+                    tiles.push(SmudgeTile { tex: Some(tex), origin, write: only.is_none_or(|o| o.contains(&sk)) });
+                    continue;
+                }
+                let writable = only.is_none_or(|o| o.contains(&k));
+                let tile = layer.tiles.entry(k).or_default();
+                // Unpainted tiles get a texture when the smudge reaches them.
+                if writable && only.is_none() && scratch.is_none() && tile.tex.is_none() && !tile.loading && tile.base_url.is_none() && !tile.needs_rebuild {
+                    tile.tex = gpu.create_paint_texture(TILE);
+                }
+                let tex = tile.tex.filter(|_| !tile.loading);
+                let write = writable && tex.is_some() && (only.is_some() || !tile.needs_rebuild);
+                tiles.push(SmudgeTile { tex, origin, write });
+            }
+            plans.push((tiles, d));
+        }
+        let paint = paint_color(brush);
+        let list: Vec<SmudgeDab> = plans
+            .iter()
+            .enumerate()
+            .map(|(i, (tiles, d))| SmudgeDab {
+                tiles,
+                dab: smudge_dab(brush, d),
+                style,
+                buffer,
+                first: first && i == 0,
+                keep: brush.smudge,
+                paint,
+                mix: brush.mix,
+                alpha_lock,
+            })
+            .collect();
+        gpu.smudge(&list);
+    }
+
+    /// Grow `keys` to every tile of each smudge stroke touching one of them,
+    /// until nothing changes: a smudge stroke must be replayed whole.
+    fn smudge_closure(&mut self, layer_id: &str, keys: &mut HashSet<Key>) {
+        let Some(layer) = self.layers.get(layer_id) else { return };
+        let mut sets: Vec<Vec<Key>> = Vec::new();
+        let smudging = |s: &Stroke| s.layer == layer_id && s.brush.smudges();
+        for c in self.committed.values().filter(|c| !c.undone && smudging(&c.stroke)) {
+            sets.push(layer.tiles_of(&c.stroke));
+        }
+        for s in self.pending.iter().filter(|s| smudging(s)) {
+            sets.push(layer.tiles_of(s));
+        }
+        for l in self.live.values().chain(self.active.iter()).filter(|l| smudging(&l.stroke)) {
+            sets.push(l.touched.iter().copied().collect());
+        }
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for set in &sets {
+                if set.iter().any(|k| keys.contains(k)) {
+                    for k in set {
+                        grew |= keys.insert(*k);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Start loading the base images `keys` still need. True while any is loading.
+    fn wait_for_bases(&mut self, layer_id: &str, keys: &HashSet<Key>) -> bool {
+        let (images, wake) = (self.images.clone(), self.wake.clone());
+        let Some(layer) = self.layers.get_mut(layer_id) else { return true };
+        let mut waiting = false;
+        for k in keys {
+            let t = layer.tiles.entry(*k).or_default();
+            t.needs_rebuild = true;
+            if t.base_url.is_some() && t.base_img.is_none() {
+                if !t.loading && !t.fetching {
+                    t.fetching = true;
+                    start_image_load(t.base_url.clone().unwrap(), layer_id.to_string(), *k, images.clone(), wake.clone());
+                }
+                waiting = true;
+            }
+        }
+        waiting
+    }
+
+    /// Redraw tiles from their bases. False (nothing done) while a brush
+    /// image they need is loading.
+    fn rebuild_tiles(&mut self, gpu: &mut dyn Backend, layer_id: &str, keys: &HashSet<Key>) -> bool {
+        let Some(layer) = self.layers.get(layer_id) else { return false };
+        let bases: HashMap<Key, u64> = keys.iter().map(|k| (*k, layer.tiles.get(k).map_or(0, |t| t.base_seq))).collect();
         let min_base = bases.values().copied().min().unwrap_or(0);
         // Committed strokes in order, then the uncommitted ones: others' live
         // strokes, our pending ones, ours in progress.
@@ -898,7 +1188,31 @@ impl PaintState {
         if let Some(a) = self.active.as_ref().filter(|a| a.stroke.layer == layer_id) {
             strokes.push((None, Rc::new(a.stroke.clone())));
         }
-        let layer = self.layers.get(layer_id).unwrap();
+        let brushes: Vec<Brush> = strokes.iter().map(|(_, s)| s.brush.clone()).collect();
+        let mut ready = true;
+        for b in &brushes {
+            ready &= self.ensure_assets(b);
+        }
+        if !ready {
+            return false;
+        }
+        let Some(layer) = self.layers.get_mut(layer_id) else { return false };
+        for k in keys {
+            let t = layer.tiles.entry(*k).or_default();
+            if t.tex.is_none() {
+                t.tex = gpu.create_paint_texture(TILE);
+            }
+            let Some(tex) = t.tex else { continue };
+            match &t.base_img {
+                Some(img) if gpu.load_paint_texture(tex, ImageSource::Image(img), TILE) => {}
+                _ => gpu.clear_paint_texture(tex, TILE),
+            }
+            t.needs_rebuild = false;
+            t.loading = false;
+        }
+        // A scratch buffer for committed smudge strokes; ones in progress
+        // keep theirs (they go on from where the replay leaves it).
+        let mut temp: Option<TexId> = None;
         // The uncommitted strokes each tile now shows, in drawing order.
         let mut drawn: HashMap<Key, Vec<String>> = keys.iter().map(|k| (*k, Vec::new())).collect();
         for (seq, s) in strokes {
@@ -907,15 +1221,42 @@ impl PaintState {
                 continue;
             }
             let dabs = raster::all_dabs(&s);
-            let mode = mode_of(&s);
-            for (k, data) in bucket(&s, &dabs, layer, Some(&only)) {
+            if s.brush.smudges() {
+                let Some(layer) = self.layers.get(layer_id) else { break };
+                let touched: HashSet<Key> = dabs.iter().flat_map(|d| dab_tiles(&s.brush, d, layer)).collect();
+                if touched.is_disjoint(&only) {
+                    continue;
+                }
+                let buffer = if seq.is_none() {
+                    self.buffer_for(gpu, &s.id)
+                } else {
+                    if temp.is_none() {
+                        temp = gpu.create_paint_texture(SMUDGE_BUF);
+                    }
+                    temp
+                };
+                let Some(buffer) = buffer else { continue };
+                self.run_smudge(gpu, layer_id, &s.brush, s.alpha_lock, &dabs, true, buffer, Some(&only), None);
+                if seq.is_none() {
+                    for k in touched.intersection(&only) {
+                        drawn.entry(*k).or_default().push(s.id.clone());
+                    }
+                }
+                continue;
+            }
+            let mode = mode_of(&s.brush, s.alpha_lock);
+            let Some(layer) = self.layers.get(layer_id) else { break };
+            for (k, data) in bucket(&s.brush, &dabs, layer, Some(&only)) {
                 if let Some(tex) = layer.tiles.get(&k).and_then(|t| t.tex) {
-                    gpu.paint_dabs(tex, TILE, &data, mode);
+                    gpu.paint_dabs(tex, TILE, &data, mode, &self.style_for(&s.brush, k));
                 }
                 if seq.is_none() {
                     drawn.entry(k).or_default().push(s.id.clone());
                 }
             }
+        }
+        if let Some(t) = temp {
+            gpu.delete_texture(t);
         }
         if let Some(layer) = self.layers.get_mut(layer_id) {
             for (k, ids) in drawn {
@@ -926,6 +1267,7 @@ impl PaintState {
             }
         }
         self.dirty = true;
+        true
     }
 
     /// Start base and view snapshots for tiles whose last stroke is ours.
@@ -985,26 +1327,51 @@ impl PaintState {
             );
         }
         for (lid, k, cut) in base_jobs {
+            let Some(base_seq) = self.layers.get(&lid).and_then(|l| l.tiles.get(&k)).map(|t| t.base_seq) else { continue };
+            let replay: Vec<Rc<Stroke>> = self
+                .committed
+                .range(base_seq + 1..=cut)
+                .filter(|(_, c)| !c.undone && c.stroke.layer == lid)
+                .map(|(_, c)| c.stroke.clone())
+                .collect();
+            let mut ready = true;
+            for s in &replay {
+                ready &= self.ensure_assets(&s.brush);
+            }
+            if !ready {
+                continue;
+            }
             // Render the tile as of `cut` into a scratch texture and read it back.
             let Some(scratch) = gpu.create_paint_texture(TILE) else { continue };
             let Some(layer) = self.layers.get_mut(&lid) else { continue };
             let t = layer.tiles.get_mut(&k).unwrap();
             t.snapshotting = true;
-            let base_seq = t.base_seq;
             match &t.base_img {
                 Some(img) if gpu.load_paint_texture(scratch, ImageSource::Image(img), TILE) => {}
                 _ => gpu.clear_paint_texture(scratch, TILE),
             }
             let only: HashSet<Key> = [k].into_iter().collect();
-            let layer = self.layers.get(&lid).unwrap();
-            for (_, c) in self.committed.range(base_seq + 1..=cut) {
-                if c.undone || c.stroke.layer != lid {
+            let mut temp: Option<TexId> = None;
+            for s in replay {
+                let dabs = raster::all_dabs(&s);
+                if s.brush.smudges() {
+                    // Neighbors are read as they are now (close enough for a
+                    // snapshot; the painter's own view is exact).
+                    if temp.is_none() {
+                        temp = gpu.create_paint_texture(SMUDGE_BUF);
+                    }
+                    if let Some(buffer) = temp {
+                        self.run_smudge(gpu, &lid, &s.brush, s.alpha_lock, &dabs, true, buffer, Some(&only), Some((k, scratch)));
+                    }
                     continue;
                 }
-                let dabs = raster::all_dabs(&c.stroke);
-                if let Some(data) = bucket(&c.stroke, &dabs, layer, Some(&only)).remove(&k) {
-                    gpu.paint_dabs(scratch, TILE, &data, mode_of(&c.stroke));
+                let Some(layer) = self.layers.get(&lid) else { break };
+                if let Some(data) = bucket(&s.brush, &dabs, layer, Some(&only)).remove(&k) {
+                    gpu.paint_dabs(scratch, TILE, &data, mode_of(&s.brush, s.alpha_lock), &self.style_for(&s.brush, k));
                 }
+            }
+            if let Some(t) = temp {
+                gpu.delete_texture(t);
             }
             let (out, trash, wake) = (self.snapshots.clone(), self.trash.clone(), self.wake.clone());
             gpu.read_paint_texture(
@@ -1053,6 +1420,7 @@ impl PaintState {
         !self.queue.is_empty()
             || !self.freed.is_empty()
             || !self.images.borrow().is_empty()
+            || !self.asset_loads.borrow().is_empty()
             || self.layers.values().filter(|l| l.present).any(|l| l.tiles.values().any(|t| t.needs_rebuild && !t.loading))
     }
 }

@@ -1,7 +1,7 @@
 //! The WebGL2 backend (the fallback when WebGPU isn't available), its helpers
 //! and the GLSL shader sources.
 
-use crate::backend::{Backend, FrameParams, ImageSource, MeshId, PaintMode, Rows, TexId, DAB_FLOATS};
+use crate::backend::{Backend, DabStyle, FrameParams, ImageSource, MeshId, PaintMode, Rows, SmudgeDab, TexId, DAB_FLOATS, SMUDGE_BUF};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -137,6 +137,15 @@ pub struct GlBackend {
     dab_vao: WebGlVertexArrayObject,
     dab_buf: WebGlBuffer,
     dab_cap: usize,
+    /// Smudge: pick up the layer into a stroke's buffer, then lay it down.
+    pick_prog: WebGlProgram,
+    pick_u: Uniforms,
+    stamp_prog: WebGlProgram,
+    stamp_u: Uniforms,
+    /// The tiles under a smudge dab, copied side by side, and a scratch
+    /// buffer (created on first use).
+    smudge_window: Option<(WebGlTexture, WebGlFramebuffer)>,
+    smudge_scratch: Option<(WebGlTexture, WebGlFramebuffer)>,
     /// Framebuffers for paint tiles, by texture slot.
     paint_fbos: HashMap<u32, WebGlFramebuffer>,
     shape_vao: WebGlVertexArrayObject,
@@ -184,13 +193,17 @@ impl GlBackend {
         let shape_u = Uniforms::new(&gl, &shape_prog, &["u_view", "u_px", "u_tex", "u_linear"]);
         let mesh_u = Uniforms::new(&gl, &mesh_prog, &["u_view", "u_m0", "u_m1", "u_color", "u_linear"]);
         let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha", "u_linear", "u_uv"]);
-        let dab_prog = program(&gl, DAB_VS, DAB_FS)?;
-        let dab_u = Uniforms::new(&gl, &dab_prog, &["u_size"]);
+        let dab_prog = program(&gl, DAB_VS, &dab_fs())?;
+        let dab_u = Uniforms::new(&gl, &dab_prog, &DAB_UNIFORMS);
+        let pick_prog = program(&gl, COMPOSITE_VS, &pick_fs())?;
+        let pick_u = Uniforms::new(&gl, &pick_prog, &PICK_UNIFORMS);
+        let stamp_prog = program(&gl, STAMP_VS, &stamp_fs())?;
+        let stamp_u = Uniforms::new(&gl, &stamp_prog, &STAMP_UNIFORMS);
         let dab_vao = gl.create_vertex_array().ok_or("vao")?;
         let dab_buf = gl.create_buffer().ok_or("buffer")?;
         gl.bind_vertex_array(Some(&dab_vao));
         gl.bind_buffer(GL::ARRAY_BUFFER, Some(&dab_buf));
-        for i in 0..2u32 {
+        for i in 0..3u32 {
             gl.enable_vertex_attrib_array(i);
             gl.vertex_attrib_divisor(i, 1);
             gl.vertex_attrib_pointer_with_i32(i, 4, GL::FLOAT, false, (DAB_FLOATS * 4) as i32, (i * 16) as i32);
@@ -244,6 +257,12 @@ impl GlBackend {
             dab_vao,
             dab_buf,
             dab_cap: 0,
+            pick_prog,
+            pick_u,
+            stamp_prog,
+            stamp_u,
+            smudge_window: None,
+            smudge_scratch: None,
             paint_fbos: HashMap::new(),
             shape_vao,
             mesh_vao,
@@ -284,6 +303,45 @@ impl GlBackend {
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
         self.paint_fbos.insert(tex.0, fbo.clone());
         Some(fbo)
+    }
+
+    /// A render-target texture of `size`² (smudge window or scratch).
+    fn target_texture(&self, size: u32) -> Option<(WebGlTexture, WebGlFramebuffer)> {
+        let gl = &self.gl;
+        let t = gl.create_texture()?;
+        gl.bind_texture(GL::TEXTURE_2D, Some(&t));
+        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            GL::TEXTURE_2D, 0, GL::RGBA as i32, size as i32, size as i32, 0, GL::RGBA, GL::UNSIGNED_BYTE, None,
+        );
+        for (k, v) in [(GL::TEXTURE_MIN_FILTER, GL::LINEAR), (GL::TEXTURE_MAG_FILTER, GL::LINEAR), (GL::TEXTURE_WRAP_S, GL::CLAMP_TO_EDGE), (GL::TEXTURE_WRAP_T, GL::CLAMP_TO_EDGE)] {
+            gl.tex_parameteri(GL::TEXTURE_2D, k, v as i32);
+        }
+        let f = gl.create_framebuffer()?;
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&f));
+        gl.framebuffer_texture_2d(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::TEXTURE_2D, Some(&t), 0);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        Some((t, f))
+    }
+
+    /// Bind the tip, grain and tint textures to units 1–3 and set the style
+    /// uniforms shared by the dab and smudge shaders (`u` lists them first).
+    fn bind_style(&self, u: &Uniforms, st: &DabStyle) {
+        let gl = &self.gl;
+        let flags = st.tip.is_some() as i32 | (st.tip_color as i32) << 1 | (st.grain.is_some() as i32) << 2 | (st.tint.is_some() as i32) << 3;
+        gl.uniform1i(u.get(0), flags);
+        gl.uniform2f(u.get(1), st.tip_extent[0], st.tip_extent[1]);
+        gl.uniform2f(u.get(2), st.origin[0], st.origin[1]);
+        gl.uniform4f(u.get(3), st.grain_size[0], st.grain_size[1], st.tint_size[0], st.tint_size[1]);
+        gl.uniform2f(u.get(4), st.grain_strength, st.tint_strength);
+        for (i, t) in [st.tip, st.grain, st.tint].into_iter().enumerate() {
+            gl.active_texture(GL::TEXTURE1 + i as u32);
+            gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(t)));
+            gl.uniform1i(u.get(5 + i), 1 + i as i32);
+        }
+        gl.active_texture(GL::TEXTURE0);
+        let [g, t] = crate::backend::texture_lods(st);
+        gl.uniform2f(u.get(8), g, t);
+        gl.uniform2f(u.get(9), st.tip_px[0], st.tip_px[1]);
     }
 
     fn bind_shape_attribs(&self, start: u32) {
@@ -437,6 +495,16 @@ impl Backend for GlBackend {
         if let Some(f) = self.paint_fbos.remove(&t.0) {
             self.gl.delete_framebuffer(Some(&f));
         }
+    }
+
+    fn upload_brush_texture(&mut self, src: ImageSource, w: u32, h: u32, repeat: bool) -> Option<TexId> {
+        let t = self.upload_texture(None, src, w, h, true)?;
+        let gl = &self.gl;
+        gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(Some(t))));
+        let wrap = if repeat { GL::REPEAT } else { GL::CLAMP_TO_EDGE } as i32;
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_S, wrap);
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_T, wrap);
+        Some(t)
     }
 
     fn create_mesh(&mut self, vertices: &[f32], indices: &[u32]) -> Option<MeshId> {
@@ -658,7 +726,7 @@ impl Backend for GlBackend {
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
     }
 
-    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode) {
+    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode, style: &DabStyle) {
         if dabs.is_empty() {
             return;
         }
@@ -673,11 +741,96 @@ impl Backend for GlBackend {
             PaintMode::AlphaLock => gl.blend_func(GL::DST_ALPHA, GL::ONE_MINUS_SRC_ALPHA),
         }
         gl.use_program(Some(&self.dab_prog));
-        gl.uniform1f(self.dab_u.get(0), size as f32);
+        self.bind_style(&self.dab_u, style);
+        gl.uniform1f(self.dab_u.get(10), size as f32);
         gl.bind_vertex_array(Some(&self.dab_vao));
         gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.dab_buf));
         upload_growable(&gl, GL::ARRAY_BUFFER, dabs, &mut self.dab_cap, GL::DYNAMIC_DRAW);
         gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, (dabs.len() / DAB_FLOATS) as i32);
+        gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA);
+        gl.bind_vertex_array(None);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        self.current = Prog::None;
+    }
+
+    fn smudge(&mut self, dabs: &[SmudgeDab]) {
+        if dabs.is_empty() {
+            return;
+        }
+        const WIN: u32 = 1024;
+        if self.smudge_window.is_none() {
+            self.smudge_window = self.target_texture(WIN);
+            self.smudge_scratch = self.target_texture(SMUDGE_BUF);
+        }
+        let (Some((win_t, win_f)), Some((_, scr_f))) = (self.smudge_window.clone(), self.smudge_scratch.clone()) else { return };
+        let gl = self.gl.clone();
+        gl.disable(GL::STENCIL_TEST);
+        gl.disable(GL::BLEND);
+        gl.bind_vertex_array(Some(&self.empty_vao));
+        for d in dabs {
+            let Some(buf_f) = self.paint_fbo(d.buffer) else { continue };
+            let Some(win) = window_of(d.tiles, WIN) else { continue };
+            // 1. The tiles under the dab, side by side.
+            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&win_f));
+            gl.viewport(0, 0, WIN as i32, WIN as i32);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(GL::COLOR_BUFFER_BIT);
+            for t in d.tiles {
+                let Some(src) = t.tex.and_then(|x| self.paint_fbo(x)) else { continue };
+                let (x, y) = ((t.origin[0] - win[0]) as i32, (t.origin[1] - win[1]) as i32);
+                let n = flexma_doc::raster::TILE as i32;
+                gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&src));
+                gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&win_f));
+                gl.blit_framebuffer(0, 0, n, n, x, y, x + n, y + n, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+            }
+            // 2. Pick up: blend the paint under the dab into the carried paint.
+            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&scr_f));
+            gl.viewport(0, 0, SMUDGE_BUF as i32, SMUDGE_BUF as i32);
+            gl.use_program(Some(&self.pick_prog));
+            let u = &self.pick_u;
+            gl.uniform4f(u.get(0), d.dab[0], d.dab[1], d.dab[2], d.dab[8]);
+            gl.uniform2f(u.get(1), d.style.tip_extent[0], d.style.tip_extent[1]);
+            gl.uniform4f(u.get(2), win[0], win[1], WIN as f32, WIN as f32);
+            gl.uniform4f(u.get(3), d.paint[0], d.paint[1], d.paint[2], d.paint[3]);
+            gl.uniform4f(u.get(4), d.first as i32 as f32, d.keep, d.mix, SMUDGE_BUF as f32);
+            gl.active_texture(GL::TEXTURE1);
+            gl.bind_texture(GL::TEXTURE_2D, Some(&win_t));
+            gl.uniform1i(u.get(5), 1);
+            gl.active_texture(GL::TEXTURE2);
+            gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(Some(d.buffer))));
+            gl.uniform1i(u.get(6), 2);
+            gl.active_texture(GL::TEXTURE0);
+            gl.draw_arrays(GL::TRIANGLES, 0, 3);
+            gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&scr_f));
+            gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&buf_f));
+            let b = SMUDGE_BUF as i32;
+            gl.blit_framebuffer(0, 0, b, b, 0, 0, b, b, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+            // 3. Lay it down through the tip, tile by tile.
+            let targets: Vec<(WebGlFramebuffer, &crate::backend::SmudgeTile)> =
+                d.tiles.iter().filter(|t| t.write).filter_map(|t| Some((t.tex.and_then(|x| self.paint_fbo(x))?, t))).collect();
+            gl.use_program(Some(&self.stamp_prog));
+            let u = &self.stamp_u;
+            self.bind_style(u, &d.style);
+            let reach = smudge_reach(d);
+            for (dst, t) in targets {
+                gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&dst));
+                let n = flexma_doc::raster::TILE;
+                gl.viewport(0, 0, n as i32, n as i32);
+                gl.uniform4f(u.get(10), d.dab[0], d.dab[1], d.dab[2], d.dab[8]);
+                gl.uniform4f(u.get(11), d.dab[3], d.dab[7], d.alpha_lock as i32 as f32, n as f32);
+                gl.uniform4f(u.get(12), win[0], win[1], t.origin[0], t.origin[1]);
+                gl.uniform4f(u.get(13), d.dab[0] - t.origin[0] - reach, d.dab[1] - t.origin[1] - reach, d.dab[0] - t.origin[0] + reach, d.dab[1] - t.origin[1] + reach);
+                gl.active_texture(GL::TEXTURE4);
+                gl.bind_texture(GL::TEXTURE_2D, Some(&win_t));
+                gl.uniform1i(u.get(14), 4);
+                gl.active_texture(GL::TEXTURE5);
+                gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(Some(d.buffer))));
+                gl.uniform1i(u.get(15), 5);
+                gl.active_texture(GL::TEXTURE0);
+                gl.draw_arrays(GL::TRIANGLE_STRIP, 0, 4);
+            }
+        }
+        gl.enable(GL::BLEND);
         gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA);
         gl.bind_vertex_array(None);
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
@@ -1071,46 +1224,215 @@ vec4 toOutput(vec4 c) {
 void main() { o = toOutput(texture(u_tex, v_uv) * u_alpha); }
 "#;
 
-/// Brush dabs into a paint tile: x, y, radius, hardness (texel space) and a
-/// premultiplied color per instance. GL framebuffers start at the bottom
-/// row, which is the tile's top row (row 0), so no flip.
+/// The window (x, y in layer px) a smudge dab's tiles are copied into.
+pub fn window_of(tiles: &[crate::backend::SmudgeTile], max: u32) -> Option<[f32; 2]> {
+    let x = tiles.iter().map(|t| t.origin[0]).fold(f32::MAX, f32::min);
+    let y = tiles.iter().map(|t| t.origin[1]).fold(f32::MAX, f32::min);
+    let fits = tiles.iter().all(|t| t.origin[0] - x + flexma_doc::raster::TILE as f32 <= max as f32 && t.origin[1] - y + flexma_doc::raster::TILE as f32 <= max as f32);
+    (!tiles.is_empty() && fits).then_some([x, y])
+}
+
+/// How far a smudge dab reaches from its center (px).
+pub fn smudge_reach(d: &SmudgeDab) -> f32 {
+    let e = d.style.tip_extent;
+    let k = if d.style.tip.is_some() { (e[0] * e[0] + e[1] * e[1]).sqrt() } else { 1.0 };
+    d.dab[2].max(0.5) * k + 1.5
+}
+
+/// Uniforms shared by the dab and stamp shaders (`bind_style` sets 0–9).
+const STYLE_GLSL: &str = r#"
+uniform int u_flags;
+uniform vec2 u_extent;
+uniform vec2 u_origin;
+uniform vec4 u_tex_size;
+uniform vec2 u_strength;
+uniform sampler2D u_tip;
+uniform sampler2D u_grain;
+uniform sampler2D u_tint;
+uniform vec2 u_lods;
+uniform vec2 u_tip_px;
+
+// Coverage of a dab (center c, radius r, angle a, hardness h) at layer point
+// p, with the tip color in `tipc` (premultiplied) when the tip has one.
+float cover(vec2 p, vec2 c, float r, float a, float h, out vec4 tipc, out vec2 uv) {
+  tipc = vec4(1.0);
+  float area = min(1.0, r * r / 0.25);
+  vec2 d = p - c;
+  vec2 q = vec2(cos(a) * d.x + sin(a) * d.y, -sin(a) * d.x + cos(a) * d.y);
+  uv = q / (u_extent * max(r, 0.5)) * 0.5 + 0.5;
+  if ((u_flags & 1) == 0) {
+    float rr = max(r, 0.5);
+    float dist = length(d);
+    float inner = rr * clamp(h, 0.0, 1.0);
+    float soft = 1.0 - smoothstep(inner, max(rr, inner + 0.001), dist);
+    float rim = clamp(rr - dist + 0.5, 0.0, 1.0);
+    return soft * rim * area;
+  }
+  vec2 inside = step(vec2(0.0), uv) * step(uv, vec2(1.0));
+  // The mip level where a texel is about a pixel (the same on every GPU).
+  vec2 span = u_tip_px / (2.0 * u_extent * max(r, 0.5));
+  tipc = textureLod(u_tip, uv, max(log2(max(span.x, span.y)), 0.0));
+  float k = (u_flags & 2) != 0 ? tipc.a : tipc.r;
+  return k * inside.x * inside.y * area;
+}
+
+// Paper grain: paint catches on the paper's high spots.
+float grain(vec2 p) {
+  if ((u_flags & 4) == 0) return 1.0;
+  float g = textureLod(u_grain, p / u_tex_size.xy, u_lods.x).r;
+  return clamp(1.0 - u_strength.x * (1.0 - g) * 1.6, 0.0, 1.0);
+}
+
+// Color variation around the brush color (premultiplied in and out).
+vec4 tint(vec4 c, vec2 p) {
+  if ((u_flags & 8) == 0 || c.a <= 0.0) return c;
+  vec3 v = textureLod(u_tint, p / u_tex_size.zw, u_lods.y).rgb - 0.5;
+  return vec4(clamp(c.rgb / c.a + v * 2.0 * u_strength.y, 0.0, 1.0) * c.a, c.a);
+}
+"#;
+
+const DAB_UNIFORMS: [&str; 11] = ["u_flags", "u_extent", "u_origin", "u_tex_size", "u_strength", "u_tip", "u_grain", "u_tint", "u_lods", "u_tip_px", "u_size"];
+
+/// Brush dabs into a paint tile: x, y, radius, hardness (texel space), a
+/// premultiplied color and the tip angle per instance. GL framebuffers start
+/// at the bottom row, which is the tile's top row (row 0), so no flip.
 pub const DAB_VS: &str = r#"#version 300 es
 precision highp float;
+precision highp int;
 layout(location=0) in vec4 a_d0;
 layout(location=1) in vec4 a_col;
+layout(location=2) in vec4 a_d2;
 uniform float u_size;
+uniform int u_flags;
+uniform vec2 u_extent;
 out vec2 v_p;
 flat out vec4 v_d0;
 flat out vec4 v_col;
+flat out vec4 v_d2;
 void main() {
   vec2 corner = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-  float r = max(a_d0.z, 0.5) + 1.0;
+  float r = (u_flags & 1) != 0 ? max(a_d0.z, 0.5) * length(u_extent) + 1.0 : max(a_d0.z, 0.5) + 1.0;
   vec2 p = a_d0.xy + (corner * 2.0 - 1.0) * r;
   v_p = p;
   v_d0 = a_d0;
   v_col = a_col;
+  v_d2 = a_d2;
   gl_Position = vec4(p / u_size * 2.0 - 1.0, 0.0, 1.0);
 }
 "#;
 
-pub const DAB_FS: &str = r#"#version 300 es
+fn dab_fs() -> String {
+    format!(
+        r#"#version 300 es
 precision highp float;
+precision highp int;
+{STYLE_GLSL}
 in vec2 v_p;
 flat in vec4 v_d0;
 flat in vec4 v_col;
+flat in vec4 v_d2;
+out vec4 o;
+void main() {{
+  if (u_flags == 0) {{
+    // A plain round dab. Hardness sets where the soft falloff starts; the
+    // rim is antialiased, and dabs under half a pixel fade by area instead
+    // of shrinking.
+    float r = max(v_d0.z, 0.5);
+    float d = length(v_p - v_d0.xy);
+    float inner = r * clamp(v_d0.w, 0.0, 1.0);
+    float soft = 1.0 - smoothstep(inner, max(r, inner + 0.001), d);
+    float rim = clamp(r - d + 0.5, 0.0, 1.0);
+    float area = min(1.0, v_d0.z * v_d0.z / 0.25);
+    o = v_col * (soft * rim * area);
+    return;
+  }}
+  vec4 tipc;
+  vec2 uv;
+  vec2 lp = u_origin + v_p;
+  float k = cover(v_p, v_d0.xy, v_d0.z, v_d2.x, v_d0.w, tipc, uv) * grain(lp);
+  if ((u_flags & 2) != 0) {{
+    // The tip's own colors (a photo stamp), at the dab's flow.
+    float a = k * v_col.a;
+    o = vec4(tipc.rgb / max(tipc.a, 1e-4) * a, a);
+  }} else {{
+    o = tint(v_col, lp) * k;
+  }}
+}}
+"#
+    )
+}
+
+const PICK_UNIFORMS: [&str; 7] = ["u_dab", "u_extent", "u_win", "u_paint", "u_params", "u_window", "u_prev"];
+
+/// Smudge pick-up, into the scratch buffer: the paint under the dab (in the
+/// tip's frame) blended into what the stroke carries.
+fn pick_fs() -> String {
+    r#"#version 300 es
+precision highp float;
+uniform vec4 u_dab;
+uniform vec2 u_extent;
+uniform vec4 u_win;
+uniform vec4 u_paint;
+uniform vec4 u_params;
+uniform sampler2D u_window;
+uniform sampler2D u_prev;
 out vec4 o;
 void main() {
-  // Hardness sets where the soft falloff starts; the rim is antialiased, and
-  // dabs under half a pixel fade by area instead of shrinking.
-  float r = max(v_d0.z, 0.5);
-  float d = length(v_p - v_d0.xy);
-  float inner = r * clamp(v_d0.w, 0.0, 1.0);
-  float soft = 1.0 - smoothstep(inner, max(r, inner + 0.001), d);
-  float rim = clamp(r - d + 0.5, 0.0, 1.0);
-  float area = min(1.0, v_d0.z * v_d0.z / 0.25);
-  o = v_col * (soft * rim * area);
+  vec2 uv = gl_FragCoord.xy / u_params.w;
+  vec2 q = (uv * 2.0 - 1.0) * u_extent * max(u_dab.z, 0.5);
+  float c = cos(u_dab.w), s = sin(u_dab.w);
+  vec2 p = u_dab.xy + vec2(c * q.x - s * q.y, s * q.x + c * q.y);
+  vec4 under = texture(u_window, (p - u_win.xy) / u_win.zw);
+  vec4 carried = u_params.x > 0.5 ? under : mix(under, texture(u_prev, uv), u_params.y);
+  o = mix(carried, u_paint, u_params.z);
+}
+"#
+    .to_string()
+}
+
+const STAMP_UNIFORMS: [&str; 16] = [
+    "u_flags", "u_extent", "u_origin", "u_tex_size", "u_strength", "u_tip", "u_grain", "u_tint", "u_lods", "u_tip_px", "u_dab", "u_look", "u_where", "u_quad", "u_window", "u_buf",
+];
+
+/// Smudge lay-down: a quad over the dab within one tile (`u_quad`, tile px).
+pub const STAMP_VS: &str = r#"#version 300 es
+precision highp float;
+uniform vec4 u_quad;
+uniform vec4 u_look;
+void main() {
+  vec2 corner = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+  vec2 p = mix(u_quad.xy, u_quad.zw, corner);
+  gl_Position = vec4(p / u_look.w * 2.0 - 1.0, 0.0, 1.0);
 }
 "#;
+
+/// Each pixel becomes the carried paint, by the tip's coverage; everything
+/// else is copied exactly (no blending: the old pixel comes from the window).
+fn stamp_fs() -> String {
+    format!(
+        r#"#version 300 es
+precision highp float;
+precision highp int;
+{STYLE_GLSL}
+uniform vec4 u_dab;
+uniform vec4 u_look;
+uniform vec4 u_where;
+uniform sampler2D u_window;
+uniform sampler2D u_buf;
+out vec4 o;
+void main() {{
+  vec2 p = u_where.zw + gl_FragCoord.xy;
+  vec4 dst = texelFetch(u_window, ivec2(p - u_where.xy), 0);
+  vec4 tipc;
+  vec2 uv;
+  float k = cover(p, u_dab.xy, u_dab.z, u_dab.w, u_look.x, tipc, uv) * u_look.y * grain(p);
+  vec4 r = mix(dst, textureLod(u_buf, uv, 0.0), clamp(k, 0.0, 1.0));
+  if (u_look.z > 0.5) r = r.a > 0.0 ? r * (dst.a / r.a) : vec4(0.0);
+  o = r;
+}}
+"#
+    )
+}
 
 /// Full-screen pass that encodes a linear-light sRGB target for the canvas.
 pub const COMPOSITE_VS: &str = r#"#version 300 es
@@ -1141,6 +1463,17 @@ mod tests {
 
     /// A reserved word in a shader fails to compile on every GPU, which
     /// stops the editor from opening any file.
+    /// Vertex and fragment shaders default to different int precisions, so a
+    /// program sharing an int uniform fails to link unless both declare it.
+    #[test]
+    fn int_uniforms_declare_precision() {
+        for (name, src) in [("DAB_VS", DAB_VS.to_string()), ("DAB_FS", dab_fs()), ("STAMP_FS", stamp_fs()), ("PICK_FS", pick_fs()), ("STAMP_VS", STAMP_VS.to_string())] {
+            if src.contains("uniform int") {
+                assert!(src.contains("precision highp int;"), "{name} has an int uniform without `precision highp int`");
+            }
+        }
+    }
+
     #[test]
     fn shaders_avoid_glsl_es_reserved_words() {
         const RESERVED: &[&str] = &[
@@ -1150,7 +1483,7 @@ mod tests {
             "long", "short", "double", "half", "fixed", "unsigned", "superp", "input", "output", "filter", "sizeof", "cast",
             "namespace", "using",
         ];
-        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS), ("DAB_VS", DAB_VS), ("DAB_FS", DAB_FS)] {
+        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS), ("DAB_VS", DAB_VS), ("DAB_FS", &dab_fs()), ("PICK_FS", &pick_fs()), ("STAMP_VS", STAMP_VS), ("STAMP_FS", &stamp_fs())] {
             for line in src.lines() {
                 let code = line.split("//").next().unwrap_or("");
                 for word in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {

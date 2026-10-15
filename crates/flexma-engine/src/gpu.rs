@@ -10,7 +10,7 @@
 //! JavaScript creates the device and configures the canvas (both are async),
 //! then hands them over; see `FlexmaEditor::with_webgpu`.
 
-use crate::backend::{Backend, FrameParams, ImageSource, MeshId, PaintMode, Rows, TexId, DAB_FLOATS};
+use crate::backend::{texture_lods, Backend, DabStyle, FrameParams, ImageSource, MeshId, PaintMode, Rows, SmudgeDab, TexId, DAB_FLOATS, SMUDGE_BUF};
 use crate::gl::INST_FLOATS;
 use js_sys::{Array, Object, Reflect};
 use std::cell::Cell;
@@ -159,7 +159,16 @@ const TEX_FORMAT: &str = "rgba8unorm";
 
 const SHADERS: &str = include_str!("shaders/flexma.wgsl");
 const POST_SHADERS: &str = include_str!("shaders/post.wgsl");
+const BRUSH_SHADERS: &str = include_str!("shaders/brush.wgsl");
 const DAB_SHADERS: &str = include_str!("shaders/dab.wgsl");
+const SMUDGE_SHADERS: &str = include_str!("shaders/smudge.wgsl");
+/// Bytes of the `Style` uniform (brush.wgsl) and of one `Smudge` uniform.
+const STYLE_BYTES: u32 = 64;
+const SMUDGE_BYTES: u32 = 176;
+/// Uniform slots are 256-byte aligned (dynamic offsets).
+const SLOT_BYTES: usize = 256;
+/// The smudge window: the tiles under a dab, side by side.
+const SMUDGE_WINDOW: u32 = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Stencil {
@@ -184,6 +193,9 @@ enum Pipe {
     Blit,
     /// Brush dabs into a paint tile.
     Dab(PaintMode),
+    /// Smudge: pick up into the stroke's buffer, lay it down onto a tile.
+    SmudgePick,
+    SmudgeStamp,
 }
 
 #[derive(Clone, Copy)]
@@ -233,8 +245,18 @@ pub struct GpuBackend {
     module: JsValue,
     post_module: JsValue,
     dab_module: JsValue,
+    dab_bgl: JsValue,
     dab_layout: JsValue,
     dab_inst: Option<Grow>,
+    dab_uniform: GpuBuffer,
+    smudge_module: JsValue,
+    smudge_bgl: JsValue,
+    smudge_layout: JsValue,
+    smudge_uniform: Option<Grow>,
+    /// Window and scratch textures (created on first use).
+    smudge_window: Option<GpuTexture>,
+    smudge_scratch: Option<GpuTexture>,
+    repeat_sampler: JsValue,
     uniform_bgl: JsValue,
     tex_bgl: JsValue,
     main_layout: JsValue,
@@ -290,8 +312,37 @@ impl GpuBackend {
         let queue = device.queue();
         let module = device.create_shader_module(&obj! { "label": "flexma", "code": SHADERS });
         let post_module = device.create_shader_module(&obj! { "label": "flexma-post", "code": POST_SHADERS });
-        let dab_module = device.create_shader_module(&obj! { "label": "flexma-dab", "code": DAB_SHADERS });
-        let dab_layout = device.create_pipeline_layout(&obj! { "bindGroupLayouts": arr(vec![]) });
+        let dab_module = device.create_shader_module(&obj! { "label": "flexma-dab", "code": format!("{BRUSH_SHADERS}\n{DAB_SHADERS}") });
+        let smudge_module = device.create_shader_module(&obj! { "label": "flexma-smudge", "code": format!("{BRUSH_SHADERS}\n{SMUDGE_SHADERS}") });
+        // Brush bindings: style uniform, clamped and repeating samplers, then
+        // the tip, grain and tint textures; smudge adds the window and buffer.
+        let brush_entries = |uniform: JsValue, extra: u32| {
+            let mut v: Vec<JsValue> = vec![
+                obj! { "binding": 0u32, "visibility": STAGE_VERTEX | STAGE_FRAGMENT, "buffer": uniform }.into(),
+                obj! { "binding": 1u32, "visibility": STAGE_FRAGMENT, "sampler": obj! { "type": "filtering" } }.into(),
+                obj! { "binding": 2u32, "visibility": STAGE_FRAGMENT, "sampler": obj! { "type": "filtering" } }.into(),
+            ];
+            for b in 3..6 + extra {
+                v.push(obj! { "binding": b, "visibility": STAGE_FRAGMENT, "texture": obj! { "sampleType": "float" } }.into());
+            }
+            arr(v)
+        };
+        let dab_bgl = device.create_bind_group_layout(&obj! {
+            "entries": brush_entries(obj! { "type": "uniform", "minBindingSize": STYLE_BYTES }.into(), 0),
+        });
+        let smudge_bgl = device.create_bind_group_layout(&obj! {
+            "entries": brush_entries(obj! { "type": "uniform", "hasDynamicOffset": true, "minBindingSize": SMUDGE_BYTES }.into(), 2),
+        });
+        let dab_layout = device.create_pipeline_layout(&obj! { "bindGroupLayouts": arr(vec![dab_bgl.clone()]) });
+        let smudge_layout = device.create_pipeline_layout(&obj! { "bindGroupLayouts": arr(vec![smudge_bgl.clone()]) });
+        let dab_uniform = device.create_buffer(&obj! { "size": SLOT_BYTES as f64, "usage": BUF_UNIFORM | BUF_COPY_DST });
+        let repeat_sampler = device.create_sampler(&obj! {
+            "magFilter": "linear",
+            "minFilter": "linear",
+            "mipmapFilter": "linear",
+            "addressModeU": "repeat",
+            "addressModeV": "repeat",
+        });
         let uniform_bgl = device.create_bind_group_layout(&obj! {
             "entries": arr(vec![obj! {
                 "binding": 0u32,
@@ -349,8 +400,17 @@ impl GpuBackend {
             module,
             post_module,
             dab_module,
+            dab_bgl,
             dab_layout,
             dab_inst: None,
+            dab_uniform,
+            smudge_module,
+            smudge_bgl,
+            smudge_layout,
+            smudge_uniform: None,
+            smudge_window: None,
+            smudge_scratch: None,
+            repeat_sampler,
             uniform_bgl,
             tex_bgl,
             main_layout,
@@ -507,6 +567,7 @@ impl GpuBackend {
                             "attributes": arr(vec![
                                 obj! { "shaderLocation": 0u32, "offset": 0u32, "format": "float32x4" }.into(),
                                 obj! { "shaderLocation": 1u32, "offset": 16u32, "format": "float32x4" }.into(),
+                                obj! { "shaderLocation": 2u32, "offset": 32u32, "format": "float32x4" }.into(),
                             ]),
                         }.into()]),
                     },
@@ -516,6 +577,20 @@ impl GpuBackend {
                         "targets": arr(vec![obj! { "format": TEX_FORMAT, "blend": obj! { "color": comp(), "alpha": comp() } }.into()]),
                     },
                     "primitive": obj! { "topology": "triangle-strip" },
+                }
+            }
+            Pipe::SmudgePick | Pipe::SmudgeStamp => {
+                let (vs, fs) = if p == Pipe::SmudgePick { ("vs_full", "fs_pick") } else { ("vs_stamp", "fs_stamp") };
+                obj! {
+                    "label": fs,
+                    "layout": self.smudge_layout.clone(),
+                    "vertex": obj! { "module": self.smudge_module.clone(), "entryPoint": vs, "buffers": arr(vec![]) },
+                    "fragment": obj! {
+                        "module": self.smudge_module.clone(),
+                        "entryPoint": fs,
+                        "targets": arr(vec![obj! { "format": TEX_FORMAT }.into()]),
+                    },
+                    "primitive": obj! { "topology": if p == Pipe::SmudgePick { "triangle-list" } else { "triangle-strip" } },
                 }
             }
             Pipe::Blit => obj! {
@@ -543,6 +618,22 @@ impl GpuBackend {
                 obj! { "binding": 1u32, "resource": view }.into(),
             ]),
         })
+    }
+
+    /// A view of a texture for a brush binding (white when none).
+    fn brush_view(&self, t: Option<TexId>) -> JsValue {
+        self.tex_entry(t).tex.create_view()
+    }
+
+    /// Bind group entries 1–5: samplers and the tip, grain and tint textures.
+    fn brush_bindings(&self, st: &DabStyle) -> Vec<JsValue> {
+        vec![
+            obj! { "binding": 1u32, "resource": self.sampler.clone() }.into(),
+            obj! { "binding": 2u32, "resource": self.repeat_sampler.clone() }.into(),
+            obj! { "binding": 3u32, "resource": self.brush_view(st.tip) }.into(),
+            obj! { "binding": 4u32, "resource": self.brush_view(st.grain) }.into(),
+            obj! { "binding": 5u32, "resource": self.brush_view(st.tint) }.into(),
+        ]
     }
 
     fn tex_entry(&self, t: Option<TexId>) -> &TexEntry {
@@ -796,6 +887,11 @@ impl Backend for GpuBackend {
         if let Some(Some(e)) = self.textures.get_mut(t.0 as usize).map(Option::take) {
             self.trash_tex.push(e.tex);
         }
+    }
+
+    fn upload_brush_texture(&mut self, src: ImageSource, w: u32, h: u32, _repeat: bool) -> Option<TexId> {
+        // Repeating is the sampler's job here (grain and tint bind `repeat_sampler`).
+        self.upload_texture(None, src, w, h, true)
     }
 
     fn create_mesh(&mut self, vertices: &[f32], indices: &[u32]) -> Option<MeshId> {
@@ -1067,21 +1163,136 @@ impl Backend for GpuBackend {
         self.queue.submit(&arr(vec![enc.finish()]));
     }
 
-    fn paint_dabs(&mut self, tex: TexId, _size: u32, dabs: &[f32], mode: PaintMode) {
+    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode, style: &DabStyle) {
         if dabs.is_empty() {
             return;
         }
         let Some(view) = self.textures.get(tex.0 as usize).and_then(Option::as_ref).map(|e| e.tex.create_view()) else { return };
         Self::write_instances(&self.device, &self.queue, &mut self.dab_inst, &mut self.trash_buf, dabs);
+        self.queue.write_f32(&self.dab_uniform, 0.0, &style_words(style, size as f32));
+        let mut entries = vec![obj! { "binding": 0u32, "resource": obj! { "buffer": self.dab_uniform.clone(), "offset": 0u32, "size": STYLE_BYTES } }.into()];
+        entries.extend(self.brush_bindings(style));
+        let bind = self.device.create_bind_group(&obj! { "layout": self.dab_bgl.clone(), "entries": arr(entries) });
         let pipe = self.pipeline(Pipe::Dab(mode));
         let enc = self.device.create_command_encoder();
         let pass = enc.begin_render_pass(&obj! {
             "colorAttachments": arr(vec![obj! { "view": view, "loadOp": "load", "storeOp": "store" }.into()]),
         });
         pass.set_pipeline(&pipe);
+        pass.set_bind_group(0, &bind);
         pass.set_vertex_buffer(0, &self.dab_inst.as_ref().unwrap().buf);
         pass.draw(4, (dabs.len() / DAB_FLOATS) as u32, 0, 0);
         pass.end();
+        self.queue.submit(&arr(vec![enc.finish()]));
+    }
+
+    fn smudge(&mut self, dabs: &[SmudgeDab]) {
+        if dabs.is_empty() {
+            return;
+        }
+        let target = |label: &str, size: u32, usage: u32| {
+            self.device.create_texture(&obj! { "label": label, "size": arr(vec![size.into(), size.into()]), "format": TEX_FORMAT, "usage": usage })
+        };
+        if self.smudge_window.is_none() {
+            self.smudge_window = Some(target("smudge window", SMUDGE_WINDOW, TEX_BINDING | TEX_COPY_DST | TEX_RENDER));
+            self.smudge_scratch = Some(target("smudge scratch", SMUDGE_BUF, TEX_COPY_SRC | TEX_RENDER));
+        }
+        let (window, scratch) = (self.smudge_window.clone().unwrap(), self.smudge_scratch.clone().unwrap());
+        // One uniform slot per pass: the pick, then a stamp per written tile.
+        let floats = SLOT_BYTES / 4;
+        let mut data: Vec<f32> = Vec::new();
+        let mut plans = Vec::new();
+        for d in dabs {
+            let Some(win) = crate::gl::window_of(d.tiles, SMUDGE_WINDOW) else { continue };
+            let reach = crate::gl::smudge_reach(d);
+            let tile = flexma_doc::raster::TILE as f32;
+            let mut slot = |place: [f32; 4], quad: [f32; 4]| {
+                let mut w = vec![0.0f32; floats];
+                w[..16].copy_from_slice(&style_words(&d.style, tile));
+                w[16..20].copy_from_slice(&[d.dab[0], d.dab[1], d.dab[2], d.dab[8]]);
+                w[20..24].copy_from_slice(&[d.dab[3], d.dab[7], d.alpha_lock as i32 as f32, tile]);
+                w[24..28].copy_from_slice(&place);
+                w[28..32].copy_from_slice(&quad);
+                w[32..36].copy_from_slice(&[win[0], win[1], SMUDGE_WINDOW as f32, SMUDGE_WINDOW as f32]);
+                w[36..40].copy_from_slice(&d.paint);
+                w[40..44].copy_from_slice(&[d.first as i32 as f32, d.keep, d.mix, SMUDGE_BUF as f32]);
+                data.extend_from_slice(&w);
+                (data.len() / floats - 1) as u32
+            };
+            let pick = slot([win[0], win[1], 0.0, 0.0], [0.0; 4]);
+            let stamps: Vec<(u32, TexId)> = d
+                .tiles
+                .iter()
+                .filter(|t| t.write)
+                .filter_map(|t| {
+                    let tex = t.tex?;
+                    let (x, y) = (d.dab[0] - t.origin[0], d.dab[1] - t.origin[1]);
+                    Some((slot([win[0], win[1], t.origin[0], t.origin[1]], [x - reach, y - reach, x + reach, y + reach]), tex))
+                })
+                .collect();
+            plans.push((d, win, pick, stamps));
+        }
+        if plans.is_empty() {
+            return;
+        }
+        let bytes = (data.len() * 4) as u64;
+        if self.smudge_uniform.as_ref().is_none_or(|g| g.cap < bytes) {
+            let cap = (bytes + bytes / 2).max(64 * 1024);
+            if let Some(old) = self.smudge_uniform.take() {
+                self.trash_buf.push(old.buf);
+            }
+            let buf = self.device.create_buffer(&obj! { "size": cap as f64, "usage": BUF_UNIFORM | BUF_COPY_DST });
+            self.smudge_uniform = Some(Grow { buf, cap });
+        }
+        let ubuf = self.smudge_uniform.as_ref().unwrap().buf.clone();
+        self.queue.write_f32(&ubuf, 0.0, &data);
+        let (pick_pipe, stamp_pipe) = (self.pipeline(Pipe::SmudgePick), self.pipeline(Pipe::SmudgeStamp));
+        let tile = flexma_doc::raster::TILE;
+        let enc = self.device.create_command_encoder();
+        for (d, win, pick, stamps) in plans {
+            let Some(buf) = self.textures.get(d.buffer.0 as usize).and_then(Option::as_ref).map(|e| e.tex.clone()) else { continue };
+            // 1. The tiles under the dab, side by side.
+            enc.begin_render_pass(&obj! {
+                "colorAttachments": arr(vec![obj! { "view": window.create_view(), "loadOp": "clear", "storeOp": "store",
+                    "clearValue": arr(vec![0u32.into(), 0u32.into(), 0u32.into(), 0u32.into()]) }.into()]),
+            })
+            .end();
+            for t in d.tiles {
+                let Some(src) = t.tex.and_then(|x| self.textures.get(x.0 as usize)).and_then(Option::as_ref) else { continue };
+                let (x, y) = ((t.origin[0] - win[0]) as u32, (t.origin[1] - win[1]) as u32);
+                enc.copy_texture_to_texture(
+                    &obj! { "texture": src.tex.clone() },
+                    &obj! { "texture": window.clone(), "origin": arr(vec![x.into(), y.into()]) },
+                    &arr(vec![tile.into(), tile.into()]),
+                );
+            }
+            let mut entries = vec![obj! { "binding": 0u32, "resource": obj! { "buffer": ubuf.clone(), "offset": 0u32, "size": SMUDGE_BYTES } }.into()];
+            entries.extend(self.brush_bindings(&d.style));
+            entries.push(obj! { "binding": 6u32, "resource": window.create_view() }.into());
+            entries.push(obj! { "binding": 7u32, "resource": buf.create_view() }.into());
+            let bind = self.device.create_bind_group(&obj! { "layout": self.smudge_bgl.clone(), "entries": arr(entries) });
+            // 2. Pick up into the scratch, which becomes the stroke's buffer.
+            let pass = enc.begin_render_pass(&obj! {
+                "colorAttachments": arr(vec![obj! { "view": scratch.create_view(), "loadOp": "clear", "storeOp": "store",
+                    "clearValue": arr(vec![0u32.into(), 0u32.into(), 0u32.into(), 0u32.into()]) }.into()]),
+            });
+            pass.set_pipeline(&pick_pipe);
+            pass.set_bind_group_offsets(0, &bind, &[pick * SLOT_BYTES as u32]);
+            pass.draw(3, 1, 0, 0);
+            pass.end();
+            enc.copy_texture_to_texture(&obj! { "texture": scratch.clone() }, &obj! { "texture": buf.clone() }, &arr(vec![SMUDGE_BUF.into(), SMUDGE_BUF.into()]));
+            // 3. Lay it down, tile by tile.
+            for (slot, tex) in stamps {
+                let Some(e) = self.textures.get(tex.0 as usize).and_then(Option::as_ref) else { continue };
+                let pass = enc.begin_render_pass(&obj! {
+                    "colorAttachments": arr(vec![obj! { "view": e.tex.create_view(), "loadOp": "load", "storeOp": "store" }.into()]),
+                });
+                pass.set_pipeline(&stamp_pipe);
+                pass.set_bind_group_offsets(0, &bind, &[slot * SLOT_BYTES as u32]);
+                pass.draw(4, 1, 0, 0);
+                pass.end();
+            }
+        }
         self.queue.submit(&arr(vec![enc.finish()]));
     }
 
@@ -1114,4 +1325,28 @@ impl Backend for GpuBackend {
         // Snapshots are rare; the closure lives until it has run.
         mapped.forget();
     }
+}
+
+/// The `Style` uniform (brush.wgsl): 16 words.
+fn style_words(st: &DabStyle, size: f32) -> [f32; 16] {
+    let flags = st.tip.is_some() as u32 | (st.tip_color as u32) << 1 | (st.grain.is_some() as u32) << 2 | (st.tint.is_some() as u32) << 3;
+    let [grain_lod, tint_lod] = texture_lods(st);
+    [
+        st.tip_extent[0],
+        st.tip_extent[1],
+        st.origin[0],
+        st.origin[1],
+        st.grain_size[0],
+        st.grain_size[1],
+        st.tint_size[0],
+        st.tint_size[1],
+        st.grain_strength,
+        st.tint_strength,
+        grain_lod,
+        tint_lod,
+        st.tip_px[0],
+        st.tip_px[1],
+        f32::from_bits(flags),
+        size,
+    ]
 }
