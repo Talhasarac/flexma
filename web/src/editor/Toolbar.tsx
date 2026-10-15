@@ -2,7 +2,7 @@
 import { useRef, type ReactElement } from 'react';
 import { Brush, ChevronUp, Circle, Eraser, Frame, Hand, MessageCircle, Minus, MousePointer2, PenTool, Square, Star, Triangle, Type } from 'lucide-react';
 import { useMenu } from '../components/Menu';
-import { useCommentMode, useUi, type EditorStore } from './store';
+import { useCommentMode, usePaintTools, useUi, type EditorStore } from './store';
 import type { Tool } from './types';
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: ReactElement }[] = [
@@ -16,6 +16,7 @@ const SHAPES: { tool: Tool; label: string; key: string; icon: ReactElement }[] =
 export function Toolbar({ store }: { store: EditorStore }) {
   const ui = useUi(store);
   const commentMode = useCommentMode(store);
+  const paintTools = usePaintTools(store);
   const menu = useMenu();
   const lastShape = useRef<Tool>('rectangle');
   const set = (t: Tool) => {
@@ -61,7 +62,7 @@ export function Toolbar({ store }: { store: EditorStore }) {
           </div>
           {btn('pen', 'Pen (P)', <PenTool size={16} />)}
           {btn('text', 'Text (T)', <Type size={16} />)}
-          {store.paintTools && (
+          {paintTools && (
             <>
               <span className="tool-sep" />
               {btn('brush', 'Brush (B)', <Brush size={16} />)}

@@ -113,7 +113,7 @@ export default function ProjectPage() {
                 </select>
               </>
             )}
-            {editable && <NewFileButton onCreate={() => createFile(projectId)} />}
+            {editable && <NewFileButton onCreate={(kind) => createFile(projectId, kind)} />}
           </>
         }
       />
@@ -132,7 +132,7 @@ export default function ProjectPage() {
                 ? 'Create a design file here, or drag files from Recent onto this project in the sidebar.'
                 : 'No files have been added to this project yet.'
             }
-            action={editable && <NewFileButton onCreate={() => createFile(projectId)} />}
+            action={editable && <NewFileButton onCreate={(kind) => createFile(projectId, kind)} />}
           />
         }
       />

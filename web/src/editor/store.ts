@@ -38,8 +38,8 @@ export class EditorStore {
   readonly workspaceId: string | null;
   /** The signed-in user, whose other tabs are hidden from this one. */
   readonly userId: string | null;
-  /** The workspace has painting (brush, eraser) turned on. */
-  readonly paintTools: boolean;
+  /** A painting file: the brush and eraser are shown. */
+  paintTools: boolean;
   readonly fonts: FontManager;
   private listeners = new Set<Listener>();
   private socket: WebSocket | null = null;
@@ -229,6 +229,7 @@ export class EditorStore {
     this.notify();
   }
   getStatus = () => this.status;
+  getPaintTools = () => this.paintTools;
   getSaving = () => this.saving;
 
   // ---------------- network ----------------
@@ -404,6 +405,17 @@ export class EditorStore {
 
   // ---------------- paint layers ----------------
 
+  /** Show or hide the brush and eraser (the file became a painting or design file). */
+  setPaintTools(on: boolean) {
+    this.paintTools = on;
+    this.engine.set_paint_tools(on);
+    const tool = this.engine.tool();
+    if (!on && (tool === 'brush' || tool === 'eraser')) this.engine.set_tool('select');
+    this.v.ui = -1;
+    this.poll();
+    this.notify();
+  }
+
   brush(eraser: boolean): BrushSettings {
     return JSON.parse(this.engine.brush(eraser)) as BrushSettings;
   }
@@ -504,6 +516,9 @@ export function useStatus(s: EditorStore) {
 }
 export function useSaving(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getSaving);
+}
+export function usePaintTools(s: EditorStore) {
+  return useSyncExternalStore(s.subscribe, s.getPaintTools);
 }
 
 /** Encode a 256×256 straight-alpha RGBA tile as PNG. */

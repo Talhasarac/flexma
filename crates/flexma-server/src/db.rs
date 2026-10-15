@@ -231,9 +231,9 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (file_id, layer_id, tx, ty)
     );
     "#,
-    // 10: painting tools are opt-in per workspace (UI work doesn't need them).
+    // 10: files are 'design' or 'painting' (shows the brush and eraser).
     r#"
-    ALTER TABLE workspaces ADD COLUMN paint_tools INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'design';
     "#,
 ];
 

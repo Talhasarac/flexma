@@ -933,6 +933,17 @@ kbd {
   outline: none;
 }
 
+/* "New file" menu: a title with a one-line description. */
+.new-file-kind {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0;
+}
+.new-file-kind .text-muted {
+  font-size: var(--font-size-xs);
+}
+
 .menu-item:disabled {
   opacity: 0.45;
   cursor: default;
@@ -1966,6 +1977,20 @@ kbd {
 .file-card-skeleton:hover {
   border-color: var(--border);
   box-shadow: none;
+}
+
+.file-card-kind {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.15);
 }
 
 .file-card-skeleton .file-card-thumb {

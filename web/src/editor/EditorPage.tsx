@@ -9,6 +9,7 @@ import { useDocumentTitle } from '../lib/useDocumentTitle';
 import { useAuth } from '../lib/auth';
 import { createEditor, loadEngine } from '../engine';
 import { EditorStore, useCommentMode, useSelection, useUi } from './store';
+import type { LayerNode } from './types';
 import { CommentsPanel } from './CommentsLayer';
 import { Canvas } from './Canvas';
 import { Toolbar } from './Toolbar';
@@ -48,8 +49,10 @@ export default function EditorPage() {
           engine.free();
           return;
         }
-        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId, userId, paintTools: info.paintTools });
+        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId, userId, paintTools: info.kind === 'painting' });
         created.onFatal = (m) => setFatal(m);
+        // Painting files open with the brush on their first paint layer.
+        if (info.kind === 'painting') created.onLoaded = () => startPainting(created!);
         created.connect(api.files.socketUrl(fileId));
         // Handy for debugging and profiling from the console.
         (window as unknown as { __flexma?: EditorStore }).__flexma = created;
@@ -69,6 +72,23 @@ export default function EditorPage() {
   if (fatal) return <FullScreenMessage title="File unavailable" message={fatal} homeLink />;
   if (!file || !store) return <FullScreenLoader label="Opening file" />;
   return <Editor store={store} canvas={canvas} header={<TopBar store={store} file={file} onRenamed={setFile} />} />;
+}
+
+function startPainting(store: EditorStore) {
+  const e = store.engine;
+  if (!e.can_edit()) return;
+  const find = (nodes: LayerNode[]): LayerNode | null => {
+    for (const n of nodes) {
+      if (n.type === 'PAINT' && !n.locked && n.visible && !n.derived) return n;
+      const hit = find(n.children);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const layer = find(JSON.parse(e.layers()) as LayerNode[]);
+  if (layer) e.set_selection(JSON.stringify([layer.id]));
+  e.set_tool('brush');
+  store.poll();
 }
 
 /** The editor shell (panels, canvas, toolbar). Also used by the public share viewer. */

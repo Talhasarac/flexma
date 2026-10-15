@@ -37,6 +37,17 @@ export function TopBar({ store, file, onRenamed }: Props) {
     store.poll();
   };
 
+  // A painting file shows the brush and eraser; any file can switch.
+  const togglePainting = async () => {
+    const kind = store.paintTools ? 'design' : 'painting';
+    try {
+      onRenamed(await api.files.update(file.id, { kind }));
+      store.setPaintTools(kind === 'painting');
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
   const rename = async () => {
     if (!ui.canEdit) return;
     const name = await dialogs.prompt({ title: 'Rename file', defaultValue: file.name, maxLength: 200 });
@@ -66,6 +77,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
               { label: 'Export page as SVG', onSelect: () => window.open(store.exportSvgUrl({ page: ui.page }), '_blank') },
               { type: 'separator' },
               { label: 'Rename file…', disabled: !ui.canEdit, onSelect: () => void rename() },
+              { label: 'Painting tools', checked: store.paintTools, disabled: !ui.canEdit, onSelect: () => void togglePainting() },
               { label: 'Share…', onSelect: () => setShareOpen(true) },
               { label: 'Version history…', onSelect: () => setVersionsOpen(true) },
               { label: 'Connect AI agents…', onSelect: () => setAgentsOpen(true) },

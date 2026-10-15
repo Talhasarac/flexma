@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from 'react';
-import { Plus, Search, X } from 'lucide-react';
+import { Brush, ChevronDown, PenTool, Plus, Search, X } from 'lucide-react';
+import type { FileKind } from '../../lib/api';
+import { useMenu } from '../Menu';
 import { Spinner } from '../StatusScreens';
 
 interface PageHeaderProps {
@@ -59,24 +61,52 @@ export function SearchInput({
 }
 
 /** Primary "New design file" button with a busy state. */
-export function NewFileButton({ onCreate, label = 'New design file' }: { onCreate: () => Promise<unknown>; label?: string }) {
+const KINDS: { kind: FileKind; title: string; description: string; icon: ReactNode }[] = [
+  { kind: 'design', title: 'Design file', description: 'Screens, UI and components', icon: <PenTool size={16} /> },
+  { kind: 'painting', title: 'Painting', description: 'A canvas with the brush ready, painted together live', icon: <Brush size={16} /> },
+];
+
+/** "New file": asks whether it's a design file or a painting. */
+export function NewFileButton({ onCreate, label = 'New file' }: { onCreate: (kind: FileKind) => Promise<unknown>; label?: string }) {
   const [busy, setBusy] = useState(false);
+  const menu = useMenu();
+  const create = async (kind: FileKind) => {
+    setBusy(true);
+    try {
+      await onCreate(kind);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <button
-      type="button"
-      className="btn btn-primary"
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          await onCreate();
-        } finally {
-          setBusy(false);
+    <>
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={busy}
+        aria-haspopup="menu"
+        onClick={(e) =>
+          menu.open(
+            e.currentTarget,
+            KINDS.map((k) => ({
+              icon: k.icon,
+              label: (
+                <span className="new-file-kind">
+                  <span>{k.title}</span>
+                  <span className="text-muted">{k.description}</span>
+                </span>
+              ),
+              onSelect: () => void create(k.kind),
+            })),
+            { label: 'New file', align: 'end' },
+          )
         }
-      }}
-    >
-      {busy ? <Spinner size={14} label="Creating" /> : <Plus size={16} aria-hidden="true" />}
-      <span>{label}</span>
-    </button>
+      >
+        {busy ? <Spinner size={14} label="Creating" /> : <Plus size={16} aria-hidden="true" />}
+        <span>{label}</span>
+        <ChevronDown size={14} aria-hidden="true" />
+      </button>
+      {menu.element}
+    </>
   );
 }

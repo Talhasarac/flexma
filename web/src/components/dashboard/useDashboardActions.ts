@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { api, type FileInfo, type Project } from '../../lib/api';
+import { api, type FileInfo, type FileKind, type Project } from '../../lib/api';
 import { useDashboard } from '../../lib/dashboard';
 import { pluralize } from '../../lib/format';
 import { useDialogs } from '../Dialogs';
@@ -101,11 +101,11 @@ export function useDashboardActions() {
   );
 
   /**
-   * Create an "Untitled" design file and open it. Without a project id the
-   * file goes into the workspace's "Drafts" project (created on demand).
+   * Create an "Untitled" design or painting file and open it. Without a
+   * project id the file goes into the workspace's "Drafts" project (created on demand).
    */
   const createFile = useCallback(
-    async (projectId?: string): Promise<FileInfo | null> => {
+    async (projectId?: string, kind: FileKind = 'design'): Promise<FileInfo | null> => {
       if (!workspace) return null;
       try {
         let target = projectId;
@@ -114,7 +114,7 @@ export function useDashboardActions() {
           const drafts = list.find((p) => p.name.trim().toLowerCase() === DRAFTS.toLowerCase());
           target = drafts ? drafts.id : (await api.projects.create(workspace.id, DRAFTS)).id;
         }
-        const file = await api.files.create(target, UNTITLED);
+        const file = await api.files.create(target, UNTITLED, kind);
         notifyFilesChanged();
         navigate(`/file/${file.id}`);
         return file;

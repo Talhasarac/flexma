@@ -28,7 +28,7 @@ export default function RecentPage() {
         actions={
           <>
             {files.data && files.data.length > 0 && <SearchInput value={filter} onChange={setFilter} />}
-            {editable && <NewFileButton onCreate={() => createFile()} />}
+            {editable && <NewFileButton onCreate={(kind) => createFile(undefined, kind)} />}
           </>
         }
       />
@@ -51,7 +51,7 @@ export default function RecentPage() {
             action={
               editable && (
                 <div className="row row-center">
-                  <NewFileButton onCreate={() => createFile()} />
+                  <NewFileButton onCreate={(kind) => createFile(undefined, kind)} />
                   <Link to="/agents" className="btn">
                     <Bot size={16} aria-hidden="true" />
                     <span>Connect an AI agent</span>

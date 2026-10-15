@@ -38,8 +38,6 @@ export interface Workspace {
   role: Role;
   memberCount: number;
   createdAt: string;
-  /** Painting (brush and eraser) is turned on for this workspace's files. */
-  paintTools: boolean;
 }
 
 export interface Member {
@@ -86,9 +84,11 @@ export interface FileInfo {
   createdAt: string;
   updatedAt: string;
   createdBy: string;
-  /** The file's workspace has painting turned on. */
-  paintTools: boolean;
+  /** Design files are for screens and UI; painting files show the brush and eraser. */
+  kind: FileKind;
 }
+
+export type FileKind = 'design' | 'painting';
 
 /** A font file in a workspace (one face: family + weight + style). */
 export interface WorkspaceFont {
@@ -279,6 +279,7 @@ export interface UpdateMeInput {
 export interface FilePatch {
   name?: string;
   projectId?: string;
+  kind?: FileKind;
 }
 
 export interface ExportOptions {
@@ -491,7 +492,7 @@ const workspaces = {
   list: () => request<Workspace[]>('GET', '/api/workspaces'),
   create: (name: string) => request<Workspace>('POST', '/api/workspaces', { body: { name } }),
   get: (id: string) => request<Workspace>('GET', `/api/workspaces/${enc(id)}`),
-  update: (id: string, patch: { name?: string; paintTools?: boolean }) =>
+  update: (id: string, patch: { name: string }) =>
     request<Workspace>('PATCH', `/api/workspaces/${enc(id)}`, { body: patch }),
   delete: (id: string) => request<Record<string, never>>('DELETE', `/api/workspaces/${enc(id)}`),
 
@@ -533,8 +534,8 @@ const files = {
   /** Most recently updated files in a workspace (max 50). */
   listRecent: (workspaceId: string) => request<FileInfo[]>('GET', `/api/workspaces/${enc(workspaceId)}/files`),
   list: (projectId: string) => projects.listFiles(projectId),
-  create: (projectId: string, name: string) =>
-    request<FileInfo>('POST', `/api/projects/${enc(projectId)}/files`, { body: { name } }),
+  create: (projectId: string, name: string, kind: FileKind = 'design') =>
+    request<FileInfo>('POST', `/api/projects/${enc(projectId)}/files`, { body: { name, kind } }),
   get: (id: string) => request<FileInfo>('GET', `/api/files/${enc(id)}`),
   update: (id: string, patch: FilePatch) => request<FileInfo>('PATCH', `/api/files/${enc(id)}`, { body: patch }),
   delete: (id: string) => request<Record<string, never>>('DELETE', `/api/files/${enc(id)}`),

@@ -21,20 +21,6 @@ export function GeneralSection({ workspace }: { workspace: Workspace }) {
     setName(workspace.name);
   }
 
-  const [savingPaint, setSavingPaint] = useState(false);
-  const setPaintTools = async (on: boolean) => {
-    setSavingPaint(true);
-    try {
-      await api.workspaces.update(workspace.id, { paintTools: on });
-      await reloadWorkspaces();
-      toast.success(on ? 'Painting tools turned on' : 'Painting tools turned off');
-    } catch (err) {
-      toast.error(err);
-    } finally {
-      setSavingPaint(false);
-    }
-  };
-
   const trimmed = name.trim();
   const dirty = trimmed !== workspace.name && trimmed.length > 0;
 
@@ -80,13 +66,6 @@ export function GeneralSection({ workspace }: { workspace: Workspace }) {
             {!isOwner && <span className="field-hint">Only owners can rename the workspace.</span>}
           </label>
         </div>
-        <label className="admin-toggle" title={isOwner ? undefined : 'Only owners can change this.'}>
-          <input type="checkbox" checked={workspace.paintTools} disabled={!isOwner || savingPaint} onChange={(e) => void setPaintTools(e.target.checked)} />
-          <span>
-            <b>Painting tools</b>
-            <span className="text-muted"> — brush and eraser on paint layers, painted together live. Files open again to pick up the change.</span>
-          </span>
-        </label>
         <dl className="meta-list">
           <div>
             <dt>Your role</dt>

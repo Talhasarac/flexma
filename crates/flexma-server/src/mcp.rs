@@ -97,9 +97,13 @@ fn tools() -> Value {
             "properties": { "workspace_id": { "type": "string" }, "name": { "type": "string" } },
             "required": ["workspace_id", "name"]
         })),
-        tool("create_file", "Create a new design file in a project. Returns its id and a browser link for the user.", json!({
+        tool("create_file", "Create a new file in a project. Returns its id and a browser link for the user.", json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" }, "name": { "type": "string" } },
+            "properties": {
+                "project_id": { "type": "string" },
+                "name": { "type": "string" },
+                "kind": { "type": "string", "enum": ["design", "painting"], "description": "design (default): screens and UI. painting: a 1920x1080 canvas frame with a paint layer, for people to paint on with the brush" }
+            },
             "required": ["project_id", "name"]
         })),
         tool("get_file_tree", "Outline of a file: pages and the node tree (id, type, name, position, size, key styles). Use node_id to zoom into a subtree and depth to control detail.", json!({
@@ -690,13 +694,14 @@ impl Ctx {
     async fn create_file(&self, args: &Value) -> ToolResult {
         let pj = s(args, "project_id")?.to_string();
         let name = opt_s(args, "name").unwrap_or("Untitled").to_string();
+        let kind = crate::api_files::FileKind::parse(opt_s(args, "kind").unwrap_or("design")).map_err(err_msg)?;
         let uid = self.user.id.clone();
         let v = self
             .st
             .db
             .call(move |c| {
                 project_access(c, &uid, &pj, Role::Editor)?;
-                let id = insert_file(c, &pj, &name, &uid, None)?;
+                let id = insert_file(c, &pj, &name, &uid, None, kind)?;
                 get_file_json(c, &uid, &id)
             })
             .await

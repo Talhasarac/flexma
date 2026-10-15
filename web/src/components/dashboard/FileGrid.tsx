@@ -1,6 +1,6 @@
 import { useState, type DragEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Ellipsis, FileImage, SearchX } from 'lucide-react';
+import { Brush, Ellipsis, FileImage, SearchX } from 'lucide-react';
 import { api, type FileInfo } from '../../lib/api';
 import { canEdit } from '../../lib/format';
 import { EmptyState, ErrorState } from '../EmptyState';
@@ -122,6 +122,11 @@ function FileCard({ file, showProject, onMenu, onRename, onDelete }: FileCardPro
       >
         <div className="file-card-thumb">
           <Thumbnail file={file} />
+          {file.kind === 'painting' && (
+            <span className="file-card-kind" title="Painting">
+              <Brush size={12} aria-label="Painting" />
+            </span>
+          )}
         </div>
         <div className="file-card-meta">
           <span className="file-card-name" title={file.name}>

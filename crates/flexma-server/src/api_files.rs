@@ -18,9 +18,8 @@ use serde_json::{json, Value};
 /// SVGs we serve contain user text; forbid scripts and remote loads outright.
 const SVG_CSP: &str = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self' data:";
 
-const FILE_SELECT: &str = "SELECT f.id, f.name, f.project_id, p.name, p.workspace_id, m.role, f.created_at, f.updated_at, u.name, w.paint_tools
+const FILE_SELECT: &str = "SELECT f.id, f.name, f.project_id, p.name, p.workspace_id, m.role, f.created_at, f.updated_at, u.name, f.kind
     FROM files f JOIN projects p ON p.id = f.project_id
-    JOIN workspaces w ON w.id = p.workspace_id
     JOIN workspace_members m ON m.workspace_id = p.workspace_id AND m.user_id = ?1
     LEFT JOIN users u ON u.id = f.created_by";
 
@@ -35,7 +34,7 @@ fn file_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "createdAt": ts(r.get(6)?),
         "updatedAt": ts(r.get(7)?),
         "createdBy": r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-        "paintTools": r.get::<_, i64>(9)? != 0,
+        "kind": r.get::<_, String>(9)?,
     }))
 }
 
@@ -46,14 +45,65 @@ pub fn get_file_json(c: &rusqlite::Connection, user_id: &str, file_id: &str) -> 
 }
 
 /// Create a file row with an empty document (or the given one). Returns the id.
-pub fn insert_file(c: &rusqlite::Connection, project_id: &str, name: &str, user_id: &str, doc_json: Option<String>) -> AppResult<String> {
+/// What a file is for: `design` (screens and UI) or `painting`, which shows
+/// the brush and eraser and starts with a canvas to paint on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum FileKind {
+    #[default]
+    Design,
+    Painting,
+}
+
+impl FileKind {
+    pub fn parse(s: &str) -> AppResult<FileKind> {
+        match s {
+            "design" => Ok(FileKind::Design),
+            "painting" => Ok(FileKind::Painting),
+            _ => Err(AppError::bad_request("kind must be \"design\" or \"painting\"")),
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileKind::Design => "design",
+            FileKind::Painting => "painting",
+        }
+    }
+}
+
+/// A new painting file: a white 1920×1080 canvas frame with a paint layer.
+fn painting_document() -> Document {
+    use flexma_doc::{Color, Node, NodeType, Op, Paint};
+    let mut doc = Document::new_empty();
+    let mut canvas = Node::new("1:1", NodeType::Frame);
+    canvas.name = "Canvas".into();
+    canvas.parent = Some("0:1".into());
+    (canvas.width, canvas.height) = (1920.0, 1080.0);
+    canvas.fills = vec![Paint::solid(Color::WHITE)];
+    canvas.clips_content = true;
+    canvas.index = flexma_doc::fractional::key_between(None, None);
+    let mut layer = Node::new("1:2", NodeType::Paint);
+    layer.name = "Paint layer 1".into();
+    layer.parent = Some("1:1".into());
+    (layer.width, layer.height) = (1920.0, 1080.0);
+    layer.fills = vec![];
+    layer.index = flexma_doc::fractional::key_between(None, None);
+    for node in [canvas, layer] {
+        let _ = doc.apply(&Op::Create { node });
+    }
+    doc
+}
+
+pub fn insert_file(c: &rusqlite::Connection, project_id: &str, name: &str, user_id: &str, doc_json: Option<String>, kind: FileKind) -> AppResult<String> {
     let id = new_id();
-    let doc = doc_json.unwrap_or_else(|| Document::new_empty().to_json());
+    let doc = doc_json.unwrap_or_else(|| match kind {
+        FileKind::Design => Document::new_empty().to_json(),
+        FileKind::Painting => painting_document().to_json(),
+    });
     let t = now();
     c.execute(
-        "INSERT INTO files (id, project_id, name, document, version, created_by, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6)",
-        params![id, project_id, name, doc, user_id, t],
+        "INSERT INTO files (id, project_id, name, document, version, created_by, created_at, updated_at, kind)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6, ?7)",
+        params![id, project_id, name, doc, user_id, t, kind.as_str()],
     )?;
     Ok(id)
 }
@@ -86,8 +136,10 @@ pub async fn list_workspace_files(State(st): State<AppState>, user: AuthUser, Pa
 }
 
 #[derive(Deserialize)]
-pub struct NameReq {
+pub struct CreateFile {
     name: Option<String>,
+    /// "design" (default) or "painting".
+    kind: Option<String>,
 }
 
 fn clean_file_name(n: Option<String>) -> AppResult<String> {
@@ -102,14 +154,15 @@ pub async fn create_file(
     State(st): State<AppState>,
     user: AuthUser,
     Path(project): Path<String>,
-    Json(req): Json<NameReq>,
+    Json(req): Json<CreateFile>,
 ) -> AppResult<Json<Value>> {
     let name = clean_file_name(req.name)?;
+    let kind = req.kind.as_deref().map(FileKind::parse).transpose()?.unwrap_or_default();
     let v = st
         .db
         .call(move |c| {
             project_access(c, &user.id, &project, Role::Editor)?;
-            let id = insert_file(c, &project, &name, &user.id, None)?;
+            let id = insert_file(c, &project, &name, &user.id, None, kind)?;
             get_file_json(c, &user.id, &id)
         })
         .await?;
@@ -126,6 +179,8 @@ pub async fn get_file(State(st): State<AppState>, user: AuthUser, Path(id): Path
 pub struct UpdateFile {
     name: Option<String>,
     project_id: Option<String>,
+    /// Switch between a design and a painting file.
+    kind: Option<String>,
 }
 
 pub async fn update_file(
@@ -134,6 +189,7 @@ pub async fn update_file(
     Path(id): Path<String>,
     Json(req): Json<UpdateFile>,
 ) -> AppResult<Json<Value>> {
+    let kind = req.kind.as_deref().map(FileKind::parse).transpose()?;
     let v = st
         .db
         .call(move |c| {
@@ -148,6 +204,9 @@ pub async fn update_file(
                     return Err(AppError::bad_request("files can only be moved between projects of the same workspace"));
                 }
                 c.execute("UPDATE files SET project_id = ?1 WHERE id = ?2", params![p, id])?;
+            }
+            if let Some(k) = kind {
+                c.execute("UPDATE files SET kind = ?1 WHERE id = ?2", params![k.as_str(), id])?;
             }
             get_file_json(c, &user.id, &id)
         })
@@ -178,12 +237,12 @@ pub async fn current_doc_json(st: &AppState, file_id: &str) -> AppResult<String>
 pub async fn duplicate_file(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Json<Value>> {
     let uid = user.id.clone();
     let fid = id.clone();
-    let (project, name) = st
+    let (project, name, kind) = st
         .db
         .call(move |c| {
             let (_, project, _) = file_access(c, &uid, &fid, Role::Editor)?;
-            let name: String = c.query_row("SELECT name FROM files WHERE id = ?1", params![fid], |r| r.get(0))?;
-            Ok((project, name))
+            let (name, kind): (String, String) = c.query_row("SELECT name, kind FROM files WHERE id = ?1", params![fid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok((project, name, FileKind::parse(&kind).unwrap_or_default()))
         })
         .await?;
     let doc = current_doc_json(&st, &id).await?;
@@ -191,7 +250,7 @@ pub async fn duplicate_file(State(st): State<AppState>, user: AuthUser, Path(id)
     let (v, new_id) = st
         .db
         .call(move |c| {
-            let new_id = insert_file(c, &project, &format!("{name} (copy)"), &user.id, Some(doc))?;
+            let new_id = insert_file(c, &project, &format!("{name} (copy)"), &user.id, Some(doc), kind)?;
             crate::paint::copy_file_rows(c, &src, &new_id)?;
             Ok((get_file_json(c, &user.id, &new_id)?, new_id))
         })
@@ -541,4 +600,22 @@ where
         bytes,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flexma_doc::NodeType;
+
+    #[test]
+    fn painting_files_start_with_a_canvas_and_a_layer() {
+        let doc = painting_document();
+        let canvas = doc.get("1:1").expect("canvas frame");
+        assert_eq!((canvas.kind, canvas.parent.as_deref()), (NodeType::Frame, Some("0:1")));
+        let layer = doc.get("1:2").expect("paint layer");
+        assert_eq!((layer.kind, layer.parent.as_deref()), (NodeType::Paint, Some("1:1")));
+        assert_eq!((layer.width, layer.height), (canvas.width, canvas.height));
+        assert_eq!(FileKind::parse("painting").unwrap(), FileKind::Painting);
+        assert!(FileKind::parse("sculpture").is_err());
+    }
 }
