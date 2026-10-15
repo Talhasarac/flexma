@@ -652,8 +652,9 @@ impl PaintState {
                 let mut first = false;
                 if let Some(l) = self.live.get_mut(&id) {
                     first = l.cursor.count() == 0;
-                    rest = raster::dabs(&l.stroke.brush, &stroke.points, &mut l.cursor);
+                    rest = raster::dabs(&l.stroke.brush, &stroke.points, &stroke.tilt, &mut l.cursor);
                     l.stroke.points = stroke.points.clone();
+                    l.stroke.tilt = stroke.tilt.clone();
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         for d in &rest {
                             l.touched.extend(dab_tiles(&l.stroke.brush, d, layer));
@@ -757,15 +758,25 @@ impl PaintState {
         if !self.live.contains_key(id) {
             let Some(brush) = m.get("brush").and_then(|b| serde_json::from_value::<raster::Brush>(b.clone()).ok()) else { return };
             let alpha_lock = m.get("alphaLock").and_then(Value::as_bool).unwrap_or(false);
-            let stroke = Stroke { id: id.to_string(), layer: layer.to_string(), brush: brush.sanitized(), points: Vec::new(), alpha_lock };
+            let stroke = Stroke { id: id.to_string(), layer: layer.to_string(), brush: brush.sanitized(), points: Vec::new(), tilt: Vec::new(), alpha_lock };
             self.live.insert(id.to_string(), Live { stroke, cursor: DabCursor::new(id), from: from.to_string(), touched: HashSet::new(), last_ms: now });
         }
         let Some(mut l) = self.live.remove(id) else { return };
+        let tilt: Vec<[f32; 2]> = m.get("tilt").and_then(|p| serde_json::from_value(p.clone()).ok()).unwrap_or_default();
+        // Tilt comes with each chunk's points; a chunk without it (or a bad
+        // one) leaves the stroke untilted.
+        let tilted = l.stroke.brush.uses_tilt() && tilt.len() == points.len() && l.stroke.tilt.len() == l.stroke.points.len();
         let room = raster::MAX_POINTS.saturating_sub(l.stroke.points.len());
-        l.stroke.points.extend(points.into_iter().filter(|p| p.iter().all(|v| v.is_finite())).take(room));
+        let good: Vec<usize> = (0..points.len()).filter(|&i| points[i].iter().chain(tilt.get(i).into_iter().flatten()).all(|v| v.is_finite())).take(room).collect();
+        l.stroke.points.extend(good.iter().map(|&i| points[i]));
+        if tilted {
+            l.stroke.tilt.extend(good.iter().map(|&i| tilt[i]));
+        } else {
+            l.stroke.tilt.clear();
+        }
         l.last_ms = now;
         let first = l.cursor.count() == 0;
-        let dabs = raster::dabs(&l.stroke.brush, &l.stroke.points, &mut l.cursor);
+        let dabs = raster::dabs(&l.stroke.brush, &l.stroke.points, &l.stroke.tilt, &mut l.cursor);
         if let Some(layer) = self.layers.get(&l.stroke.layer) {
             for d in &dabs {
                 l.touched.extend(dab_tiles(&l.stroke.brush, d, layer));
@@ -823,6 +834,9 @@ impl PaintState {
                 let first = self.live_sent == 0;
                 let pts = &a.stroke.points[self.live_sent..];
                 let mut m = json!({ "t": "strokeLive", "id": a.stroke.id, "layer": a.stroke.layer, "points": pts, "start": first });
+                if a.stroke.tilt.len() == a.stroke.points.len() && !a.stroke.tilt.is_empty() {
+                    m["tilt"] = json!(&a.stroke.tilt[self.live_sent..]);
+                }
                 if first {
                     m["brush"] = serde_json::to_value(&a.stroke.brush).unwrap_or(Value::Null);
                     m["alphaLock"] = json!(a.stroke.alpha_lock);
@@ -849,7 +863,7 @@ impl PaintState {
     pub fn begin(&mut self, stroke: Stroke, now: f64) {
         self.live_sent = 0;
         let mut l = Live { cursor: DabCursor::new(&stroke.id), stroke, from: self.client_id.clone(), touched: HashSet::new(), last_ms: now };
-        let dabs = raster::dabs(&l.stroke.brush, &l.stroke.points, &mut l.cursor);
+        let dabs = raster::dabs(&l.stroke.brush, &l.stroke.points, &l.stroke.tilt, &mut l.cursor);
         if let Some(layer) = self.layers.get(&l.stroke.layer) {
             for d in &dabs {
                 l.touched.extend(dab_tiles(&l.stroke.brush, d, layer));
@@ -860,14 +874,18 @@ impl PaintState {
         self.stamp(&id, &layer, &brush, alpha_lock, &dabs, true, true);
     }
 
-    pub fn add_point(&mut self, p: [f32; 3]) {
+    /// Add a point (and the pen's tilt there, for brushes that record it).
+    pub fn add_point(&mut self, p: [f32; 3], tilt: [f32; 2]) {
         let Some(mut a) = self.active.take() else { return };
         if a.stroke.points.len() >= raster::MAX_POINTS {
             self.active = Some(a);
             return;
         }
         a.stroke.points.push(p);
-        let dabs = raster::dabs(&a.stroke.brush, &a.stroke.points, &mut a.cursor);
+        if !a.stroke.tilt.is_empty() {
+            a.stroke.tilt.push(tilt);
+        }
+        let dabs = raster::dabs(&a.stroke.brush, &a.stroke.points, &a.stroke.tilt, &mut a.cursor);
         if let Some(layer) = self.layers.get(&a.stroke.layer) {
             for d in &dabs {
                 a.touched.extend(dab_tiles(&a.stroke.brush, d, layer));

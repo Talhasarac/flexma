@@ -81,6 +81,9 @@ pub struct Editor {
     pub eraser: flexma_doc::raster::Brush,
     /// Pen pressure of the latest pointer event (1 for mice).
     pub pressure: f32,
+    /// Pen tilt of the latest pointer event: 0 upright … 1 flat, and the
+    /// direction it leans on screen (radians, 0 = right, clockwise).
+    pub tilt: [f32; 2],
     /// The stabilizer's smoothed position (layer px) while painting.
     pub smooth: Option<[f32; 3]>,
     /// The pointer is over the canvas (for the brush outline).
@@ -139,6 +142,7 @@ impl Editor {
             brush: flexma_doc::raster::Brush::default(),
             eraser: flexma_doc::raster::Brush { size: 30.0, hardness: 0.6, erase: true, ..Default::default() },
             pressure: 1.0,
+            tilt: [0.0, 0.0],
             smooth: None,
             pointer_in: false,
             paint_tools: false,

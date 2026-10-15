@@ -59,6 +59,11 @@ export interface BrushSettings {
   smudge: number;
   /** Brush color mixed in while smudging. */
   mix: number;
+  /** Pen tilt widens (up to 3× when flat) and fades the dab. */
+  tiltSize: number;
+  tiltFlow: number;
+  /** The tip turns to the pen's direction. */
+  tiltAngle: boolean;
 }
 
 export interface LayerNode {

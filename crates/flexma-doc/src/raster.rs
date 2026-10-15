@@ -68,6 +68,14 @@ pub struct Brush {
     /// While smudging, how much of the brush color is mixed into the carried
     /// paint each dab (mixer brushes).
     pub mix: f32,
+
+    // ---- pen tilt (needs a stroke's `tilt`; off by default) ----
+    /// Tilting the pen widens the dab, up to 1 + 2× this when flat (shading
+    /// with the side of a pencil), and fades it by up to this much.
+    pub tilt_size: f32,
+    pub tilt_flow: f32,
+    /// The tip turns to the pen's direction instead of the stroke's.
+    pub tilt_angle: bool,
 }
 
 /// Built-in brush tips: id → file under `/brushes/`. An image never changes
@@ -106,6 +114,9 @@ impl Default for Brush {
             tint_strength: 0.0,
             smudge: 0.0,
             mix: 0.0,
+            tilt_size: 0.0,
+            tilt_flow: 0.0,
+            tilt_angle: false,
         }
     }
 }
@@ -126,6 +137,11 @@ impl Brush {
     /// Distance to the next dab.
     pub fn step(&self, pressure: f32) -> f32 {
         (self.spacing.clamp(0.02, 2.0) * self.diameter(pressure)).max(0.5)
+    }
+
+    /// Whether dabs follow the pen's tilt (strokes then record it).
+    pub fn uses_tilt(&self) -> bool {
+        self.tilt_size > 0.0 || self.tilt_flow > 0.0 || self.tilt_angle
     }
 
     /// A smudging brush (it reads the layer under each dab).
@@ -166,6 +182,9 @@ impl Brush {
             tint_strength: f(self.tint_strength, 0.0, 1.0, 0.0),
             smudge,
             mix: f(self.mix, 0.0, 1.0, 0.0),
+            tilt_size: f(self.tilt_size, 0.0, 1.0, 0.0),
+            tilt_flow: f(self.tilt_flow, 0.0, 1.0, 0.0),
+            tilt_angle: self.tilt_angle,
         }
     }
 }
@@ -180,6 +199,10 @@ pub struct Stroke {
     pub brush: Brush,
     /// Points in layer pixels: (x, y, pressure 0…1).
     pub points: Vec<[f32; 3]>,
+    /// Pen tilt at each point, for brushes that use it: (tilt 0 upright … 1
+    /// flat, azimuth in radians in the layer's frame). Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tilt: Vec<[f32; 2]>,
     /// Paint only where the layer already has pixels.
     #[serde(default)]
     pub alpha_lock: bool,
@@ -192,8 +215,11 @@ impl Stroke {
         // Round dabs stay within half the diameter; tips are drawn with the
         // longer side at the diameter and may be rotated; jitter and scatter
         // reach further.
+        let tilt = 1.0 + 2.0 * b.tilt_size;
         let reach = if b.tip.is_some() || b.size_jitter > 0.0 || b.scatter > 0.0 {
-            b.diameter(1.0) * ((1.0 + b.size_jitter) * std::f32::consts::FRAC_1_SQRT_2 + b.scatter)
+            b.diameter(1.0) * ((1.0 + b.size_jitter) * tilt * std::f32::consts::FRAC_1_SQRT_2 + b.scatter)
+        } else if b.tilt_size > 0.0 {
+            b.diameter(1.0) / 2.0 * tilt
         } else {
             b.diameter(1.0) / 2.0
         };
@@ -226,6 +252,9 @@ impl Stroke {
         }
         if self.points.iter().flatten().any(|v| !v.is_finite()) {
             return Err("stroke points must be finite numbers".into());
+        }
+        if !self.tilt.is_empty() && (self.tilt.len() != self.points.len() || self.tilt.iter().flatten().any(|v| !v.is_finite())) {
+            return Err("stroke tilt must have one finite value pair per point".into());
         }
         Ok(())
     }
@@ -303,13 +332,19 @@ fn rand01(seed: u64, i: u32, k: u32) -> f32 {
     (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
-/// Jitter, scatter and rotation for a dab placed at (x, y) with pressure `pr`,
-/// travelling in `dir` (radians; None for the first dab).
-fn make_dab(brush: &Brush, cursor: &mut DabCursor, x: f32, y: f32, pr: f32, dir: Option<f32>) -> Dab {
+/// Jitter, scatter and rotation for a dab placed at (x, y) with pressure `pr`
+/// and pen `tilt` (tilt, azimuth), travelling in `dir` (radians; None for the
+/// first dab).
+fn make_dab(brush: &Brush, cursor: &mut DabCursor, x: f32, y: f32, pr: f32, tilt: Option<[f32; 2]>, dir: Option<f32>) -> Dab {
     let i = cursor.count;
     cursor.count += 1;
     let mut dab = Dab { x, y, radius: brush.diameter(pr) / 2.0, alpha: brush.alpha(pr), angle: 0.0 };
-    let textured = brush.tip.is_some() || brush.size_jitter > 0.0 || brush.flow_jitter > 0.0 || brush.angle_jitter > 0.0 || brush.scatter > 0.0;
+    let textured = brush.tip.is_some()
+        || brush.size_jitter > 0.0
+        || brush.flow_jitter > 0.0
+        || brush.angle_jitter > 0.0
+        || brush.scatter > 0.0
+        || (brush.uses_tilt() && tilt.is_some());
     if !textured {
         // A plain round brush: exactly the dabs it always had.
         return dab;
@@ -326,20 +361,38 @@ fn make_dab(brush: &Brush, cursor: &mut DabCursor, x: f32, y: f32, pr: f32, dir:
         dab.x += a.cos() * d;
         dab.y += a.sin() * d;
     }
-    let follow = dir.map(|d| d * brush.follow).unwrap_or(0.0);
-    dab.angle = brush.angle.to_radians() + follow + brush.angle_jitter.to_radians() * (r(4) * 2.0 - 1.0);
+    let mut base = dir.map(|d| d * brush.follow).unwrap_or(0.0);
+    if let Some([t, az]) = tilt {
+        dab.radius *= 1.0 + 2.0 * brush.tilt_size * t;
+        dab.alpha *= 1.0 - brush.tilt_flow * t;
+        if brush.tilt_angle {
+            base = az;
+        }
+    }
+    let jitter = if brush.angle_jitter > 0.0 { brush.angle_jitter.to_radians() * (r(4) * 2.0 - 1.0) } else { 0.0 };
+    dab.angle = brush.angle.to_radians() + base + jitter;
     dab
 }
 
-/// Dabs for `points[cursor..]`, continuing from `cursor`.
-pub fn dabs(brush: &Brush, points: &[[f32; 3]], cursor: &mut DabCursor) -> Vec<Dab> {
+/// Pen tilt between two points, `t` of the way (the azimuth the short way round).
+fn lerp_tilt(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
+    let tau = std::f32::consts::TAU;
+    let d = (b[1] - a[1] + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+    [a[0] + (b[0] - a[0]) * t, a[1] + d * t]
+}
+
+/// Dabs for `points[cursor..]` (with their `tilt`, when the brush uses it),
+/// continuing from `cursor`.
+pub fn dabs(brush: &Brush, points: &[[f32; 3]], tilt: &[[f32; 2]], cursor: &mut DabCursor) -> Vec<Dab> {
     let mut out = Vec::new();
     if points.is_empty() {
         return out;
     }
+    let tilted = brush.uses_tilt() && tilt.len() >= points.len();
+    let tilt_at = |i: usize| if tilted { Some(tilt[i]) } else { None };
     if cursor.next == 0 {
         let p = points[0];
-        out.push(make_dab(brush, cursor, p[0], p[1], p[2], None));
+        out.push(make_dab(brush, cursor, p[0], p[1], p[2], tilt_at(0), None));
         cursor.to_next = brush.step(p[2]);
         cursor.next = 1;
     }
@@ -354,7 +407,8 @@ pub fn dabs(brush: &Brush, points: &[[f32; 3]], cursor: &mut DabCursor) -> Vec<D
             d += cursor.to_next;
             let t = d / len;
             let pr = a[2] + (b[2] - a[2]) * t;
-            out.push(make_dab(brush, cursor, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, pr, Some(dir)));
+            let tl = tilt_at(cursor.next).map(|tb| lerp_tilt(tilt[cursor.next - 1], tb, t));
+            out.push(make_dab(brush, cursor, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, pr, tl, Some(dir)));
             cursor.to_next = brush.step(pr);
         }
         cursor.to_next -= len - d;
@@ -365,7 +419,7 @@ pub fn dabs(brush: &Brush, points: &[[f32; 3]], cursor: &mut DabCursor) -> Vec<D
 
 /// Every dab of a finished stroke.
 pub fn all_dabs(stroke: &Stroke) -> Vec<Dab> {
-    dabs(&stroke.brush, &stroke.points, &mut DabCursor::new(&stroke.id))
+    dabs(&stroke.brush, &stroke.points, &stroke.tilt, &mut DabCursor::new(&stroke.id))
 }
 
 #[cfg(test)]
@@ -373,7 +427,7 @@ mod tests {
     use super::*;
 
     fn stroke(points: Vec<[f32; 3]>) -> Stroke {
-        Stroke { id: "s".into(), layer: "l".into(), brush: Brush { size: 10.0, spacing: 0.5, ..Brush::default() }, points, alpha_lock: false }
+        Stroke { id: "s".into(), layer: "l".into(), brush: Brush { size: 10.0, spacing: 0.5, ..Brush::default() }, points, tilt: Vec::new(), alpha_lock: false }
     }
 
     #[test]
@@ -394,7 +448,7 @@ mod tests {
         let mut cur = DabCursor::default();
         let mut live = Vec::new();
         for n in [1, 2, 5, 6, 17, 40] {
-            live.extend(dabs(&s.brush, &pts[..n], &mut cur));
+            live.extend(dabs(&s.brush, &pts[..n], &[], &mut cur));
         }
         assert_eq!(live.len(), whole.len());
         for (a, b) in live.iter().zip(&whole) {
@@ -429,6 +483,7 @@ mod tests {
             layer: "l".into(),
             brush: Brush { size: 14.0, spacing: 0.15, pressure_size: true, pressure_flow: true, flow: 0.7, ..Brush::default() },
             points: vec![[3.0, 4.0, 0.2], [40.5, 9.25, 0.9], [41.0, 60.0, 0.5], [90.0, 61.0, 1.0]],
+            tilt: Vec::new(),
             alpha_lock: false,
         };
         let d = all_dabs(&s);
@@ -450,19 +505,45 @@ mod tests {
     fn jitter_is_the_same_everywhere_and_incremental() {
         let brush = Brush { tip: Some("chalk-1".into()), size: 30.0, size_jitter: 0.4, angle_jitter: 90.0, flow_jitter: 0.5, scatter: 0.3, follow: 1.0, ..Brush::default() };
         let pts: Vec<[f32; 3]> = (0..30).map(|i| [i as f32 * 5.0, (i as f32 * 0.3).sin() * 30.0, 1.0]).collect();
-        let s = Stroke { id: "j1".into(), layer: "l".into(), brush: brush.clone(), points: pts.clone(), alpha_lock: false };
+        let s = Stroke { id: "j1".into(), layer: "l".into(), brush: brush.clone(), points: pts.clone(), tilt: Vec::new(), alpha_lock: false };
         let a = all_dabs(&s);
         assert_eq!(a, all_dabs(&s.clone()));
         let mut cur = DabCursor::new("j1");
         let mut live = Vec::new();
         for n in [1, 3, 4, 17, 30] {
-            live.extend(dabs(&brush, &pts[..n], &mut cur));
+            live.extend(dabs(&brush, &pts[..n], &[], &mut cur));
         }
         assert_eq!(live, a);
         // Another stroke gets other jitter; the radii really vary.
         let b = all_dabs(&Stroke { id: "j2".into(), ..s });
         assert_ne!(a[3].radius, b[3].radius);
         assert!(a.iter().any(|d| d.radius > 15.5) && a.iter().any(|d| d.radius < 14.5));
+    }
+
+    #[test]
+    fn tilt_widens_and_turns_dabs() {
+        let brush = Brush { size: 10.0, spacing: 0.5, pressure_size: false, tilt_size: 0.5, tilt_angle: true, ..Brush::default() };
+        let pts: Vec<[f32; 3]> = vec![[0.0, 0.0, 1.0], [40.0, 0.0, 1.0]];
+        let upright = Stroke { id: "t".into(), layer: "l".into(), brush: brush.clone(), points: pts.clone(), tilt: vec![[0.0, 1.0], [0.0, 1.0]], alpha_lock: false };
+        let flat = Stroke { tilt: vec![[1.0, 1.0], [1.0, 2.0]], ..upright.clone() };
+        let (u, f) = (all_dabs(&upright), all_dabs(&flat));
+        assert!((u[0].radius - 5.0).abs() < 1e-5 && (f[0].radius - 10.0).abs() < 1e-5, "flat doubles the radius at tilt_size 0.5");
+        assert!((u[0].angle - 1.0).abs() < 1e-5, "the tip faces the pen");
+        assert!(f.last().unwrap().angle > 1.9, "the azimuth is interpolated along the path");
+        // Without tilt data (a mouse) the same brush paints plain dabs.
+        let mouse = Stroke { tilt: Vec::new(), ..upright.clone() };
+        assert!(all_dabs(&mouse).iter().all(|d| (d.radius - 5.0).abs() < 1e-5 && d.angle == 0.0));
+        // Incremental placement gives the same dabs.
+        let mut cur = DabCursor::new("t");
+        let mut live = dabs(&brush, &flat.points[..1], &flat.tilt[..1], &mut cur);
+        live.extend(dabs(&brush, &flat.points, &flat.tilt, &mut cur));
+        assert_eq!(live, f);
+        // Bad tilt is rejected; old strokes without it still read.
+        assert!(Stroke { tilt: vec![[0.0, 0.0]], ..upright.clone() }.validate().is_err());
+        let old: Stroke = serde_json::from_str(r#"{"id":"o","layer":"l","brush":{},"points":[[1,2,0.5]]}"#).unwrap();
+        assert!(old.tilt.is_empty() && old.validate().is_ok());
+        let mid = lerp_tilt([0.0, 6.2], [0.0, 0.1], 0.5)[1];
+        assert!(mid > 6.2 || mid < 0.2, "the short way round: {mid}");
     }
 
     #[test]

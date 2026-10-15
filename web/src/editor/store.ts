@@ -12,6 +12,8 @@ type Listener = () => void;
 const SEND_INTERVAL_MS = 33; // ~30 batches per second (Figma's cadence)
 /** Brush and eraser settings are remembered per browser. */
 const BRUSH_KEY = (eraser: boolean) => (eraser ? 'flexma:eraser' : 'flexma:brush');
+/** The pen's pressure curve, per browser (it's about the user's hand and tablet). */
+const CURVE_KEY = 'flexma:pressureCurve';
 const PRESENCE_INTERVAL_MS = 50;
 
 interface UiState {
@@ -40,6 +42,8 @@ export class EditorStore {
   readonly userId: string | null;
   /** A painting file: the brush and eraser are shown. */
   paintTools: boolean;
+  /** Pen pressure curve, −1 (light touch) … 1 (firm). */
+  pressureCurve = 0;
   readonly fonts: FontManager;
   private listeners = new Set<Listener>();
   private socket: WebSocket | null = null;
@@ -103,6 +107,12 @@ export class EditorStore {
     this.userId = opts.userId ?? null;
     this.paintTools = opts.paintTools ?? false;
     engine.set_paint_tools(this.paintTools);
+    try {
+      const c = Number(localStorage.getItem(CURVE_KEY));
+      if (Number.isFinite(c)) this.pressureCurve = Math.max(-1, Math.min(1, c));
+    } catch {
+      // Storage may be unavailable; the default curve is fine.
+    }
     for (const eraser of [false, true]) {
       try {
         const saved = localStorage.getItem(BRUSH_KEY(eraser));
@@ -413,6 +423,16 @@ export class EditorStore {
     if (!on && (tool === 'brush' || tool === 'eraser')) this.engine.set_tool('select');
     this.v.ui = -1;
     this.poll();
+    this.notify();
+  }
+
+  setPressureCurve(curve: number) {
+    this.pressureCurve = Math.max(-1, Math.min(1, curve));
+    try {
+      localStorage.setItem(CURVE_KEY, String(this.pressureCurve));
+    } catch {
+      // Not remembered; nothing else depends on it.
+    }
     this.notify();
   }
 

@@ -84,6 +84,13 @@ impl Editor {
         Some([p.x as f32, p.y as f32])
     }
 
+    /// The pen's tilt in a layer's frame (its direction turned by the
+    /// layer's rotation).
+    fn layer_tilt(&self, layer: &str) -> [f32; 2] {
+        let m = self.doc.world_transform(layer);
+        [self.tilt[0], self.tilt[1] - (m.b.atan2(m.a)) as f32]
+    }
+
     pub fn paint_down(&mut self, world: Vec2) {
         if !self.can_edit {
             return;
@@ -102,7 +109,10 @@ impl Editor {
         let alpha_lock = self.doc.get(&layer).is_some_and(|n| n.alpha_lock);
         let first = [p[0], p[1], self.pressure];
         self.smooth = Some(first);
-        let stroke = Stroke { id: self.paint.next_stroke_id(), layer: layer.clone(), brush: self.active_brush().sanitized(), points: vec![first], alpha_lock };
+        let brush = self.active_brush().sanitized();
+        // Tilt is recorded only for brushes that use it.
+        let tilt = if brush.uses_tilt() { vec![self.layer_tilt(&layer)] } else { Vec::new() };
+        let stroke = Stroke { id: self.paint.next_stroke_id(), layer: layer.clone(), brush, points: vec![first], tilt, alpha_lock };
         self.paint.begin(stroke, self.now_ms);
         self.gesture = Gesture::Paint { layer };
         self.dirty = true;
@@ -121,7 +131,8 @@ impl Editor {
             return;
         }
         self.smooth = Some(sm);
-        self.paint.add_point(sm);
+        let tilt = self.layer_tilt(layer);
+        self.paint.add_point(sm, tilt);
         self.dirty = true;
     }
 
@@ -129,7 +140,8 @@ impl Editor {
         // Finish at the pointer, so the stabilizer's lag doesn't cut the end off.
         if let Some(p) = self.layer_point(layer, world) {
             if self.smooth.is_some_and(|s| (s[0] - p[0]).abs() > 0.2 || (s[1] - p[1]).abs() > 0.2) {
-                self.paint.add_point([p[0], p[1], self.pressure]);
+                let tilt = self.layer_tilt(layer);
+                self.paint.add_point([p[0], p[1], self.pressure], tilt);
             }
         }
         self.smooth = None;

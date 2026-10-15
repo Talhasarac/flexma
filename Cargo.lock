@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "flexma-doc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "flexma-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "flexma-doc",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "flexma-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "axum",

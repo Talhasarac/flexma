@@ -2,6 +2,7 @@
 // syncs over the socket, and hosts DOM overlays (peer cursors, text editing).
 import { useEffect, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import type { EditorStore } from './store';
+import { applyCurve, penTilt } from './pen';
 import type { Peer } from './types';
 import { TextEditOverlay } from './TextEditOverlay';
 import { CommentsLayer } from './CommentsLayer';
@@ -151,15 +152,43 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
     };
 
     // ---- pointer ----
-    // Pen pressure drives the brush; mice and fingers paint at full pressure.
-    const pressure = (e: PointerEvent) => (e.pointerType === 'pen' ? e.pressure : 1);
+    // Pens drive the brush with pressure (through the user's curve) and tilt;
+    // mice and fingers paint at full pressure, upright.
+    const setPen = (e: PointerEvent) => {
+      if (e.pointerType !== 'pen') {
+        engine.set_pressure(1);
+        return;
+      }
+      const [tilt, azimuth] = penTilt(e);
+      engine.set_pen(applyCurve(e.pressure, store.pressureCurve), tilt, azimuth);
+    };
+    // The eraser end of a stylus: touching down with it switches the brush to
+    // the eraser, and the tip switches back (like turning a pencil around).
+    let flippedToEraser = false;
     const onPointerDown = (e: PointerEvent) => {
       if (e.button === 2) return;
       if (touchDown(e)) return;
-      canvas.setPointerCapture(e.pointerId);
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // A pointer the browser no longer tracks (some tablet drivers): paint without capture.
+      }
       const [x, y] = local(e);
-      engine.set_pressure(pressure(e));
-      engine.pointer_down(x, y, e.button, e.shiftKey, e.altKey, meta(e));
+      const eraserEnd = e.pointerType === 'pen' && (e.button === 5 || (e.buttons & 32) !== 0);
+      if (e.pointerType === 'pen' && store.paintTools && engine.can_edit()) {
+        const tool = engine.tool();
+        if (eraserEnd && tool === 'brush') {
+          engine.set_tool('eraser');
+          flippedToEraser = true;
+        } else if (!eraserEnd && flippedToEraser && tool === 'eraser') {
+          engine.set_tool('brush');
+          flippedToEraser = false;
+        } else if (tool !== 'eraser') {
+          flippedToEraser = false;
+        }
+      }
+      setPen(e);
+      engine.pointer_down(x, y, eraserEnd ? 0 : e.button, e.shiftKey, e.altKey, meta(e));
       updateCursor();
       store.poll();
       if (e.button === 1) e.preventDefault();
@@ -172,11 +201,11 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
         const samples = e.getCoalescedEvents?.() ?? [];
         for (const c of samples.length ? samples : [e]) {
           const [cx, cy] = local(c);
-          engine.set_pressure(pressure(c));
+          setPen(c);
           engine.pointer_move(cx, cy, e.shiftKey, e.altKey, meta(e));
         }
       } else {
-        engine.set_pressure(pressure(e));
+        setPen(e);
         engine.pointer_move(x, y, e.shiftKey, e.altKey, meta(e));
       }
       const w = engine.screen_to_world(x, y);

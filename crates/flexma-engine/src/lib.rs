@@ -651,6 +651,16 @@ impl FlexmaEditor {
     /// Pen pressure (0…1) of the next pointer events; 1 for mice.
     pub fn set_pressure(&mut self, p: f64) {
         self.ed.pressure = if p.is_finite() { p.clamp(0.0, 1.0) as f32 } else { 1.0 };
+        self.ed.tilt = [0.0, 0.0];
+    }
+
+    /// Pen state of the next pointer events: pressure (0…1), tilt (0 upright
+    /// … 1 flat) and the direction it leans on screen (radians, 0 = right,
+    /// clockwise).
+    pub fn set_pen(&mut self, pressure: f64, tilt: f64, azimuth: f64) {
+        self.set_pressure(pressure);
+        let ok = |v: f64| if v.is_finite() { v } else { 0.0 };
+        self.ed.tilt = [ok(tilt).clamp(0.0, 1.0) as f32, ok(azimuth).rem_euclid(std::f64::consts::TAU) as f32];
     }
 
     /// The brush (or the eraser) settings as JSON.

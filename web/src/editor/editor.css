@@ -624,6 +624,45 @@
   flex: 1;
   min-width: 0;
 }
+.brush-tilt {
+  margin-top: 6px;
+}
+.pen-curve {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.pen-curve svg {
+  flex: none;
+  width: 52px;
+  height: 52px;
+}
+.pen-curve rect {
+  fill: var(--bg-muted);
+  stroke: var(--border);
+  stroke-width: 2;
+}
+.pen-curve polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 4;
+  stroke-linejoin: round;
+}
+.pen-curve-control {
+  flex: 1;
+  min-width: 0;
+}
+.pen-curve-control input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.pen-curve-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 10px;
+}
 .paint-layer-name {
   margin-bottom: 6px;
   font-weight: 500;
