@@ -24,6 +24,7 @@ pub fn parse_type(s: &str) -> Option<NodeType> {
         "page" => NodeType::Page,
         "component" | "main component" | "symbol" => NodeType::Component,
         "instance" => NodeType::Instance,
+        "paint" | "paint layer" | "raster" | "drawing" => NodeType::Paint,
         _ => return None,
     })
 }

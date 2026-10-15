@@ -201,6 +201,40 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE assets ADD COLUMN sha256 TEXT;
     CREATE INDEX assets_sha256 ON assets(workspace_id, sha256);
     "#,
+    // 9: paint layers: the brush-stroke log (in server order) and the tile
+    // snapshots (PNGs on disk under data/paint) that strokes replay onto.
+    r#"
+    CREATE TABLE paint_strokes (
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        id TEXT NOT NULL,
+        layer_id TEXT NOT NULL,
+        user_id TEXT,
+        data TEXT NOT NULL,
+        x0 REAL NOT NULL,
+        y0 REAL NOT NULL,
+        x1 REAL NOT NULL,
+        y1 REAL NOT NULL,
+        undone INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (file_id, seq)
+    );
+    CREATE UNIQUE INDEX paint_strokes_id ON paint_strokes(file_id, id);
+    CREATE TABLE paint_tiles (
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        layer_id TEXT NOT NULL,
+        tx INTEGER NOT NULL,
+        ty INTEGER NOT NULL,
+        base_seq INTEGER,
+        view_seq INTEGER,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (file_id, layer_id, tx, ty)
+    );
+    "#,
+    // 10: painting tools are opt-in per workspace (UI work doesn't need them).
+    r#"
+    ALTER TABLE workspaces ADD COLUMN paint_tools INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 impl Db {

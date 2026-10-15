@@ -23,7 +23,7 @@ fn clean_name(s: &str, what: &str) -> AppResult<String> {
 
 fn workspace_json(c: &rusqlite::Connection, user_id: &str, ws: &str) -> AppResult<Value> {
     let row = c.query_row(
-        "SELECT w.id, w.name, w.created_at, m.role, (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = w.id)
+        "SELECT w.id, w.name, w.created_at, m.role, (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = w.id), w.paint_tools
          FROM workspaces w JOIN workspace_members m ON m.workspace_id = w.id AND m.user_id = ?1 WHERE w.id = ?2",
         params![user_id, ws],
         |r| {
@@ -33,6 +33,7 @@ fn workspace_json(c: &rusqlite::Connection, user_id: &str, ws: &str) -> AppResul
                 "createdAt": ts(r.get(2)?),
                 "role": r.get::<_, String>(3)?,
                 "memberCount": r.get::<_, i64>(4)?,
+                "paintTools": r.get::<_, i64>(5)? != 0,
             }))
         },
     )
@@ -46,7 +47,7 @@ pub async fn list(State(st): State<AppState>, user: AuthUser) -> AppResult<Json<
         .db
         .call(move |c| {
             let mut stmt = c.prepare(
-                "SELECT w.id, w.name, w.created_at, m.role, (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = w.id)
+                "SELECT w.id, w.name, w.created_at, m.role, (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = w.id), w.paint_tools
                  FROM workspaces w JOIN workspace_members m ON m.workspace_id = w.id
                  WHERE m.user_id = ?1 ORDER BY w.created_at",
             )?;
@@ -58,6 +59,7 @@ pub async fn list(State(st): State<AppState>, user: AuthUser) -> AppResult<Json<
                         "createdAt": ts(r.get(2)?),
                         "role": r.get::<_, String>(3)?,
                         "memberCount": r.get::<_, i64>(4)?,
+                        "paintTools": r.get::<_, i64>(5)? != 0,
                     }))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -104,18 +106,31 @@ pub async fn get(State(st): State<AppState>, user: AuthUser, Path(id): Path<Stri
     Ok(Json(v))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateReq {
+    name: Option<String>,
+    /// Show the brush and eraser (painting) in this workspace's files.
+    paint_tools: Option<bool>,
+}
+
 pub async fn update(
     State(st): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
-    Json(req): Json<NameReq>,
+    Json(req): Json<UpdateReq>,
 ) -> AppResult<Json<Value>> {
-    let name = clean_name(&req.name, "workspace")?;
+    let name = req.name.as_deref().map(|n| clean_name(n, "workspace")).transpose()?;
     let v = st
         .db
         .call(move |c| {
             require_workspace(c, &user.id, &id, Role::Owner)?;
-            c.execute("UPDATE workspaces SET name = ?1 WHERE id = ?2", params![name, id])?;
+            if let Some(name) = name {
+                c.execute("UPDATE workspaces SET name = ?1 WHERE id = ?2", params![name, id])?;
+            }
+            if let Some(on) = req.paint_tools {
+                c.execute("UPDATE workspaces SET paint_tools = ?1 WHERE id = ?2", params![on as i64, id])?;
+            }
             workspace_json(c, &user.id, &id)
         })
         .await?;
@@ -138,6 +153,7 @@ pub async fn delete(State(st): State<AppState>, user: AuthUser, Path(id): Path<S
         .await?;
     for f in files {
         rooms.close(&f, Some("This file was deleted.".into()));
+        crate::paint::delete_file_tiles(&st.cfg.data_dir, &f);
     }
     Ok(Json(json!({})))
 }
@@ -465,6 +481,7 @@ pub async fn delete_project(State(st): State<AppState>, user: AuthUser, Path(id)
         .await?;
     for f in files {
         rooms.close(&f, Some("This file was deleted.".into()));
+        crate::paint::delete_file_tiles(&st.cfg.data_dir, &f);
     }
     Ok(Json(json!({})))
 }

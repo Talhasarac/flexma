@@ -74,12 +74,29 @@ pub struct Editor {
     pub pen_preview: Option<Vec2>,
     /// Timestamp of the last rendered frame (rate limit).
     pub last_frame_ms: f64,
+    /// Paint layers: tiles, strokes and sync (see `paint.rs`).
+    pub paint: crate::paint::PaintState,
+    /// Brush and eraser settings.
+    pub brush: flexma_doc::raster::Brush,
+    pub eraser: flexma_doc::raster::Brush,
+    /// Pen pressure of the latest pointer event (1 for mice).
+    pub pressure: f32,
+    /// The stabilizer's smoothed position (layer px) while painting.
+    pub smooth: Option<[f32; 3]>,
+    /// The pointer is over the canvas (for the brush outline).
+    pub pointer_in: bool,
+    /// The workspace has painting turned on (B and E pick the brush and eraser).
+    pub paint_tools: bool,
 }
 
 impl Editor {
     pub fn new(renderer: Option<Renderer>, text: Option<TextEngine>) -> Editor {
         let doc = Document::new_empty();
         let page = doc.pages()[0].clone();
+        let mut paint = crate::paint::PaintState::new();
+        if let Some(r) = &renderer {
+            paint.wake = r.wake.clone();
+        }
         Editor {
             doc,
             scene: Scene { page, dirty: true, ..Default::default() },
@@ -118,6 +135,13 @@ impl Editor {
             loaded: false,
             pen_preview: None,
             last_frame_ms: f64::NEG_INFINITY,
+            paint,
+            brush: flexma_doc::raster::Brush::default(),
+            eraser: flexma_doc::raster::Brush { size: 30.0, hardness: 0.6, erase: true, ..Default::default() },
+            pressure: 1.0,
+            smooth: None,
+            pointer_in: false,
+            paint_tools: false,
         }
     }
 
@@ -138,6 +162,9 @@ impl Editor {
         layout::relayout_all(&mut doc);
         self.doc = doc;
         self.sync.reset(client_id);
+        // The paint state is fetched again after (re)connecting.
+        self.paint.client_id = client_id.to_string();
+        self.paint.reset();
         self.can_edit = can_edit;
         if self.doc.get(&self.scene.page).map(|n| n.kind) != Some(NodeType::Page) {
             self.scene.page = self.doc.pages()[0].clone();
@@ -354,6 +381,15 @@ impl Editor {
             return;
         }
         let Some(txn) = self.history.pop_undo() else { return };
+        if let Some(id) = &txn.stroke {
+            // A stroke merged into a snapshot can't be undone any more; skip it.
+            if self.paint.undo(id, self.now_ms) {
+                self.history.push_redo(txn.clone());
+            }
+            self.dirty = true;
+            self.ui_version += 1;
+            return;
+        }
         let redo = self.apply_inverse(&txn.inverse);
         let mut r = txn.clone();
         r.inverse = redo;
@@ -368,6 +404,14 @@ impl Editor {
             return;
         }
         let Some(txn) = self.history.pop_redo() else { return };
+        if let Some(id) = &txn.stroke {
+            if self.paint.redo(id, self.now_ms) {
+                self.history.push_undo_keep_redo(txn.clone());
+            }
+            self.dirty = true;
+            self.ui_version += 1;
+            return;
+        }
         let undo = self.apply_inverse(&txn.inverse);
         let mut u = txn.clone();
         u.inverse = undo;
@@ -683,9 +727,11 @@ impl Editor {
         self.process_measurements();
         let wake = self.renderer.as_ref().map(|r| r.wake.replace(false)).unwrap_or(false);
         let settled_text = !self.interacting() && self.now_ms - self.last_camera_change < 400.0;
-        if !self.dirty && !wake && !settled_text {
+        let paint = std::mem::take(&mut self.paint.dirty) || self.paint.busy() || self.paint.due.replace(false);
+        if !self.dirty && !wake && !settled_text && !paint {
             return false;
         }
+        self.paint.sync_layers(&self.doc, self.doc_version);
         self.ensure_scene();
         let (overlay, labels) = self.build_overlay();
         let mut hidden = HashSet::new();
@@ -703,7 +749,7 @@ impl Editor {
             r.build(&self.doc, &self.scene, &hidden, version);
         }
         let linear = self.doc.get(&self.scene.page).is_some_and(|p| p.linear_blending);
-        r.draw(&self.doc, &self.scene, text, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting);
+        r.draw(&self.doc, &self.scene, text, &mut self.paint, self.now_ms, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting);
         self.last_frame_ms = self.now_ms;
         self.dirty = r.wants_more;
         true

@@ -42,6 +42,8 @@ enum Cmd {
     Image { inst: u32, asset: String },
     Mesh { id: NodeId, fill: Option<[f32; 4]>, stroke: Option<[f32; 4]> },
     Text { id: NodeId, opacity: f32 },
+    /// A paint layer's tiles.
+    Paint { id: NodeId, opacity: f32 },
     /// Stencil clip drawn from one or more instances, each with its image (alpha masks).
     PushClip { parts: Vec<(u32, Option<String>)> },
     PopClip { parts: Vec<(u32, Option<String>)> },
@@ -516,6 +518,7 @@ impl Renderer {
                             cmds.push(Cmd::Text { id: n.id.clone(), opacity });
                         }
                     }
+                    NodeType::Paint => cmds.push(Cmd::Paint { id: n.id.clone(), opacity }),
                     NodeType::Vector | NodeType::Polygon | NodeType::Star | NodeType::Line => {
                         let fill = n
                             .fills
@@ -970,6 +973,8 @@ impl Renderer {
         doc: &Document,
         scene: &Scene,
         text: &mut TextEngine,
+        paint: &mut crate::paint::PaintState,
+        now: f64,
         cam: &Camera,
         css_w: f64,
         css_h: f64,
@@ -983,6 +988,8 @@ impl Renderer {
         self.frame_no += 1;
         self.wants_more = false;
         self.upload_loaded_images();
+        // Paint tiles change outside the frame (dabs, rebuilds, snapshots).
+        paint.apply_gpu(&mut *self.gpu, now);
         let pw = (css_w * dpr).round().max(0.0) as u32;
         let ph = (css_h * dpr).round().max(0.0) as u32;
         let px = (cam.zoom * dpr) as f32;
@@ -1054,6 +1061,34 @@ impl Renderer {
                         }
                     }
                 }
+                Cmd::Paint { id, opacity } => {
+                    let Some(n) = doc.get(id) else { continue };
+                    let world = scene.world_of(id);
+                    if !world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height)).intersects(&visible) {
+                        continue;
+                    }
+                    // Layers inside instances show their main component's pixels.
+                    let source = id.rsplit('~').next().unwrap_or(id);
+                    let t = flexma_doc::raster::TILE as f64;
+                    let tiles = paint.tiles(source);
+                    if tiles.is_empty() {
+                        continue;
+                    }
+                    flush_shapes!();
+                    let m = rows(&world);
+                    for (tx, ty, tex) in tiles {
+                        let (x, y) = (tx as f64 * t, ty as f64 * t);
+                        let (w, h) = ((n.width - x).min(t), (n.height - y).min(t));
+                        if w <= 0.0 || h <= 0.0 {
+                            continue;
+                        }
+                        let tile_box = world.map_rect(&flexma_doc::Rect::new(x, y, w, h));
+                        if !tile_box.intersects(&visible) {
+                            continue;
+                        }
+                        self.gpu.draw_texture(tex, m, [x as f32, y as f32, w as f32, h as f32], [0.0, 0.0, (w / t) as f32, (h / t) as f32], *opacity);
+                    }
+                }
                 Cmd::Text { id, opacity } => {
                     let Some(n) = doc.get(id) else { continue };
                     let world = scene.world_of(id);
@@ -1070,7 +1105,7 @@ impl Renderer {
                     let n = n.clone();
                     let Some((tex, rect)) = self.text_texture(&n, text, bucket, !interacting, &mut budget) else { continue };
                     flush_shapes!();
-                    self.gpu.draw_texture(tex, rows(&world), [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32], *opacity);
+                    self.gpu.draw_texture(tex, rows(&world), [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32], [0.0, 0.0, 1.0, 1.0], *opacity);
                 }
             }
         }
@@ -1109,7 +1144,7 @@ impl Renderer {
         }
         self.gpu.end_frame();
         self.draw_calls = self.gpu.draw_calls();
-        if self.wake.get() {
+        if self.wake.get() || paint.busy() {
             self.wants_more = true;
         }
     }

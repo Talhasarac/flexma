@@ -13,6 +13,8 @@ struct U {
   v: vec4f,
   // x: device px per unit, y: linear output, z: alpha.
   p: vec4f,
+  // Textured quads: the texture region shown (x0, y0, x1, y1).
+  uv: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -435,7 +437,7 @@ fn vs_tex(@builtin(vertex_index) vi: u32) -> TexOut {
   let world = vec2f(dot(u.m0.xyz, vec3f(local, 1.0)), dot(u.m1.xyz, vec3f(local, 1.0)));
   var o: TexOut;
   o.pos = clip_of(world);
-  o.uv = corner;
+  o.uv = mix(u.uv.xy, u.uv.zw, corner);
   return o;
 }
 

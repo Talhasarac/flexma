@@ -20,9 +20,15 @@ pub enum Tool {
     Pen,
     Polygon,
     Star,
+    Brush,
+    Eraser,
 }
 
 impl Tool {
+    pub fn paints(self) -> bool {
+        matches!(self, Tool::Brush | Tool::Eraser)
+    }
+
     pub fn parse(s: &str) -> Option<Tool> {
         Some(match s {
             "select" => Tool::Select,
@@ -35,6 +41,8 @@ impl Tool {
             "pen" => Tool::Pen,
             "polygon" => Tool::Polygon,
             "star" => Tool::Star,
+            "brush" => Tool::Brush,
+            "eraser" => Tool::Eraser,
             _ => return None,
         })
     }
@@ -51,6 +59,8 @@ impl Tool {
             Tool::Pen => "pen",
             Tool::Polygon => "polygon",
             Tool::Star => "star",
+            Tool::Brush => "brush",
+            Tool::Eraser => "eraser",
         }
     }
 
@@ -121,6 +131,8 @@ pub enum Gesture {
     Draw { kind: NodeType, start: Vec2, parent: NodeId, id: Option<NodeId> },
     Pan { last: Vec2 },
     Pen { id: Option<NodeId>, parent: NodeId, points: Vec<PenPoint>, dragging: bool, closed: bool },
+    /// A brush or eraser stroke on a paint layer.
+    Paint { layer: NodeId },
 }
 
 const DRAG_THRESHOLD: f64 = 3.0;
@@ -136,6 +148,10 @@ impl Editor {
     }
 
     pub fn set_tool(&mut self, t: Tool) {
+        if self.paint.painting() && !t.paints() {
+            self.paint.cancel();
+            self.gesture = Gesture::None;
+        }
         if let Gesture::Pen { .. } = self.gesture {
             self.finish_pen();
         }
@@ -310,6 +326,8 @@ impl Editor {
             Tool::Select => {}
             Tool::Text => return "text".into(),
             Tool::Hand => return "grab".into(),
+            // The brush draws its own outline.
+            Tool::Brush | Tool::Eraser if self.can_edit => return "none".into(),
             _ => return "crosshair".into(),
         }
         let h = match &self.gesture {
@@ -367,6 +385,7 @@ impl Editor {
         match self.tool {
             Tool::Select => self.select_down(screen, world, mods),
             Tool::Pen => self.pen_down(world),
+            Tool::Brush | Tool::Eraser => self.paint_down(world),
             t => {
                 if let Some(kind) = t.node_type() {
                     let exclude = HashSet::new();
@@ -468,7 +487,15 @@ impl Editor {
         let prev = self.pointer;
         self.pointer = screen;
         let world = self.world_at(screen);
+        self.pointer_in = true;
+        if self.tool.paints() {
+            // The brush outline follows the pointer.
+            self.dirty = true;
+        }
         match self.gesture.clone() {
+            Gesture::Paint { layer } => {
+                self.paint_move(&layer, world);
+            }
             Gesture::None => {
                 if self.tool == Tool::Select && !self.interacting() {
                     self.ensure_scene();
@@ -542,6 +569,7 @@ impl Editor {
         let world = self.world_at(screen);
         let g = std::mem::replace(&mut self.gesture, Gesture::None);
         match g {
+            Gesture::Paint { layer } => self.paint_up(&layer, world),
             Gesture::Pending { target: Some(_), reselect: Some(t), .. } if !mods.shift => {
                 self.set_selection(vec![t]);
             }

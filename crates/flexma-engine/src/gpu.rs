@@ -10,7 +10,7 @@
 //! JavaScript creates the device and configures the canvas (both are async),
 //! then hands them over; see `FlexmaEditor::with_webgpu`.
 
-use crate::backend::{Backend, FrameParams, ImageSource, MeshId, Rows, TexId};
+use crate::backend::{Backend, FrameParams, ImageSource, MeshId, PaintMode, Rows, TexId, DAB_FLOATS};
 use crate::gl::INST_FLOATS;
 use js_sys::{Array, Object, Reflect};
 use std::cell::Cell;
@@ -66,6 +66,12 @@ extern "C" {
     pub type GpuBuffer;
     #[wasm_bindgen(method)]
     fn destroy(this: &GpuBuffer);
+    #[wasm_bindgen(method, js_name = mapAsync)]
+    fn map_async(this: &GpuBuffer, mode: u32) -> js_sys::Promise;
+    #[wasm_bindgen(method, js_name = getMappedRange)]
+    fn get_mapped_range(this: &GpuBuffer) -> js_sys::ArrayBuffer;
+    #[wasm_bindgen(method)]
+    fn unmap(this: &GpuBuffer);
 
     #[derive(Clone)]
     pub type GpuTexture;
@@ -84,6 +90,10 @@ extern "C" {
     fn get_current_texture(this: &GpuCanvasContext) -> GpuTexture;
 
     pub type GpuCommandEncoder;
+    #[wasm_bindgen(method, js_name = copyTextureToTexture)]
+    fn copy_texture_to_texture(this: &GpuCommandEncoder, src: &Object, dst: &Object, size: &Array);
+    #[wasm_bindgen(method, js_name = copyTextureToBuffer)]
+    fn copy_texture_to_buffer(this: &GpuCommandEncoder, src: &Object, dst: &Object, size: &Array);
     #[wasm_bindgen(method, js_name = beginRenderPass)]
     fn begin_render_pass(this: &GpuCommandEncoder, d: &Object) -> GpuRenderPass;
     #[wasm_bindgen(method)]
@@ -124,10 +134,12 @@ fn arr(items: Vec<JsValue>) -> Array {
 }
 
 // GPUBufferUsage, GPUTextureUsage, GPUShaderStage and GPUColorWrite flags.
+const BUF_MAP_READ: u32 = 0x1;
 const BUF_COPY_DST: u32 = 0x8;
 const BUF_INDEX: u32 = 0x10;
 const BUF_VERTEX: u32 = 0x20;
 const BUF_UNIFORM: u32 = 0x40;
+const TEX_COPY_SRC: u32 = 0x1;
 const TEX_COPY_DST: u32 = 0x2;
 const TEX_BINDING: u32 = 0x4;
 const TEX_RENDER: u32 = 0x10;
@@ -138,7 +150,7 @@ const WRITE_ALL: u32 = 0xF;
 /// Floats per uniform slot (256 bytes, the dynamic-offset alignment).
 const SLOT_FLOATS: usize = 64;
 /// Bytes of the uniform struct the shaders read.
-const UNIFORM_SIZE: u32 = 112;
+const UNIFORM_SIZE: u32 = 128;
 const SAMPLES: u32 = 4;
 const DEPTH_FORMAT: &str = "depth24plus-stencil8";
 /// The linear-blending scene target: blending into it happens in linear light.
@@ -147,6 +159,7 @@ const TEX_FORMAT: &str = "rgba8unorm";
 
 const SHADERS: &str = include_str!("shaders/flexma.wgsl");
 const POST_SHADERS: &str = include_str!("shaders/post.wgsl");
+const DAB_SHADERS: &str = include_str!("shaders/dab.wgsl");
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Stencil {
@@ -169,6 +182,8 @@ enum Pipe {
     Composite,
     /// Mipmap generation.
     Blit,
+    /// Brush dabs into a paint tile.
+    Dab(PaintMode),
 }
 
 #[derive(Clone, Copy)]
@@ -217,6 +232,9 @@ pub struct GpuBackend {
     format: String,
     module: JsValue,
     post_module: JsValue,
+    dab_module: JsValue,
+    dab_layout: JsValue,
+    dab_inst: Option<Grow>,
     uniform_bgl: JsValue,
     tex_bgl: JsValue,
     main_layout: JsValue,
@@ -272,6 +290,8 @@ impl GpuBackend {
         let queue = device.queue();
         let module = device.create_shader_module(&obj! { "label": "flexma", "code": SHADERS });
         let post_module = device.create_shader_module(&obj! { "label": "flexma-post", "code": POST_SHADERS });
+        let dab_module = device.create_shader_module(&obj! { "label": "flexma-dab", "code": DAB_SHADERS });
+        let dab_layout = device.create_pipeline_layout(&obj! { "bindGroupLayouts": arr(vec![]) });
         let uniform_bgl = device.create_bind_group_layout(&obj! {
             "entries": arr(vec![obj! {
                 "binding": 0u32,
@@ -328,6 +348,9 @@ impl GpuBackend {
             format,
             module,
             post_module,
+            dab_module,
+            dab_layout,
+            dab_inst: None,
             uniform_bgl,
             tex_bgl,
             main_layout,
@@ -465,6 +488,36 @@ impl GpuBackend {
                 },
                 "primitive": obj! { "topology": "triangle-list" },
             },
+            Pipe::Dab(mode) => {
+                let (src, dst) = match mode {
+                    PaintMode::Paint => ("one", "one-minus-src-alpha"),
+                    PaintMode::Erase => ("zero", "one-minus-src-alpha"),
+                    PaintMode::AlphaLock => ("dst-alpha", "one-minus-src-alpha"),
+                };
+                let comp = || obj! { "srcFactor": src, "dstFactor": dst, "operation": "add" };
+                obj! {
+                    "label": format!("dab {mode:?}"),
+                    "layout": self.dab_layout.clone(),
+                    "vertex": obj! {
+                        "module": self.dab_module.clone(),
+                        "entryPoint": "vs_dab",
+                        "buffers": arr(vec![obj! {
+                            "arrayStride": (DAB_FLOATS * 4) as u32,
+                            "stepMode": "instance",
+                            "attributes": arr(vec![
+                                obj! { "shaderLocation": 0u32, "offset": 0u32, "format": "float32x4" }.into(),
+                                obj! { "shaderLocation": 1u32, "offset": 16u32, "format": "float32x4" }.into(),
+                            ]),
+                        }.into()]),
+                    },
+                    "fragment": obj! {
+                        "module": self.dab_module.clone(),
+                        "entryPoint": "fs_dab",
+                        "targets": arr(vec![obj! { "format": TEX_FORMAT, "blend": obj! { "color": comp(), "alpha": comp() } }.into()]),
+                    },
+                    "primitive": obj! { "topology": "triangle-strip" },
+                }
+            }
             Pipe::Blit => obj! {
                 "label": "mip blit",
                 "layout": self.post_layout.clone(),
@@ -537,7 +590,7 @@ impl GpuBackend {
     }
 
     /// Append a uniform slot: view (3 columns), affine rows, a vec4 and params.
-    fn push_uniforms(&mut self, view: &[f32; 9], m: Rows, v: [f32; 4], p: [f32; 4]) -> u32 {
+    fn push_uniforms(&mut self, view: &[f32; 9], m: Rows, v: [f32; 4], p: [f32; 4], uv: [f32; 4]) -> u32 {
         let slot = (self.udata.len() / SLOT_FLOATS) as u32;
         let mut s = [0.0f32; SLOT_FLOATS];
         s[0..3].copy_from_slice(&view[0..3]);
@@ -547,6 +600,7 @@ impl GpuBackend {
         s[16..19].copy_from_slice(&m.1);
         s[20..24].copy_from_slice(&v);
         s[24..28].copy_from_slice(&p);
+        s[28..32].copy_from_slice(&uv);
         self.udata.extend_from_slice(&s);
         slot
     }
@@ -784,7 +838,7 @@ impl Backend for GpuBackend {
         self.depth = 0;
         self.in_scene = true;
         // Slot 0: the scene's shapes (view, AA width, linear output).
-        self.scene_slot = self.push_uniforms(&p.view, ([0.0; 3], [0.0; 3]), [0.0; 4], [p.px, if p.linear { 1.0 } else { 0.0 }, 1.0, 0.0]);
+        self.scene_slot = self.push_uniforms(&p.view, ([0.0; 3], [0.0; 3]), [0.0; 4], [p.px, if p.linear { 1.0 } else { 0.0 }, 1.0, 0.0], [0.0; 4]);
         self.frame = Some(FrameParams {
             width: p.width,
             height: p.height,
@@ -817,14 +871,14 @@ impl Backend for GpuBackend {
     fn draw_mesh(&mut self, mesh: MeshId, m: Rows, color: [f32; 4]) {
         let Some(f) = self.frame.as_ref() else { return };
         let (view, linear) = (f.view, f.linear);
-        let slot = self.push_uniforms(&view, m, color, [0.0, if linear { 1.0 } else { 0.0 }, 1.0, 0.0]);
+        let slot = self.push_uniforms(&view, m, color, [0.0, if linear { 1.0 } else { 0.0 }, 1.0, 0.0], [0.0; 4]);
         self.record(Op::Mesh { mesh, slot });
     }
 
-    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], alpha: f32) {
+    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], uv: [f32; 4], alpha: f32) {
         let Some(f) = self.frame.as_ref() else { return };
         let (view, linear) = (f.view, f.linear);
-        let slot = self.push_uniforms(&view, m, rect, [0.0, if linear { 1.0 } else { 0.0 }, alpha, 0.0]);
+        let slot = self.push_uniforms(&view, m, rect, [0.0, if linear { 1.0 } else { 0.0 }, alpha, 0.0], uv);
         self.record(Op::Tex { tex, slot, label: false });
     }
 
@@ -842,14 +896,14 @@ impl Backend for GpuBackend {
         let Some(f) = self.frame.as_ref() else { return };
         let (view, px) = (f.view, f.px);
         Self::write_instances(&self.device, &self.queue, &mut self.overlay_inst, &mut self.trash_buf, data);
-        let slot = self.push_uniforms(&view, ([0.0; 3], [0.0; 3]), [0.0; 4], [px, 0.0, 1.0, 0.0]);
+        let slot = self.push_uniforms(&view, ([0.0; 3], [0.0; 3]), [0.0; 4], [px, 0.0, 1.0, 0.0], [0.0; 4]);
         self.record(Op::Shapes { inst: Inst::Overlay, first: 0, count: (data.len() / INST_FLOATS) as u32, tex: None, stencil: Stencil::Test, slot });
     }
 
     fn draw_label(&mut self, tex: TexId, rect: [f32; 4]) {
         let Some(f) = self.frame.as_ref() else { return };
         let screen = f.screen;
-        let slot = self.push_uniforms(&screen, ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), rect, [1.0, 0.0, 1.0, 0.0]);
+        let slot = self.push_uniforms(&screen, ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), rect, [1.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0]);
         self.record(Op::Tex { tex, slot, label: true });
     }
 
@@ -963,5 +1017,101 @@ impl Backend for GpuBackend {
 
     fn attach_wake(&mut self, wake: Rc<Cell<bool>>) {
         self.wake = wake;
+    }
+
+    fn create_paint_texture(&mut self, size: u32) -> Option<TexId> {
+        // New textures start transparent.
+        let tex = self.device.create_texture(&obj! {
+            "label": "paint tile",
+            "size": arr(vec![size.into(), size.into()]),
+            "format": TEX_FORMAT,
+            "usage": TEX_BINDING | TEX_COPY_DST | TEX_COPY_SRC | TEX_RENDER,
+        });
+        let bind = self.tex_bind_group(tex.create_view());
+        let entry = TexEntry { tex, bind, w: size, h: size, mips: 1 };
+        Some(TexId(match self.textures.iter().position(Option::is_none) {
+            Some(i) => {
+                self.textures[i] = Some(entry);
+                i as u32
+            }
+            None => {
+                self.textures.push(Some(entry));
+                (self.textures.len() - 1) as u32
+            }
+        }))
+    }
+
+    fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool {
+        let Some(Some(e)) = self.textures.get(tex.0 as usize) else { return false };
+        let source: JsValue = match src {
+            ImageSource::Image(i) => i.clone().into(),
+            ImageSource::Canvas(c) => c.clone().into(),
+        };
+        self.queue
+            .copy_external_image_to_texture(
+                &obj! { "source": source },
+                &obj! { "texture": e.tex.clone(), "premultipliedAlpha": true },
+                &arr(vec![size.into(), size.into()]),
+            )
+            .is_ok()
+    }
+
+    fn clear_paint_texture(&mut self, tex: TexId, _size: u32) {
+        let Some(Some(e)) = self.textures.get(tex.0 as usize) else { return };
+        let enc = self.device.create_command_encoder();
+        let pass = enc.begin_render_pass(&obj! {
+            "colorAttachments": arr(vec![obj! { "view": e.tex.create_view(), "loadOp": "clear", "storeOp": "store",
+                "clearValue": arr(vec![0u32.into(), 0u32.into(), 0u32.into(), 0u32.into()]) }.into()]),
+        });
+        pass.end();
+        self.queue.submit(&arr(vec![enc.finish()]));
+    }
+
+    fn paint_dabs(&mut self, tex: TexId, _size: u32, dabs: &[f32], mode: PaintMode) {
+        if dabs.is_empty() {
+            return;
+        }
+        let Some(view) = self.textures.get(tex.0 as usize).and_then(Option::as_ref).map(|e| e.tex.create_view()) else { return };
+        Self::write_instances(&self.device, &self.queue, &mut self.dab_inst, &mut self.trash_buf, dabs);
+        let pipe = self.pipeline(Pipe::Dab(mode));
+        let enc = self.device.create_command_encoder();
+        let pass = enc.begin_render_pass(&obj! {
+            "colorAttachments": arr(vec![obj! { "view": view, "loadOp": "load", "storeOp": "store" }.into()]),
+        });
+        pass.set_pipeline(&pipe);
+        pass.set_vertex_buffer(0, &self.dab_inst.as_ref().unwrap().buf);
+        pass.draw(4, (dabs.len() / DAB_FLOATS) as u32, 0, 0);
+        pass.end();
+        self.queue.submit(&arr(vec![enc.finish()]));
+    }
+
+    fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32) {
+        let (Some(Some(a)), Some(Some(b))) = (self.textures.get(src.0 as usize), self.textures.get(dst.0 as usize)) else { return };
+        let enc = self.device.create_command_encoder();
+        enc.copy_texture_to_texture(&obj! { "texture": a.tex.clone() }, &obj! { "texture": b.tex.clone() }, &arr(vec![size.into(), size.into()]));
+        self.queue.submit(&arr(vec![enc.finish()]));
+    }
+
+    fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>) {
+        let Some(Some(e)) = self.textures.get(tex.0 as usize) else { return };
+        let bytes = size * size * 4;
+        let buf = self.device.create_buffer(&obj! { "size": bytes as f64, "usage": BUF_MAP_READ | BUF_COPY_DST });
+        let enc = self.device.create_command_encoder();
+        enc.copy_texture_to_buffer(
+            &obj! { "texture": e.tex.clone() },
+            &obj! { "buffer": buf.clone(), "bytesPerRow": size * 4, "rowsPerImage": size },
+            &arr(vec![size.into(), size.into()]),
+        );
+        self.queue.submit(&arr(vec![enc.finish()]));
+        let b2 = buf.clone();
+        let mapped = Closure::once(move |_: JsValue| {
+            let data = js_sys::Uint8Array::new(&b2.get_mapped_range()).to_vec();
+            b2.unmap();
+            b2.destroy();
+            done(data);
+        });
+        let _ = buf.map_async(1).then(&mapped);
+        // Snapshots are rare; the closure lives until it has run.
+        mapped.forget();
     }
 }

@@ -11,6 +11,8 @@ pub struct Txn {
     pub inverse: Vec<Op>,
     /// Selection before the transaction, restored on undo.
     pub selection: Vec<String>,
+    /// A brush stroke (by id) instead of document ops.
+    pub stroke: Option<String>,
 }
 
 #[derive(Default)]
@@ -27,7 +29,7 @@ impl History {
     pub fn begin(&mut self, label: &str, selection: &[String]) {
         self.depth += 1;
         if self.open.is_none() {
-            self.open = Some(Txn { label: label.to_string(), inverse: vec![], selection: selection.to_vec() });
+            self.open = Some(Txn { label: label.to_string(), inverse: vec![], selection: selection.to_vec(), stroke: None });
         }
     }
 
@@ -70,6 +72,15 @@ impl History {
 
     pub fn push_redo(&mut self, t: Txn) {
         self.redo.push(t);
+    }
+
+    /// A finished brush stroke is one undo step.
+    pub fn push_stroke(&mut self, id: String, selection: &[String]) {
+        self.undo.push(Txn { label: "Paint".into(), inverse: vec![], selection: selection.to_vec(), stroke: Some(id) });
+        if self.undo.len() > MAX_STEPS {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
     }
 
     pub fn push_undo_keep_redo(&mut self, t: Txn) {

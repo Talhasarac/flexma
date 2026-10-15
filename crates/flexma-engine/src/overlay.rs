@@ -259,6 +259,25 @@ impl Editor {
             let hs = 7.0 / z;
             overlay_rect(&mut buf, &Affine::translate(p.x - hs / 2.0, p.y - hs / 2.0), hs, hs, WHITE, ACCENT, 1.0 / z, 0.0, false);
         }
+        // Brush / eraser outline at the pointer: its size on screen, ringed
+        // light and dark so it shows on any color, with a dot for tiny brushes.
+        if self.tool.paints() && self.pointer_in && self.can_edit && !self.space_down {
+            let b = if self.tool == crate::tools::Tool::Eraser { &self.eraser } else { &self.brush };
+            let scale = self.selected_paint_layer().map(|l| self.doc.world_transform(&l).a.abs().max(1e-6)).unwrap_or(1.0);
+            let r = (b.size as f64 * scale / 2.0).max(0.5 / z);
+            let c = self.world_at(self.pointer);
+            let ring = |buf: &mut Vec<f32>, rad: f64, color: [f32; 4], sw: f64| {
+                let m = flexma_doc::Affine::translate(c.x - rad, c.y - rad);
+                overlay_rect(buf, &m, rad * 2.0, rad * 2.0, [0.0; 4], color, sw, 0.0, true);
+            };
+            ring(&mut buf, r + 0.5 / z, [1.0, 1.0, 1.0, 0.9], 1.0 / z);
+            ring(&mut buf, r - 0.5 / z, [0.0, 0.0, 0.0, 0.75], 1.0 / z);
+            if r * z < 4.0 {
+                let d = 1.5 / z;
+                let m = flexma_doc::Affine::translate(c.x - d, c.y - d);
+                overlay_rect(&mut buf, &m, d * 2.0, d * 2.0, [0.0, 0.0, 0.0, 0.85], [1.0, 1.0, 1.0, 0.9], 0.75 / z, 0.0, true);
+            }
+        }
         (buf, labels)
     }
 }

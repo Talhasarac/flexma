@@ -34,6 +34,9 @@ pub enum NodeType {
     Instance,
     /// A shared color or text style (lives at the document root, never drawn).
     Style,
+    /// A raster paint layer. Its pixels live outside the document, as 256 px
+    /// tiles and a log of brush strokes (see the `paint` module).
+    Paint,
 }
 
 /// Derived nodes (the expanded children of instances) have ids containing `~`:
@@ -80,6 +83,7 @@ impl NodeType {
             NodeType::Component => "COMPONENT",
             NodeType::Instance => "INSTANCE",
             NodeType::Style => "STYLE",
+            NodeType::Paint => "PAINT",
         }
     }
 
@@ -99,6 +103,7 @@ impl NodeType {
             NodeType::Component => "Component",
             NodeType::Instance => "Instance",
             NodeType::Style => "Style",
+            NodeType::Paint => "Paint layer",
         }
     }
 }
@@ -210,6 +215,8 @@ define_node! {
     /// Don't draw the fills. They still shape an alpha clip (Unity's Mask with
     /// Show Mask Graphic off).
     hide_fill: bool = false => "hideFill",
+    /// PAINT: brushes only paint where the layer already has pixels (lock transparency).
+    alpha_lock: bool = false => "alphaLock",
 
     characters: String = String::new() => "characters",
     font_family: String = String::from("Inter") => "fontFamily",

@@ -1,7 +1,8 @@
 //! The WebGL2 backend (the fallback when WebGPU isn't available), its helpers
 //! and the GLSL shader sources.
 
-use crate::backend::{Backend, FrameParams, ImageSource, MeshId, Rows, TexId};
+use crate::backend::{Backend, FrameParams, ImageSource, MeshId, PaintMode, Rows, TexId, DAB_FLOATS};
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use web_sys::{
     WebGl2RenderingContext as GL, WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderbuffer, WebGlShader, WebGlTexture,
@@ -131,6 +132,13 @@ pub struct GlBackend {
     tex_u: Uniforms,
     composite_prog: WebGlProgram,
     composite_u: Uniforms,
+    dab_prog: WebGlProgram,
+    dab_u: Uniforms,
+    dab_vao: WebGlVertexArrayObject,
+    dab_buf: WebGlBuffer,
+    dab_cap: usize,
+    /// Framebuffers for paint tiles, by texture slot.
+    paint_fbos: HashMap<u32, WebGlFramebuffer>,
     shape_vao: WebGlVertexArrayObject,
     mesh_vao: WebGlVertexArrayObject,
     empty_vao: WebGlVertexArrayObject,
@@ -175,7 +183,19 @@ impl GlBackend {
         let composite_prog = program(&gl, COMPOSITE_VS, COMPOSITE_FS)?;
         let shape_u = Uniforms::new(&gl, &shape_prog, &["u_view", "u_px", "u_tex", "u_linear"]);
         let mesh_u = Uniforms::new(&gl, &mesh_prog, &["u_view", "u_m0", "u_m1", "u_color", "u_linear"]);
-        let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha", "u_linear"]);
+        let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha", "u_linear", "u_uv"]);
+        let dab_prog = program(&gl, DAB_VS, DAB_FS)?;
+        let dab_u = Uniforms::new(&gl, &dab_prog, &["u_size"]);
+        let dab_vao = gl.create_vertex_array().ok_or("vao")?;
+        let dab_buf = gl.create_buffer().ok_or("buffer")?;
+        gl.bind_vertex_array(Some(&dab_vao));
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&dab_buf));
+        for i in 0..2u32 {
+            gl.enable_vertex_attrib_array(i);
+            gl.vertex_attrib_divisor(i, 1);
+            gl.vertex_attrib_pointer_with_i32(i, 4, GL::FLOAT, false, (DAB_FLOATS * 4) as i32, (i * 16) as i32);
+        }
+        gl.bind_vertex_array(None);
         let composite_u = Uniforms::new(&gl, &composite_prog, &["u_tex"]);
         let shape_vao = gl.create_vertex_array().ok_or("vao")?;
         let mesh_vao = gl.create_vertex_array().ok_or("vao")?;
@@ -219,6 +239,12 @@ impl GlBackend {
             tex_u,
             composite_prog,
             composite_u,
+            dab_prog,
+            dab_u,
+            dab_vao,
+            dab_buf,
+            dab_cap: 0,
+            paint_fbos: HashMap::new(),
             shape_vao,
             mesh_vao,
             empty_vao,
@@ -243,6 +269,21 @@ impl GlBackend {
 
     fn tex(&self, t: Option<TexId>) -> &WebGlTexture {
         t.and_then(|t| self.textures.get(t.0 as usize)).and_then(Option::as_ref).unwrap_or(&self.white)
+    }
+
+    /// The framebuffer drawing into a paint tile's texture.
+    fn paint_fbo(&mut self, tex: TexId) -> Option<WebGlFramebuffer> {
+        if let Some(f) = self.paint_fbos.get(&tex.0) {
+            return Some(f.clone());
+        }
+        let t = self.textures.get(tex.0 as usize)?.clone()?;
+        let gl = &self.gl;
+        let fbo = gl.create_framebuffer()?;
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
+        gl.framebuffer_texture_2d(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::TEXTURE_2D, Some(&t), 0);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        self.paint_fbos.insert(tex.0, fbo.clone());
+        Some(fbo)
     }
 
     fn bind_shape_attribs(&self, start: u32) {
@@ -393,6 +434,9 @@ impl Backend for GlBackend {
         if let Some(Some(tex)) = self.textures.get_mut(t.0 as usize).map(Option::take) {
             self.gl.delete_texture(Some(&tex));
         }
+        if let Some(f) = self.paint_fbos.remove(&t.0) {
+            self.gl.delete_framebuffer(Some(&f));
+        }
     }
 
     fn create_mesh(&mut self, vertices: &[f32], indices: &[u32]) -> Option<MeshId> {
@@ -500,7 +544,7 @@ impl Backend for GlBackend {
         self.draw_calls += 1;
     }
 
-    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], alpha: f32) {
+    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], uv: [f32; 4], alpha: f32) {
         let gl = &self.gl;
         if self.current != Prog::Tex {
             gl.use_program(Some(&self.tex_prog));
@@ -512,6 +556,7 @@ impl Backend for GlBackend {
         gl.uniform3f(self.tex_u.get(1), m.0[0], m.0[1], m.0[2]);
         gl.uniform3f(self.tex_u.get(2), m.1[0], m.1[1], m.1[2]);
         gl.uniform4f(self.tex_u.get(3), rect[0], rect[1], rect[2], rect[3]);
+        gl.uniform4f(self.tex_u.get(7), uv[0], uv[1], uv[2], uv[3]);
         gl.uniform1f(self.tex_u.get(5), alpha);
         gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(Some(tex))));
         gl.draw_arrays(GL::TRIANGLE_STRIP, 0, 4);
@@ -551,6 +596,7 @@ impl Backend for GlBackend {
             gl.uniform3f(self.tex_u.get(2), 0.0, 1.0, 0.0);
             gl.uniform1f(self.tex_u.get(5), 1.0);
             gl.uniform1f(self.tex_u.get(6), 0.0);
+            gl.uniform4f(self.tex_u.get(7), 0.0, 0.0, 1.0, 1.0);
             self.current = Prog::Label;
         }
         gl.uniform4f(self.tex_u.get(3), rect[0], rect[1], rect[2], rect[3]);
@@ -566,6 +612,100 @@ impl Backend for GlBackend {
 
     fn draw_calls(&self) -> u32 {
         self.draw_calls
+    }
+
+    fn create_paint_texture(&mut self, size: u32) -> Option<TexId> {
+        let gl = &self.gl;
+        let tex = gl.create_texture()?;
+        gl.bind_texture(GL::TEXTURE_2D, Some(&tex));
+        // WebGL zero-fills: a transparent tile.
+        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            GL::TEXTURE_2D,
+            0,
+            GL::RGBA as i32,
+            size as i32,
+            size as i32,
+            0,
+            GL::RGBA,
+            GL::UNSIGNED_BYTE,
+            None,
+        );
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR as i32);
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MAG_FILTER, GL::LINEAR as i32);
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_S, GL::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_T, GL::CLAMP_TO_EDGE as i32);
+        Some(TexId(slot(&mut self.textures, tex)))
+    }
+
+    fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, _size: u32) -> bool {
+        let Some(Some(t)) = self.textures.get(tex.0 as usize) else { return false };
+        let gl = &self.gl;
+        gl.bind_texture(GL::TEXTURE_2D, Some(t));
+        match src {
+            ImageSource::Image(img) => gl.tex_image_2d_with_u32_and_u32_and_html_image_element(GL::TEXTURE_2D, 0, GL::RGBA as i32, GL::RGBA, GL::UNSIGNED_BYTE, img).is_ok(),
+            ImageSource::Canvas(c) => gl.tex_image_2d_with_u32_and_u32_and_html_canvas_element(GL::TEXTURE_2D, 0, GL::RGBA as i32, GL::RGBA, GL::UNSIGNED_BYTE, c).is_ok(),
+        }
+    }
+
+    fn clear_paint_texture(&mut self, tex: TexId, size: u32) {
+        let Some(fbo) = self.paint_fbo(tex) else { return };
+        let gl = &self.gl;
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
+        gl.viewport(0, 0, size as i32, size as i32);
+        gl.disable(GL::STENCIL_TEST);
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(GL::COLOR_BUFFER_BIT);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+    }
+
+    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode) {
+        if dabs.is_empty() {
+            return;
+        }
+        let Some(fbo) = self.paint_fbo(tex) else { return };
+        let gl = self.gl.clone();
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
+        gl.viewport(0, 0, size as i32, size as i32);
+        gl.disable(GL::STENCIL_TEST);
+        match mode {
+            PaintMode::Paint => gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA),
+            PaintMode::Erase => gl.blend_func(GL::ZERO, GL::ONE_MINUS_SRC_ALPHA),
+            PaintMode::AlphaLock => gl.blend_func(GL::DST_ALPHA, GL::ONE_MINUS_SRC_ALPHA),
+        }
+        gl.use_program(Some(&self.dab_prog));
+        gl.uniform1f(self.dab_u.get(0), size as f32);
+        gl.bind_vertex_array(Some(&self.dab_vao));
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.dab_buf));
+        upload_growable(&gl, GL::ARRAY_BUFFER, dabs, &mut self.dab_cap, GL::DYNAMIC_DRAW);
+        gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, (dabs.len() / DAB_FLOATS) as i32);
+        gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA);
+        gl.bind_vertex_array(None);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        self.current = Prog::None;
+    }
+
+    fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32) {
+        let (Some(a), Some(b)) = (self.paint_fbo(src), self.paint_fbo(dst)) else { return };
+        let gl = &self.gl;
+        gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&a));
+        gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&b));
+        let s = size as i32;
+        gl.blit_framebuffer(0, 0, s, s, 0, 0, s, s, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+    }
+
+    fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>) {
+        let Some(fbo) = self.paint_fbo(tex) else { return };
+        let gl = &self.gl;
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
+        let mut px = vec![0u8; (size * size * 4) as usize];
+        let ok = gl
+            .read_pixels_with_opt_u8_array(0, 0, size as i32, size as i32, GL::RGBA, GL::UNSIGNED_BYTE, Some(&mut px))
+            .is_ok();
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        if ok {
+            done(px);
+        }
     }
 }
 
@@ -902,6 +1042,8 @@ uniform mat3 u_view;
 uniform vec3 u_m0;
 uniform vec3 u_m1;
 uniform vec4 u_rect;
+// The texture region shown: (x0, y0, x1, y1).
+uniform vec4 u_uv;
 out vec2 v_uv;
 void main() {
   vec2 corner = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
@@ -909,7 +1051,7 @@ void main() {
   vec2 world = vec2(dot(u_m0, vec3(local, 1.0)), dot(u_m1, vec3(local, 1.0)));
   vec3 clip = u_view * vec3(world, 1.0);
   gl_Position = vec4(clip.xy, 0.0, 1.0);
-  v_uv = corner;
+  v_uv = mix(u_uv.xy, u_uv.zw, corner);
 }
 "#;
 
@@ -927,6 +1069,47 @@ vec4 toOutput(vec4 c) {
   return vec4(srgbToLinear(clamp(c.rgb / c.a, 0.0, 1.0)) * c.a, c.a);
 }
 void main() { o = toOutput(texture(u_tex, v_uv) * u_alpha); }
+"#;
+
+/// Brush dabs into a paint tile: x, y, radius, hardness (texel space) and a
+/// premultiplied color per instance. GL framebuffers start at the bottom
+/// row, which is the tile's top row (row 0), so no flip.
+pub const DAB_VS: &str = r#"#version 300 es
+precision highp float;
+layout(location=0) in vec4 a_d0;
+layout(location=1) in vec4 a_col;
+uniform float u_size;
+out vec2 v_p;
+flat out vec4 v_d0;
+flat out vec4 v_col;
+void main() {
+  vec2 corner = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+  float r = max(a_d0.z, 0.5) + 1.0;
+  vec2 p = a_d0.xy + (corner * 2.0 - 1.0) * r;
+  v_p = p;
+  v_d0 = a_d0;
+  v_col = a_col;
+  gl_Position = vec4(p / u_size * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+pub const DAB_FS: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_p;
+flat in vec4 v_d0;
+flat in vec4 v_col;
+out vec4 o;
+void main() {
+  // Hardness sets where the soft falloff starts; the rim is antialiased, and
+  // dabs under half a pixel fade by area instead of shrinking.
+  float r = max(v_d0.z, 0.5);
+  float d = length(v_p - v_d0.xy);
+  float inner = r * clamp(v_d0.w, 0.0, 1.0);
+  float soft = 1.0 - smoothstep(inner, max(r, inner + 0.001), d);
+  float rim = clamp(r - d + 0.5, 0.0, 1.0);
+  float area = min(1.0, v_d0.z * v_d0.z / 0.25);
+  o = v_col * (soft * rim * area);
+}
 "#;
 
 /// Full-screen pass that encodes a linear-light sRGB target for the canvas.
@@ -967,7 +1150,7 @@ mod tests {
             "long", "short", "double", "half", "fixed", "unsigned", "superp", "input", "output", "filter", "sizeof", "cast",
             "namespace", "using",
         ];
-        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS)] {
+        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS), ("DAB_VS", DAB_VS), ("DAB_FS", DAB_FS)] {
             for line in src.lines() {
                 let code = line.split("//").next().unwrap_or("");
                 for word in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {

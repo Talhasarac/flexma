@@ -9,6 +9,7 @@ mod api_auth;
 mod api_comments;
 mod api_files;
 mod api_fonts;
+mod api_paint;
 mod api_share;
 mod api_tokens;
 mod api_versions;
@@ -21,6 +22,7 @@ mod error;
 mod fonts;
 mod icons;
 mod mcp;
+mod paint;
 mod oauth;
 mod render;
 mod rooms;
@@ -179,6 +181,10 @@ async fn main() {
         .route("/share/{token}/export.svg", get(api_share::export_svg))
         .route("/share/{token}/export.png", get(api_share::export_png))
         .route("/share/{token}/thumbnail.png", get(api_share::thumbnail))
+        .route("/files/{id}/paint", get(api_paint::state))
+        .route("/files/{id}/paint/{layer}/{tx}/{ty}", get(api_paint::tile).put(api_paint::put_tile))
+        .route("/share/{token}/paint", get(api_paint::share_state))
+        .route("/share/{token}/paint/{layer}/{tx}/{ty}", get(api_paint::share_tile))
         .route("/share/{token}/fonts", get(api_fonts::share_list))
         .route("/share/{token}/fonts/{fid}", get(api_fonts::share_file))
         .route("/workspaces/{id}/fonts", get(api_fonts::list).post(api_fonts::upload).delete(api_fonts::delete_family))

@@ -48,7 +48,7 @@ export default function EditorPage() {
           engine.free();
           return;
         }
-        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId, userId });
+        created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId, userId, paintTools: info.paintTools });
         created.onFatal = (m) => setFatal(m);
         created.connect(api.files.socketUrl(fileId));
         // Handy for debugging and profiling from the console.
@@ -168,6 +168,7 @@ export function Editor({ store, canvas, header, footer }: { store: EditorStore; 
       { label: 'Frame selection', hint: '⌥⌘G', disabled: !has || !edit, onSelect: act(() => e.frame_selection()) },
       { label: 'Ungroup', hint: '⇧⌘G', disabled: !has || !edit, onSelect: act(() => e.ungroup()) },
       { label: 'Add auto layout', hint: '⇧A', disabled: !has || !edit, onSelect: act(() => e.add_auto_layout()) },
+      ...(store.paintTools ? [{ label: 'New paint layer', disabled: !edit, onSelect: act(() => e.new_paint_layer()) }] : []),
       { type: 'separator' },
       { label: 'Create component', hint: '⌥⌘K', disabled: !has || !edit, onSelect: act(() => e.create_component()) },
       { label: 'Detach instance', hint: '⌥⌘B', disabled: !has || !edit, onSelect: act(() => e.detach_instances()) },

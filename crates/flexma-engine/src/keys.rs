@@ -29,6 +29,10 @@ impl Editor {
             ("escape", _, _, _) => {
                 match self.gesture {
                     Gesture::Pen { .. } => self.finish_pen(),
+                    Gesture::Paint { .. } => {
+                        self.paint.cancel();
+                        self.gesture = Gesture::None;
+                    }
                     Gesture::None => {
                         if self.tool != Tool::Select {
                             self.set_tool(Tool::Select);
@@ -89,6 +93,13 @@ impl Editor {
             ("g", true, false, true) => {
                 self.wrap_selection(NodeType::Frame, false);
             }
+            // Brush size, like most painting apps.
+            ("[" | "]", false, false, false) if self.tool.paints() => {
+                let b = if self.tool == Tool::Eraser { &mut self.eraser } else { &mut self.brush };
+                let f = if k == "]" { 1.25 } else { 0.8 };
+                b.size = (b.size * f).clamp(0.5, 2000.0);
+                self.ui_version += 1;
+            }
             ("]", true, _, true) | ("]", true, true, _) => self.reorder("front"),
             ("[", true, _, true) | ("[", true, true, _) => self.reorder("back"),
             ("]", true, _, _) => self.reorder("forward"),
@@ -133,6 +144,8 @@ impl Editor {
                     "l" => Some(Tool::Line),
                     "t" => Some(Tool::Text),
                     "p" => Some(Tool::Pen),
+                    "b" if self.paint_tools => Some(Tool::Brush),
+                    "e" if self.paint_tools => Some(Tool::Eraser),
                     _ => None,
                 };
                 match tool {

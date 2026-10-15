@@ -1,6 +1,6 @@
 // Floating bottom toolbar (Figma UI3 style).
 import { useRef, type ReactElement } from 'react';
-import { ChevronUp, Circle, Frame, Hand, MessageCircle, Minus, MousePointer2, PenTool, Square, Star, Triangle, Type } from 'lucide-react';
+import { Brush, ChevronUp, Circle, Eraser, Frame, Hand, MessageCircle, Minus, MousePointer2, PenTool, Square, Star, Triangle, Type } from 'lucide-react';
 import { useMenu } from '../components/Menu';
 import { useCommentMode, useUi, type EditorStore } from './store';
 import type { Tool } from './types';
@@ -61,6 +61,13 @@ export function Toolbar({ store }: { store: EditorStore }) {
           </div>
           {btn('pen', 'Pen (P)', <PenTool size={16} />)}
           {btn('text', 'Text (T)', <Type size={16} />)}
+          {store.paintTools && (
+            <>
+              <span className="tool-sep" />
+              {btn('brush', 'Brush (B)', <Brush size={16} />)}
+              {btn('eraser', 'Eraser (E)', <Eraser size={16} />)}
+            </>
+          )}
         </>
       )}
       {!store.shareToken && (

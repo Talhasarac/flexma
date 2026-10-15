@@ -256,6 +256,10 @@ or give `width` (the length) plus `rotation`.
 
 `pointCount` (alias `points`, default 5) and, for stars, `innerRadius` (0..1, default 0.382).
 
+## PAINT
+
+A paint layer: brush strokes that people paint in the editor, stored as 256 px tiles outside the document. Its `width`/`height` set the canvas size (resizing crops or extends it, it doesn't scale the pixels), and `alphaLock: true` makes new strokes paint only over existing pixels. Agents can move, hide, rename or delete paint layers, and `get_screenshot` and exports show them, but no tool paints. Fills, strokes and effects don't apply.
+
 ## Reading nodes
 
 `get_nodes` returns every non-default property plus:

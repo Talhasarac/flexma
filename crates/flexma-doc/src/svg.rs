@@ -31,11 +31,23 @@ pub struct SvgOptions<'a> {
     /// given and whose output is then encoded back to sRGB (pages with
     /// `linearBlending`). Images then come through `resolve_variant` linearized.
     pub linear: bool,
+    /// A paint layer's tiles: (column, row, URL or data URI) of each 256 px
+    /// tile image, for the layer's id.
+    pub paint_tiles: &'a dyn Fn(&str) -> Vec<(i32, i32, String)>,
 }
 
 impl Default for SvgOptions<'_> {
     fn default() -> Self {
-        SvgOptions { padding: 0.0, background: None, resolve_asset: &|_| None, image_size: &|_| None, measure_text: None, resolve_variant: &|_, _, _| None, linear: false }
+        SvgOptions {
+            padding: 0.0,
+            background: None,
+            resolve_asset: &|_| None,
+            image_size: &|_| None,
+            measure_text: None,
+            resolve_variant: &|_, _, _| None,
+            linear: false,
+            paint_tiles: &|_| Vec::new(),
+        }
     }
 }
 
@@ -663,6 +675,35 @@ impl Writer<'_> {
         Some(id)
     }
 
+    /// A paint layer: its tile images, clipped to the layer's box. Layers
+    /// inside instances show their main component's pixels.
+    fn paint_layer(&mut self, n: &Node) {
+        let source = n.id.rsplit('~').next().unwrap_or(&n.id);
+        let tiles = (self.opts.paint_tiles)(source);
+        if tiles.is_empty() {
+            return;
+        }
+        let id = self.id("c");
+        let _ = write!(
+            self.defs,
+            r#"<clipPath id="{id}"><rect width="{}" height="{}"/></clipPath>"#,
+            fmt_num(n.width),
+            fmt_num(n.height)
+        );
+        let _ = write!(self.body, r#"<g clip-path="url(#{id})">"#);
+        for (tx, ty, href) in tiles {
+            let _ = write!(
+                self.body,
+                r#"<image x="{}" y="{}" width="{t}" height="{t}" preserveAspectRatio="none" href="{}"/>"#,
+                tx * crate::raster::TILE as i32,
+                ty * crate::raster::TILE as i32,
+                escape(&href),
+                t = crate::raster::TILE,
+            );
+        }
+        self.body.push_str("</g>");
+    }
+
     fn node(&mut self, n: &Node, _parent_world: &Affine) {
         if !n.visible || !n.kind.is_scene() {
             return;
@@ -681,6 +722,7 @@ impl Writer<'_> {
 
         match n.kind {
             NodeType::Text => self.text(n),
+            NodeType::Paint => self.paint_layer(n),
             _ => {
                 if let Some(shape) = self.shape(n) {
                     let closed = n.kind != NodeType::Line;

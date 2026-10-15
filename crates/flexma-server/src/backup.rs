@@ -1,11 +1,12 @@
 //! Full-server backups: one .zip with a consistent copy of the database plus
-//! uploaded images and fonts. Admins download it from the Admin page and put
+//! uploaded images, fonts and painted tiles. Admins download it from the Admin page and put
 //! it back with `flexma restore <file.zip>`.
 //!
 //! Layout inside the zip (under one top-level folder):
 //!   flexma.db   the database (a single self-contained file, no WAL)
 //!   assets/     uploaded images
 //!   fonts/      workspace font files
+//!   paint/      paint-layer tile snapshots (file/layer/tile.png)
 //!   README.txt
 
 use crate::db::random_string;
@@ -19,14 +20,14 @@ use std::path::{Path, PathBuf};
 pub const DB_FILE: &str = "flexma.db";
 /// Folders in the data directory that belong in a backup. (`cache/` is
 /// rebuilt on demand and left out.)
-const DIRS: &[&str] = &["assets", "fonts"];
+const DIRS: &[&str] = &["assets", "fonts", "paint"];
 
 const README: &str = "Flexma backup
 =============
 
 Everything on the server: accounts, workspaces, every design with its version
-history and comments, share links, uploaded images (assets/) and fonts
-(fonts/).
+history and comments, share links, uploaded images (assets/), fonts
+(fonts/) and painted tiles (paint/).
 
 It includes password hashes and login tokens, so keep it somewhere private.
 
@@ -67,12 +68,25 @@ pub async fn info(st: &AppState) -> AppResult<serde_json::Value> {
 }
 
 fn dir_stats(dir: &Path) -> (u64, u64) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return (0, 0) };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .fold((0, 0), |(n, b), m| (n + 1, b + m.len()))
+    files_in(dir).iter().filter_map(|p| p.metadata().ok()).fold((0, 0), |(n, b), m| (n + 1, b + m.len()))
+}
+
+/// Every file under `dir` (paint tiles sit in sub-folders), sorted.
+fn files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.filter_map(Result::ok) {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => stack.push(e.path()),
+                Ok(t) if t.is_file() => out.push(e.path()),
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Build a backup. Returns an already-unlinked temporary file (so it
@@ -151,14 +165,13 @@ fn write_zip(out: &Path, db: &Path, data_dir: &Path, root: &str) -> Result<(), S
     z.start_file(format!("{root}/{DB_FILE}"), deflate).map_err(|e| err(&e))?;
     std::io::copy(&mut File::open(db).map_err(|e| err(&e))?, &mut z).map_err(|e| err(&e))?;
     for dir in DIRS {
-        let Ok(entries) = std::fs::read_dir(data_dir.join(dir)) else { continue };
-        let mut names: Vec<_> = entries.filter_map(Result::ok).filter(|e| e.path().is_file()).map(|e| e.file_name()).collect();
-        names.sort();
-        for name in names {
-            let name = name.to_string_lossy();
-            let opts = if *dir == "assets" { stored } else { deflate };
+        let top = data_dir.join(dir);
+        for path in files_in(&top) {
+            let Ok(rel) = path.strip_prefix(&top) else { continue };
+            let name = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+            let opts = if *dir == "fonts" { deflate } else { stored };
             z.start_file(format!("{root}/{dir}/{name}"), opts).map_err(|e| err(&e))?;
-            let mut f = File::open(data_dir.join(dir).join(name.as_ref())).map_err(|e| err(&e))?;
+            let mut f = File::open(&path).map_err(|e| err(&e))?;
             std::io::copy(&mut f, &mut z).map_err(|e| err(&e))?;
         }
     }
@@ -187,7 +200,7 @@ pub fn restore(data_dir: &Path, zip_path: &Path, addr: &str) -> Result<String, S
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let aside = data_dir.join(format!("pre-restore-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
     let mut moved = Vec::new();
-    for name in ["flexma.db", "flexma.db-wal", "flexma.db-shm", "assets", "fonts", "cache"] {
+    for name in ["flexma.db", "flexma.db-wal", "flexma.db-shm", "assets", "fonts", "paint", "cache"] {
         let from = data_dir.join(name);
         if from.exists() {
             std::fs::create_dir_all(&aside).map_err(|e| e.to_string())?;
@@ -196,18 +209,23 @@ pub fn restore(data_dir: &Path, zip_path: &Path, addr: &str) -> Result<String, S
         }
     }
 
-    let mut counts = (0usize, 0usize);
+    let mut counts = (0usize, 0usize, 0usize);
     for i in 0..z.len() {
         let mut entry = z.by_index(i).map_err(|e| e.to_string())?;
         let Some(path) = entry.enclosed_name() else { continue };
         let Ok(rel) = path.strip_prefix(&root) else { continue };
         let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
-        // Only the database and files directly inside assets/ and fonts/.
+        // Only the database, files directly inside assets/ and fonts/, and
+        // paint/<file>/<layer>/<tile>.
         let dest: PathBuf = match parts.as_slice() {
             [f] if f == DB_FILE => data_dir.join(DB_FILE),
-            [d, f] if DIRS.contains(&d.as_str()) && !entry.is_dir() => {
+            [d, f] if (d == "assets" || d == "fonts") && !entry.is_dir() => {
                 if d == "assets" { counts.0 += 1 } else { counts.1 += 1 }
                 data_dir.join(d).join(f)
+            }
+            [d, file, layer, f] if d == "paint" && !entry.is_dir() => {
+                counts.2 += 1;
+                data_dir.join(d).join(file).join(layer).join(f)
             }
             _ => continue,
         };
@@ -219,9 +237,10 @@ pub fn restore(data_dir: &Path, zip_path: &Path, addr: &str) -> Result<String, S
     }
     match_owner(data_dir);
     Ok(format!(
-        "Restored the database, {} images and {} font files into {}.{}",
+        "Restored the database, {} images, {} font files and {} paint tiles into {}.{}",
         counts.0,
         counts.1,
+        counts.2,
         data_dir.display(),
         if moved.is_empty() { String::new() } else { format!("\nThe previous data was moved to {}.", aside.display()) }
     ))
@@ -238,9 +257,10 @@ fn match_owner(data_dir: &Path) {
     for dir in DIRS {
         let path = data_dir.join(dir);
         let _ = chown(&path, uid, gid);
-        if let Ok(entries) = std::fs::read_dir(&path) {
-            for e in entries.filter_map(Result::ok) {
-                let _ = chown(e.path(), uid, gid);
+        for f in files_in(&path) {
+            // The file and the folders between it and `path`.
+            for p in f.ancestors().take_while(|p| *p != path) {
+                let _ = chown(p, uid, gid);
             }
         }
     }

@@ -38,6 +38,8 @@ export interface Workspace {
   role: Role;
   memberCount: number;
   createdAt: string;
+  /** Painting (brush and eraser) is turned on for this workspace's files. */
+  paintTools: boolean;
 }
 
 export interface Member {
@@ -84,6 +86,8 @@ export interface FileInfo {
   createdAt: string;
   updatedAt: string;
   createdBy: string;
+  /** The file's workspace has painting turned on. */
+  paintTools: boolean;
 }
 
 /** A font file in a workspace (one face: family + weight + style). */
@@ -487,7 +491,7 @@ const workspaces = {
   list: () => request<Workspace[]>('GET', '/api/workspaces'),
   create: (name: string) => request<Workspace>('POST', '/api/workspaces', { body: { name } }),
   get: (id: string) => request<Workspace>('GET', `/api/workspaces/${enc(id)}`),
-  update: (id: string, patch: { name: string }) =>
+  update: (id: string, patch: { name?: string; paintTools?: boolean }) =>
     request<Workspace>('PATCH', `/api/workspaces/${enc(id)}`, { body: patch }),
   delete: (id: string) => request<Record<string, never>>('DELETE', `/api/workspaces/${enc(id)}`),
 
@@ -589,6 +593,22 @@ const share = {
   urls: shareUrls,
 };
 
+/** Paint layers: the strokes and tile snapshots behind them. */
+const paint = {
+  /** Everything a client needs to show the file's paint layers. */
+  state: (fileId: string) => request<unknown>('GET', `/api/files/${enc(fileId)}/paint`),
+  shareState: (token: string) => request<unknown>('GET', `/api/share/${enc(token)}/paint`, { reportUnauthorized: false }),
+  /** Prefix of tile image URLs: `{base}/{layer}/{x}/{y}`. */
+  tileBase: (fileId: string) => `/api/files/${enc(fileId)}/paint`,
+  shareTileBase: (token: string) => `/api/share/${enc(token)}/paint`,
+  /** Upload a 256 px tile snapshot covering strokes up to `seq`. */
+  putTile: (fileId: string, layer: string, x: number, y: number, kind: 'base' | 'view', seq: number, png: Blob) =>
+    request<{ kept: boolean }>('PUT', `/api/files/${enc(fileId)}/paint/${enc(layer)}/${x}/${y}?kind=${kind}&seq=${seq}`, {
+      rawBody: png,
+      contentType: 'image/png',
+    }),
+};
+
 const comments = {
   list: (fileId: string) => request<CommentThread[]>('GET', `/api/files/${enc(fileId)}/comments`),
   create: (fileId: string, c: NewComment) => request<{ id: string }>('POST', `/api/files/${enc(fileId)}/comments`, { body: c }),
@@ -632,6 +652,7 @@ export const api = {
   tokens,
   comments,
   fonts,
+  paint,
   share,
   admin,
   assets: { url: assetUrl },

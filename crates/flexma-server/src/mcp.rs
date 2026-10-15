@@ -1462,6 +1462,7 @@ impl Ctx {
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
+        let pfid = fid.clone();
         let (svg, bounds, linear, checker) = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
@@ -1469,7 +1470,7 @@ impl Ctx {
                 // Layers without an opaque fill show transparency as a checkerboard.
                 let checker = render::wants_checkerboard(doc, &ids);
                 let bg = if checker { None } else { bg.or(Some(flexma_doc::Color::WHITE)) };
-                render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
+                render::export_svg(doc, &ids, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts), &render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: None })
                     .map(|(s, b)| (s, b, linear, checker))
                     .ok_or_else(|| "nothing to render".to_string())
             })
@@ -1505,6 +1506,7 @@ impl Ctx {
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
+        let pfid = fid.clone();
         let tiles: Vec<(String, String, String, bool, bool)> = room
             .read(move |doc, _| {
                 let mut out = Vec::new();
@@ -1513,7 +1515,7 @@ impl Ctx {
                     let one = std::slice::from_ref(id);
                     let checker = render::wants_checkerboard(doc, one);
                     let bg = if checker { None } else { Some(flexma_doc::Color::WHITE) };
-                    let (svg, _) = render::export_svg(doc, one, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
+                    let (svg, _) = render::export_svg(doc, one, bg, render::AssetMode::Inline(&data_dir), Some(&measure_fonts), &render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: None })
                         .ok_or_else(|| format!("nothing to render for '{id}'"))?;
                     out.push((id.clone(), n.name.clone(), svg, render::linear_for(doc, one), checker));
                 }
@@ -1543,11 +1545,15 @@ impl Ctx {
         let f2 = fid.clone();
         let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &f2)).await.map_err(err_msg)?;
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
+        let (pfid, data_dir) = (fid.clone(), self.st.cfg.data_dir.clone());
         let svg = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
-                render::export_svg(doc, &ids, bg, render::AssetMode::Url, Some(&fonts))
-                    .map(|(s, _)| s.replace("href=\"/api/assets/", &format!("href=\"{base}/api/assets/")))
+                render::export_svg(doc, &ids, bg, render::AssetMode::Url, Some(&fonts), &render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: None })
+                    .map(|(s, _)| {
+                        s.replace("href=\"/api/assets/", &format!("href=\"{base}/api/assets/"))
+                            .replace("href=\"/api/files/", &format!("href=\"{base}/api/files/"))
+                    })
                     .ok_or_else(|| "nothing to export".to_string())
             })
             .await

@@ -114,6 +114,16 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
             Message::Close(_) => break,
             _ => continue,
         };
+        // Paint-layer messages (`strokeLive`, `stroke`, `strokeUndo`) go to the
+        // room as they are; it validates them.
+        if text.contains(r#""t":"stroke"#) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if v.get("t").and_then(|t| t.as_str()).is_some_and(|t| t.starts_with("stroke")) {
+                    room.paint(client_id.clone(), v).await;
+                    continue;
+                }
+            }
+        }
         match serde_json::from_str::<ClientMsg>(&text) {
             Ok(ClientMsg::Ops { batch, ops }) => {
                 // Parse ops individually so one malformed op cannot block the ack.

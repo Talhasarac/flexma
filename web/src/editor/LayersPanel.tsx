@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { AssetsPanel } from './AssetsPanel';
 import {
+  Brush,
   ChevronDown,
   ChevronRight,
   Circle,
@@ -55,6 +56,8 @@ function TypeIcon({ type, layout }: { type: NodeType; layout: boolean }) {
       return <Triangle size={s} />;
     case 'STAR':
       return <Star size={s} />;
+    case 'PAINT':
+      return <Brush size={s} />;
     default:
       return <Component size={s} />;
   }

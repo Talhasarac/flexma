@@ -189,6 +189,8 @@ enum Cmd {
     Flush { reply: oneshot::Sender<()> },
     /// Send a message to every connected client (e.g. "comments changed").
     Broadcast { msg: Msg },
+    /// A paint-layer message from a client (`strokeLive`, `stroke`, `strokeUndo`).
+    Paint { client_id: String, msg: Value },
     /// Disconnect guests who joined through a share link that was turned off.
     KickShare { token: String },
     /// Stop the actor. `discard` skips the final save (used when the stored
@@ -253,6 +255,10 @@ impl RoomHandle {
     }
 
     /// Notify every connected client.
+    pub async fn paint(&self, client_id: String, msg: Value) {
+        let _ = self.tx.send(Cmd::Paint { client_id, msg }).await;
+    }
+
     pub async fn broadcast(&self, msg: Value) {
         let _ = self.tx.send(Cmd::Broadcast { msg: Arc::from(msg.to_string()) }).await;
     }
@@ -398,16 +404,19 @@ impl Rooms {
             }
         }
         let fid = file_id.to_string();
-        let loaded: Option<(String, i64)> = self
+        let loaded: Option<(String, i64, u64)> = self
             .db
             .call(move |c| {
-                Ok(c.query_row("SELECT document, version FROM files WHERE id = ?1", params![fid], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .optional()?)
+                let row: Option<(String, i64)> = c
+                    .query_row("SELECT document, version FROM files WHERE id = ?1", params![fid], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .optional()?;
+                match row {
+                    Some((doc, version)) => Ok(Some((doc, version, crate::paint::last_seq(c, &fid)?))),
+                    None => Ok(None),
+                }
             })
             .await?;
-        let (json, version) = loaded.ok_or_else(|| AppError::not_found("file"))?;
+        let (json, version, paint_seq) = loaded.ok_or_else(|| AppError::not_found("file"))?;
         let mut doc = Document::from_json(&json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
         components::sync_all(&mut doc);
         flexma_doc::styles::sync_all(&mut doc);
@@ -429,6 +438,9 @@ impl Rooms {
             clients: HashMap::new(),
             agents: HashMap::new(),
             agent_undo: HashMap::new(),
+            paint_seq,
+            paint_writer: crate::paint::spawn_writer(self.db.clone()),
+            stroke_authors: HashMap::new(),
             db: self.db.clone(),
             stats: stats.clone(),
         };
@@ -455,6 +467,11 @@ struct Room {
     agents: HashMap<String, (Peer, Instant)>,
     /// Recent agent changes, newest last, by agent key.
     agent_undo: HashMap<String, std::collections::VecDeque<UndoBatch>>,
+    /// The last brush stroke number handed out (strokes are drawn in this order).
+    paint_seq: u64,
+    paint_writer: mpsc::UnboundedSender<crate::paint::Write>,
+    /// Who painted each stroke this session (only the painter may undo it).
+    stroke_authors: HashMap<String, String>,
     db: Db,
     stats: Arc<Stats>,
 }
@@ -600,6 +617,7 @@ impl Room {
                 f(&self.doc, &peers);
             }
             Cmd::Broadcast { msg } => self.broadcast(msg, None),
+            Cmd::Paint { client_id, msg } => self.paint_msg(&client_id, msg),
             Cmd::KickShare { token } => {
                 let gone: Vec<String> =
                     self.clients.iter().filter(|(_, c)| c.share_token.as_deref() == Some(token.as_str())).map(|(id, _)| id.clone()).collect();
@@ -660,6 +678,67 @@ impl Room {
                 let _ = c.out.try_send(msg(json!({ "t": "reject", "batch": batch, "error": errors.join("; ") })));
                 let _ = c.out.try_send(msg(json!({ "t": "ops", "from": "server", "batch": 0, "ops": corrections })));
             }
+        }
+    }
+
+    /// Brush strokes: live chunks are relayed to the others; finished strokes
+    /// get the next number, are stored and go to everyone (the painter's copy
+    /// is the acknowledgement).
+    fn paint_msg(&mut self, client_id: &str, m: Value) {
+        let Some(c) = self.clients.get(client_id) else { return };
+        if !c.role.can_edit() {
+            return;
+        }
+        let user_id = c.peer.user_id.clone();
+        let reject = |this: &mut Room, id: &Value, error: &str| {
+            if let Some(c) = this.clients.get(client_id) {
+                let _ = c.out.try_send(msg(json!({ "t": "paintReject", "id": id, "error": error })));
+            }
+        };
+        let is_paint_layer = |doc: &Document, id: &str| doc.get(id).is_some_and(|n| n.kind == flexma_doc::NodeType::Paint);
+        match m.get("t").and_then(Value::as_str) {
+            Some("strokeLive") => {
+                let ok = m.get("layer").and_then(Value::as_str).is_some_and(|l| is_paint_layer(&self.doc, l))
+                    && m.get("points").and_then(Value::as_array).is_some_and(|p| p.len() <= 4000);
+                if ok {
+                    let mut out = m;
+                    out["from"] = json!(client_id);
+                    self.broadcast(msg(out), Some(client_id));
+                }
+            }
+            Some("stroke") => {
+                let stroke = match m.get("stroke").cloned().map(serde_json::from_value::<flexma_doc::raster::Stroke>) {
+                    Some(Ok(s)) => s,
+                    _ => return reject(self, &json!(null), "malformed stroke"),
+                };
+                let id = json!(stroke.id);
+                if let Err(e) = stroke.validate() {
+                    return reject(self, &id, &e);
+                }
+                if !is_paint_layer(&self.doc, &stroke.layer) {
+                    return reject(self, &id, "that layer isn't a paint layer");
+                }
+                if self.stroke_authors.contains_key(&stroke.id) {
+                    return;
+                }
+                let stroke = flexma_doc::raster::Stroke { brush: stroke.brush.sanitized(), ..stroke };
+                self.paint_seq += 1;
+                let seq = self.paint_seq;
+                self.stroke_authors.insert(stroke.id.clone(), user_id.clone());
+                let out = json!({ "t": "stroke", "seq": seq, "stroke": stroke, "from": client_id, "user": user_id });
+                let _ = self.paint_writer.send(crate::paint::Write::Insert { file_id: self.file_id.clone(), seq, user_id, stroke: Box::new(stroke) });
+                self.broadcast(msg(out), None);
+            }
+            Some("strokeUndo") => {
+                let Some(id) = m.get("id").and_then(Value::as_str).map(str::to_string) else { return };
+                let undone = m.get("undone").and_then(Value::as_bool).unwrap_or(true);
+                if self.stroke_authors.get(&id) != Some(&user_id) {
+                    return reject(self, &json!(id), "only the painter can undo a stroke, during the session it was painted in");
+                }
+                let _ = self.paint_writer.send(crate::paint::Write::Undo { file_id: self.file_id.clone(), id: id.clone(), undone });
+                self.broadcast(msg(json!({ "t": "strokeUndo", "id": id, "undone": undone, "from": client_id })), None);
+            }
+            _ => {}
         }
     }
 

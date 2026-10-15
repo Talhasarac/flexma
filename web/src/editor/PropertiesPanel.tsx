@@ -34,6 +34,7 @@ import { useFontState, usePages, useSelection, useUi, type EditorStore } from '.
 import type { ConstraintType, Constraints, EffectValue, FillMethod, FillOrigin, ImageFilled, NineSlice, NodeData, Paint } from './types';
 import { FILL_ORIGINS } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
+import { BrushPanel } from './BrushPanel';
 
 type Props = { store: EditorStore };
 
@@ -64,6 +65,7 @@ export function PropertiesPanel({ store }: Props) {
   };
 
   if (ui.tool === 'frame' && !readOnly) return <FramePresets store={store} />;
+  if ((ui.tool === 'brush' || ui.tool === 'eraser') && !readOnly) return <BrushPanel store={store} />;
   if (!sel.length) return <PagePanel store={store} />;
 
   const types = new Set(sel.map((n) => n.type));
@@ -71,6 +73,9 @@ export function PropertiesPanel({ store }: Props) {
   const n0 = sel[0];
   const isFrame = only('FRAME');
   const isText = only('TEXT');
+  // Paint layers have pixels, not fills, strokes or effects.
+  const isPaint = only('PAINT');
+  const anyPaint = types.has('PAINT');
   const hasCorners = sel.every((n) => n.type === 'RECTANGLE' || n.type === 'FRAME');
   const inAutoLayout = sel.every((n) => n.parentLayout !== 'NONE' && !n.layoutAbsolute);
 
@@ -235,9 +240,21 @@ export function PropertiesPanel({ store }: Props) {
 
       {isText && <TextSection sel={sel} set={set} begin={begin} end={end} store={store} readOnly={readOnly} />}
 
-      <PaintsSection title="Fill" kind="fills" sel={sel} set={set} begin={begin} end={end} store={store} />
-      <PaintsSection title="Stroke" kind="strokes" sel={sel} set={set} begin={begin} end={end} store={store} />
-      <EffectsSection sel={sel} set={set} begin={begin} end={end} />
+      {isPaint && (
+        <Section title="Painting">
+          <label className="check" title="Paint only where the layer already has pixels">
+            <input type="checkbox" checked={common(sel, (n) => n.alphaLock) === true} onChange={(e) => set({ alphaLock: e.target.checked })} disabled={readOnly} />
+            Lock transparent pixels
+          </label>
+        </Section>
+      )}
+      {!anyPaint && (
+        <>
+          <PaintsSection title="Fill" kind="fills" sel={sel} set={set} begin={begin} end={end} store={store} />
+          <PaintsSection title="Stroke" kind="strokes" sel={sel} set={set} begin={begin} end={end} store={store} />
+          <EffectsSection sel={sel} set={set} begin={begin} end={end} />
+        </>
+      )}
       <ExportSection store={store} sel={sel} />
       {sel.length === 1 && <NotesSection node={n0} set={set} readOnly={readOnly} />}
       {sel.length === 1 && (n0.key || (n0.meta && Object.keys(n0.meta).length > 0)) && <MetaSection node={n0} />}
@@ -246,6 +263,7 @@ export function PropertiesPanel({ store }: Props) {
 }
 
 function typeLabel(t: NodeData['type']) {
+  if (t === 'PAINT') return 'Paint layer';
   return t.charAt(0) + t.slice(1).toLowerCase();
 }
 

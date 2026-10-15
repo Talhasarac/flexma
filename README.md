@@ -30,6 +30,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Workspace fonts: upload .ttf/.otf files or add any of the ~1,950 Google Fonts families (served by your own server, not Google). Everyone in the workspace, share-link viewers and exports get the same fonts, and missing fonts are flagged with one-click fixes.
 - Shared color and text styles: change one and every layer using it updates, for everyone.
 - Export to PNG and SVG.
+- Painting (opt-in per workspace): paint layers with a GPU brush and eraser, pen pressure, a stabilizer, presets and locked transparency. Several people can paint on the same layer at once and see each other's strokes as they're drawn.
 
 **Collaboration**
 - Real-time multiplayer with live cursors, selections and presence.
@@ -114,6 +115,7 @@ Design choices follow Figma's published architecture and the research in [`docs/
 - **Frames:** the canvas renders only when something changes. Pan and zoom only change a uniform.
 - **Bridge to React:** React reads JSON snapshots only when engine version counters change, through `useSyncExternalStore`. Pointer input goes straight to wasm.
 - **Network:** ops are coalesced per property and sent about every 33 ms. A drag is a single undo step.
+- **Painting:** a stroke is its points and brush, not pixels. Every client stamps the same brush dabs into 256 px GPU tiles, in the order the server gives strokes, so all copies match. Strokes stream live while they're painted. Tiles are saved now and then as PNG snapshots, which keep files fast to open and let the server draw paint in exports.
 
 ## Development
 

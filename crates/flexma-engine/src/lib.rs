@@ -6,6 +6,7 @@
 //! (only when version counters change), keeping React out of the hot path.
 
 pub mod backend;
+pub mod brush;
 pub mod camera;
 pub mod commands;
 pub mod editor;
@@ -14,6 +15,7 @@ pub mod gpu;
 pub mod history;
 pub mod keys;
 pub mod overlay;
+pub mod paint;
 pub mod render;
 pub mod scene;
 pub mod sync;
@@ -120,6 +122,10 @@ impl FlexmaEditor {
         if self.ed.hover.take().is_some() {
             self.ed.dirty = true;
         }
+        if self.ed.pointer_in {
+            self.ed.pointer_in = false;
+            self.ed.dirty = true;
+        }
     }
 
     pub fn double_click(&mut self, x: f64, y: f64) {
@@ -136,6 +142,7 @@ impl FlexmaEditor {
         match std::mem::replace(&mut self.ed.gesture, tools::Gesture::None) {
             tools::Gesture::None | tools::Gesture::Pan { .. } | tools::Gesture::Pending { .. } | tools::Gesture::Marquee { .. } => {}
             tools::Gesture::Pen { .. } => self.ed.finish_pen(),
+            tools::Gesture::Paint { .. } => self.ed.paint.cancel(),
             _ => self.ed.end(),
         }
         self.ed.guides.clear();
@@ -634,6 +641,105 @@ impl FlexmaEditor {
         self.ed.dirty = true;
     }
 
+    // ---------- painting ----------
+
+    /// Whether the workspace has painting turned on (keyboard shortcuts).
+    pub fn set_paint_tools(&mut self, on: bool) {
+        self.ed.paint_tools = on;
+    }
+
+    /// Pen pressure (0…1) of the next pointer events; 1 for mice.
+    pub fn set_pressure(&mut self, p: f64) {
+        self.ed.pressure = if p.is_finite() { p.clamp(0.0, 1.0) as f32 } else { 1.0 };
+    }
+
+    /// The brush (or the eraser) settings as JSON.
+    pub fn brush(&self, eraser: bool) -> String {
+        let b = if eraser { &self.ed.eraser } else { &self.ed.brush };
+        serde_json::to_string(b).unwrap_or_default()
+    }
+
+    /// Change brush (or eraser) settings: any subset of the brush JSON.
+    pub fn set_brush(&mut self, eraser: bool, json: &str) {
+        let target = if eraser { &mut self.ed.eraser } else { &mut self.ed.brush };
+        let mut v = serde_json::to_value(&*target).unwrap_or(Value::Null);
+        if let (Some(m), Ok(Value::Object(patch))) = (v.as_object_mut(), serde_json::from_str::<Value>(json)) {
+            for (k, val) in patch {
+                m.insert(k, val);
+            }
+        }
+        if let Ok(b) = serde_json::from_value::<flexma_doc::raster::Brush>(v) {
+            *target = flexma_doc::raster::Brush { erase: eraser, ..b.sanitized() };
+        }
+        self.ed.ui_version += 1;
+        self.ed.dirty = true;
+    }
+
+    /// A stroke is being painted.
+    pub fn painting(&self) -> bool {
+        self.ed.paint.painting()
+    }
+
+    /// Paint messages to send to the room, newline-separated (empty: none).
+    pub fn take_paint_messages(&mut self) -> String {
+        self.ed.paint.take_outgoing().join("\n")
+    }
+
+    /// A paint message from the room (`strokeLive`, `stroke`, `strokeUndo`,
+    /// `tile`, `paintReject`).
+    pub fn receive_paint(&mut self, json: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(json) else { return };
+        self.ed.paint.sync_layers(&self.ed.doc, self.ed.doc_version);
+        self.ed.paint.receive(&v, self.ed.now_ms);
+        self.ed.dirty = true;
+    }
+
+    /// The file's paint state (`GET /api/files/:id/paint`).
+    pub fn load_paint(&mut self, json: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(json) else { return };
+        self.ed.paint.sync_layers(&self.ed.doc, self.ed.doc_version);
+        self.ed.paint.load(&v);
+        self.ed.dirty = true;
+    }
+
+    /// URL prefix of paint tiles: `{base}/{layer}/{x}/{y}`.
+    pub fn set_paint_base(&mut self, base: &str) {
+        self.ed.paint.tile_base = base.trim_end_matches('/').to_string();
+    }
+
+    /// Someone left the file: drop their unfinished strokes.
+    pub fn paint_peer_left(&mut self, client_id: &str) {
+        self.ed.paint.peer_left(client_id);
+    }
+
+    /// Tile snapshots ready to upload: `[meta JSON, RGBA pixels, …]`, where
+    /// meta is `{layer, x, y, kind, seq}` and pixels are 256×256 straight RGBA.
+    pub fn take_paint_snapshots(&mut self) -> js_sys::Array {
+        let out = js_sys::Array::new();
+        for s in self.ed.paint.take_snapshots() {
+            let (meta, px) = paint::snapshot_js(&s);
+            out.push(&meta);
+            out.push(&px);
+        }
+        out
+    }
+
+    /// An upload failed; the tile may try again later.
+    pub fn paint_snapshot_failed(&mut self, layer: &str, x: i32, y: i32) {
+        self.ed.paint.snapshot_failed(layer, x, y);
+    }
+
+    /// Add a paint layer at the middle of the view (or in the selected frame).
+    pub fn new_paint_layer(&mut self) -> Option<String> {
+        let at = match self.ed.selection.as_slice() {
+            [id] if self.ed.doc.get(id).is_some_and(|n| matches!(n.kind, flexma_doc::NodeType::Frame | flexma_doc::NodeType::Component)) => {
+                self.ed.doc.world_bounds(id).center()
+            }
+            _ => self.ed.cam.to_world(Vec2::new(self.ed.css_w / 2.0, self.ed.css_h / 2.0)),
+        };
+        self.ed.create_paint_layer(at)
+    }
+
     // ---------- export ----------
 
     pub fn export_svg(&mut self, ids_json: &str) -> Option<String> {
@@ -653,7 +759,7 @@ impl FlexmaEditor {
         let resolve = move |id: &str| Some(format!("{base}{id}"));
         let renderer = self.ed.renderer.as_ref();
         let image_size = |id: &str| renderer.and_then(|r| r.image_size(id));
-        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &|_, _, _| None, linear: false };
+        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &|_, _, _| None, linear: false, paint_tiles: &|_| Vec::new() };
         let out = flexma_doc::svg::export(&self.ed.doc, &ids, &opts).map(|(s, _)| s);
         self.ed.text = text.into_inner();
         out

@@ -19,6 +19,7 @@ The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexm
   - `RECTANGLE`, `ELLIPSE`, `LINE`, `POLYGON`, `STAR`
   - `TEXT`
   - `VECTOR`: SVG path data.
+  - `PAINT`: a paint layer that people paint on with the brush (in workspaces that turn painting on). Its pixels live outside the document, so you can move, resize, hide or delete one, and screenshots and exports show it, but tools can't paint or read its pixels.
 - **Coordinates** are pixels, with y pointing down. `x`/`y` are relative to the parent node. Rotation is in degrees, clockwise, around the node's center.
 - **Auto layout** (`layout: "VERTICAL" | "HORIZONTAL"`) works like CSS flexbox. It positions children for you, so don't set `x`/`y` on children of auto-layout frames.
 - **Colors** are hex strings: `#RRGGBB` or `#RRGGBBAA`.

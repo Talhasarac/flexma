@@ -151,11 +151,14 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
     };
 
     // ---- pointer ----
+    // Pen pressure drives the brush; mice and fingers paint at full pressure.
+    const pressure = (e: PointerEvent) => (e.pointerType === 'pen' ? e.pressure : 1);
     const onPointerDown = (e: PointerEvent) => {
       if (e.button === 2) return;
       if (touchDown(e)) return;
       canvas.setPointerCapture(e.pointerId);
       const [x, y] = local(e);
+      engine.set_pressure(pressure(e));
       engine.pointer_down(x, y, e.button, e.shiftKey, e.altKey, meta(e));
       updateCursor();
       store.poll();
@@ -164,7 +167,18 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
     const onPointerMove = (e: PointerEvent) => {
       if (touchMove(e)) return;
       const [x, y] = local(e);
-      engine.pointer_move(x, y, e.shiftKey, e.altKey, meta(e));
+      if (engine.painting()) {
+        // Every sample the browser merged into this event, for smooth strokes.
+        const samples = e.getCoalescedEvents?.() ?? [];
+        for (const c of samples.length ? samples : [e]) {
+          const [cx, cy] = local(c);
+          engine.set_pressure(pressure(c));
+          engine.pointer_move(cx, cy, e.shiftKey, e.altKey, meta(e));
+        }
+      } else {
+        engine.set_pressure(pressure(e));
+        engine.pointer_move(x, y, e.shiftKey, e.altKey, meta(e));
+      }
       const w = engine.screen_to_world(x, y);
       store.setCursor([Math.round(w[0] * 10) / 10, Math.round(w[1] * 10) / 10]);
       updateCursor();
@@ -173,6 +187,8 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
       if (touchUp(e)) return;
       const [x, y] = local(e);
+      // A pen lifting reports 0; keep the last pressure for the stroke's end.
+      if (e.pointerType !== 'pen') engine.set_pressure(1);
       engine.pointer_up(x, y, e.shiftKey, e.altKey, meta(e));
       updateCursor();
       store.poll();

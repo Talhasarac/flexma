@@ -581,6 +581,54 @@
 .row-actions.wrap {
   flex-wrap: wrap;
 }
+/* Brush panel */
+.brush-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.brush-presets .chip {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.brush-presets .chip:hover {
+  background: var(--bg-muted);
+}
+.brush-presets .chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.brush-color {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.brush-color > .color-input {
+  flex: 1;
+  min-width: 0;
+}
+.paint-layer-name {
+  margin-bottom: 6px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.panel-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
 .check {
   display: inline-flex;
   align-items: center;

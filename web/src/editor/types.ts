@@ -13,9 +13,29 @@ export type NodeType =
   | 'POLYGON'
   | 'STAR'
   | 'COMPONENT'
-  | 'INSTANCE';
+  | 'INSTANCE'
+  | 'PAINT';
 
-export type Tool = 'select' | 'hand' | 'frame' | 'rectangle' | 'ellipse' | 'line' | 'text' | 'pen' | 'polygon' | 'star';
+export type Tool = 'select' | 'hand' | 'frame' | 'rectangle' | 'ellipse' | 'line' | 'text' | 'pen' | 'polygon' | 'star' | 'brush' | 'eraser';
+
+/** Brush or eraser settings (the engine's `raster::Brush`). */
+export interface BrushSettings {
+  /** Diameter in layer px at full pressure. */
+  size: number;
+  /** 0 soft … 1 hard edge. */
+  hardness: number;
+  /** Alpha of each dab; overlapping dabs build up. */
+  flow: number;
+  /** Distance between dabs as a fraction of the diameter. */
+  spacing: number;
+  /** Straight sRGB color and alpha, 0…1. */
+  color: [number, number, number, number];
+  erase: boolean;
+  pressureSize: boolean;
+  pressureFlow: boolean;
+  /** Stabilizer, 0…0.95. */
+  smoothing: number;
+}
 
 export interface LayerNode {
   id: string;
@@ -168,6 +188,8 @@ export interface NodeData {
   clipsContent: boolean;
   clipAlpha: boolean;
   hideFill: boolean;
+  /** Paint layers: brush strokes only touch pixels that are already painted. */
+  alphaLock: boolean;
   /** Stable id from an export (e.g. Unity), so re-uploads update in place. */
   key?: string | null;
   /** Free-form JSON from tools and agents. */

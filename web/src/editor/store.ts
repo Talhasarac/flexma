@@ -4,12 +4,14 @@
 import { useSyncExternalStore } from 'react';
 import type { FlexmaEditor } from '../engine';
 import { api, exportPngUrl, exportSvgUrl, shareUrls, type CommentThread, type ExportOptions, type PngExportOptions } from '../lib/api';
-import type { ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, StyleInfo, Tool } from './types';
+import type { BrushSettings, ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, StyleInfo, Tool } from './types';
 import { FontManager } from './fonts';
 
 type Listener = () => void;
 
 const SEND_INTERVAL_MS = 33; // ~30 batches per second (Figma's cadence)
+/** Brush and eraser settings are remembered per browser. */
+const BRUSH_KEY = (eraser: boolean) => (eraser ? 'flexma:eraser' : 'flexma:brush');
 const PRESENCE_INTERVAL_MS = 50;
 
 interface UiState {
@@ -36,6 +38,8 @@ export class EditorStore {
   readonly workspaceId: string | null;
   /** The signed-in user, whose other tabs are hidden from this one. */
   readonly userId: string | null;
+  /** The workspace has painting (brush, eraser) turned on. */
+  readonly paintTools: boolean;
   readonly fonts: FontManager;
   private listeners = new Set<Listener>();
   private socket: WebSocket | null = null;
@@ -83,11 +87,13 @@ export class EditorStore {
   saving = false;
   private notifyQueued = false;
   private flushTimer = 0;
+  /** Bumped on every (re)load, so a stale paint-state fetch is dropped. */
+  private paintGen = 0;
 
   constructor(
     engine: FlexmaEditor,
     fileId: string,
-    opts: { shareToken?: string | null; workspaceId?: string | null; userId?: string | null } = {},
+    opts: { shareToken?: string | null; workspaceId?: string | null; userId?: string | null; paintTools?: boolean } = {},
   ) {
     const shareToken = opts.shareToken ?? null;
     this.engine = engine;
@@ -95,9 +101,20 @@ export class EditorStore {
     this.shareToken = shareToken;
     this.workspaceId = opts.workspaceId ?? null;
     this.userId = opts.userId ?? null;
+    this.paintTools = opts.paintTools ?? false;
+    engine.set_paint_tools(this.paintTools);
+    for (const eraser of [false, true]) {
+      try {
+        const saved = localStorage.getItem(BRUSH_KEY(eraser));
+        if (saved) engine.set_brush(eraser, saved);
+      } catch {
+        // Storage may be unavailable; the defaults are fine.
+      }
+    }
     this.fonts = new FontManager(this);
     // Guests have no session cookie, so images load through the link instead.
     if (shareToken) engine.set_asset_base(shareUrls.assetBase(shareToken));
+    engine.set_paint_base(shareToken ? api.paint.shareTileBase(shareToken) : api.paint.tileBase(fileId));
   }
 
   // ---------------- URLs (work for members and link guests) ----------------
@@ -262,6 +279,7 @@ export class EditorStore {
         this.clientId = String(msg.clientId);
         this.role = String(msg.role);
         this.engine.load(JSON.stringify(msg.doc), this.clientId, this.role !== 'viewer');
+        void this.loadPaint();
         this.activeAt.clear();
         this.setPeers(((msg.peers as Peer[]) ?? []).filter((p) => p.clientId !== this.clientId));
         this.status = 'online';
@@ -291,7 +309,18 @@ export class EditorStore {
         this.setPeers(i >= 0 ? this.allPeers.map((p, j) => (j === i ? peer : p)) : [...this.allPeers, peer]);
         break;
       }
+      case 'strokeLive':
+      case 'stroke':
+      case 'strokeUndo':
+      case 'tile':
+        this.engine.receive_paint(raw);
+        break;
+      case 'paintReject':
+        this.engine.receive_paint(raw);
+        this.onReject?.(String(msg.error ?? 'Brush stroke rejected'));
+        break;
       case 'leave': {
+        this.engine.paint_peer_left(String(msg.clientId));
         this.activeAt.delete(String(msg.clientId));
         this.setPeers(this.allPeers.filter((p) => p.clientId !== msg.clientId));
         break;
@@ -351,7 +380,14 @@ export class EditorStore {
         ws.send(out);
         this.lastSend = now;
       }
+      // After the ops, so a new paint layer exists before its first stroke.
+      const paint = this.engine.take_paint_messages();
+      if (paint) {
+        for (const m of paint.split('\n')) ws.send(m);
+        this.lastSend = now;
+      }
     }
+    this.uploadPaintSnapshots();
     if (this.presenceDirty && (force || now - this.lastPresence >= PRESENCE_INTERVAL_MS)) {
       this.presenceDirty = false;
       this.lastPresence = now;
@@ -363,6 +399,50 @@ export class EditorStore {
           page: this.engine.current_page(),
         }),
       );
+    }
+  }
+
+  // ---------------- paint layers ----------------
+
+  brush(eraser: boolean): BrushSettings {
+    return JSON.parse(this.engine.brush(eraser)) as BrushSettings;
+  }
+
+  setBrush(eraser: boolean, patch: Partial<BrushSettings>) {
+    this.engine.set_brush(eraser, JSON.stringify(patch));
+    try {
+      localStorage.setItem(BRUSH_KEY(eraser), this.engine.brush(eraser));
+    } catch {
+      // Not remembered; nothing else depends on it.
+    }
+    this.poll();
+  }
+
+  /** Fetch the file's paint state (tile snapshots plus the strokes on top). */
+  private async loadPaint() {
+    const gen = ++this.paintGen;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const state = this.shareToken ? await api.paint.shareState(this.shareToken) : await api.paint.state(this.fileId);
+        if (gen === this.paintGen) this.engine.load_paint(JSON.stringify(state));
+        return;
+      } catch {
+        await new Promise((r) => window.setTimeout(r, 500 * 2 ** attempt));
+        if (gen !== this.paintGen || this.closed) return;
+      }
+    }
+  }
+
+  /** Upload the tile snapshots the engine read back (only the last painter does). */
+  private uploadPaintSnapshots() {
+    const snaps = this.engine.take_paint_snapshots();
+    for (let i = 0; i + 1 < snaps.length; i += 2) {
+      const meta = JSON.parse(snaps[i] as string) as { layer: string; x: number; y: number; kind: 'base' | 'view'; seq: number };
+      const pixels = snaps[i + 1] as Uint8Array;
+      if (this.shareToken || this.role === 'viewer') continue;
+      void tilePng(pixels)
+        .then((png) => api.paint.putTile(this.fileId, meta.layer, meta.x, meta.y, meta.kind, meta.seq, png))
+        .catch(() => this.engine.paint_snapshot_failed(meta.layer, meta.x, meta.y));
     }
   }
 
@@ -424,4 +504,19 @@ export function useStatus(s: EditorStore) {
 }
 export function useSaving(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getSaving);
+}
+
+/** Encode a 256×256 straight-alpha RGBA tile as PNG. */
+async function tilePng(pixels: Uint8Array): Promise<Blob> {
+  const size = 256;
+  const data = new ImageData(new Uint8ClampedArray(pixels), size, size);
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const c = new OffscreenCanvas(size, size);
+    c.getContext('2d')!.putImageData(data, 0, 0);
+    return c.convertToBlob({ type: 'image/png' });
+  }
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  c.getContext('2d')!.putImageData(data, 0, 0);
+  return new Promise((resolve, reject) => c.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encoding failed'))), 'image/png'));
 }

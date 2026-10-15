@@ -29,6 +29,19 @@ pub enum ImageSource<'a> {
 /// The two rows of a 2D affine transform: (a, c, e) and (b, d, f).
 pub type Rows = ([f32; 3], [f32; 3]);
 
+/// Floats per brush dab: x, y, radius, hardness (texel space), then the
+/// premultiplied color.
+pub const DAB_FLOATS: usize = 8;
+
+/// How brush dabs blend into a paint tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PaintMode {
+    Paint,
+    Erase,
+    /// Paint only where the tile already has alpha (lock transparency).
+    AlphaLock,
+}
+
 pub struct FrameParams {
     /// Drawing buffer size in device pixels.
     pub width: u32,
@@ -65,8 +78,9 @@ pub trait Backend {
     /// texture (alpha masks). Overlapping parts count once.
     fn clip(&mut self, parts: &[(u32, Option<TexId>)], push: bool);
     fn draw_mesh(&mut self, mesh: MeshId, m: Rows, color: [f32; 4]);
-    /// A textured quad covering `rect` (x, y, w, h) in local space.
-    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], alpha: f32);
+    /// A textured quad covering `rect` (x, y, w, h) in local space, showing
+    /// the texture region `uv` (x0, y0, x1, y1).
+    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], uv: [f32; 4], alpha: f32);
     /// The scene is done: resolve linear blending; overlays come next.
     fn end_scene(&mut self);
     /// World-space overlay instances (selection, handles, guides).
@@ -79,4 +93,19 @@ pub trait Backend {
     /// A flag the backend can raise to ask for another frame (e.g. after a
     /// frame failed on the GPU and should be redrawn).
     fn attach_wake(&mut self, _wake: Rc<Cell<bool>>) {}
+
+    // ---- paint tiles (outside frames) ----
+
+    /// A transparent `size`×`size` texture that brush dabs can be drawn into
+    /// and that can be read back.
+    fn create_paint_texture(&mut self, size: u32) -> Option<TexId>;
+    /// Replace a paint texture's pixels with an image (a tile snapshot).
+    fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool;
+    fn clear_paint_texture(&mut self, tex: TexId, size: u32);
+    /// Stamp dabs (`DAB_FLOATS` each, texel space) into a paint texture.
+    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode);
+    fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32);
+    /// Read a paint texture back: premultiplied RGBA rows, top first. `done`
+    /// may run later (WebGPU maps buffers asynchronously).
+    fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>);
 }

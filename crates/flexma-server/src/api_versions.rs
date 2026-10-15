@@ -75,6 +75,7 @@ pub async fn create(
 }
 
 pub async fn preview(State(st): State<AppState>, user: AuthUser, Path((id, vid)): Path<(String, String)>) -> AppResult<Response> {
+    let file_id = id.clone();
     let (doc, ws): (String, String) = st
         .db
         .call(move |c| {
@@ -86,7 +87,7 @@ pub async fn preview(State(st): State<AppState>, user: AuthUser, Path((id, vid))
             Ok((doc, ws))
         })
         .await?;
-    let png = crate::api_files::render_thumbnail(&st, &ws, doc).await?;
+    let png = crate::api_files::render_thumbnail(&st, &file_id, &ws, doc).await?;
     let mut res = crate::api_files::thumbnail_image(png);
     res.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=3600".parse().unwrap());
     Ok(res)

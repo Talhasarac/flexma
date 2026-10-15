@@ -31,7 +31,7 @@ pub fn page_background(doc: &Document, page: &str) -> Color {
 
 /// PNG of the first page for dashboard thumbnails and version previews.
 /// `None` when the page is empty.
-pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>) -> Option<Vec<u8>> {
+pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>, paint: &PaintSource) -> Option<Vec<u8>> {
     let page = doc.pages().first()?.clone();
     if doc.children(&page).is_empty() {
         return None;
@@ -43,9 +43,46 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>) -> Opt
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t, linear);
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &variant, linear };
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear).ok().map(|(png, _, _)| png)
+}
+
+/// Where a file's paint-layer tiles are (see `paint.rs`).
+pub struct PaintSource<'a> {
+    pub data_dir: &'a Path,
+    pub file_id: &'a str,
+    /// Link tiles through this share link instead of the member URL.
+    pub share_token: Option<&'a str>,
+}
+
+impl PaintSource<'_> {
+    /// A layer's tiles as data URIs (for rasterizing here) or URLs (for browsers).
+    fn tiles(&self, layer: &str, inline: bool) -> Vec<(i32, i32, String)> {
+        crate::paint::tile_files(self.data_dir, self.file_id, layer)
+            .into_iter()
+            .filter_map(|(x, y, path)| {
+                if inline {
+                    use base64::Engine;
+                    let bytes = std::fs::read(&path).ok()?;
+                    Some((x, y, format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))))
+                } else {
+                    let kind = if path.to_string_lossy().ends_with(".view.png") { "view" } else { "base" };
+                    let base = match self.share_token {
+                        Some(t) => format!("/api/share/{t}/paint"),
+                        None => format!("/api/files/{}/paint", self.file_id),
+                    };
+                    Some((x, y, format!("{base}/{}/{x}/{y}?kind={kind}", urlencode(layer))))
+                }
+            })
+            .collect()
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }
 
 pub enum AssetMode<'a> {
@@ -59,7 +96,8 @@ pub enum AssetMode<'a> {
 
 /// Export nodes (or a whole page) to SVG. With `fonts`, text breaks into
 /// lines by the real font metrics instead of estimates.
-pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>) -> Option<(String, Rect)> {
+pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>, paint: &PaintSource) -> Option<(String, Rect)> {
+    let inline = matches!(assets, AssetMode::Inline(_));
     // Linear blending only applies when the server rasterizes (inlined
     // images); browsers viewing an SVG blend in sRGB.
     let linear = matches!(assets, AssetMode::Inline(_)) && linear_for(doc, ids);
@@ -75,6 +113,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         measure_text: if measurer.is_some() { Some(&measure) } else { None },
         resolve_variant: &variant,
         linear,
+        paint_tiles: &|l| paint.tiles(l, inline),
     };
     export(doc, ids, &opts)
 }
@@ -983,7 +1022,8 @@ mod linear_blend_tests {
             doc.apply(&Op::Create { node: r }).unwrap();
             assert_eq!(linear_for(&doc, &["f:1".to_string()]), linear);
             let dir = std::env::temp_dir();
-            let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir), None).unwrap();
+            let paint = PaintSource { data_dir: &dir, file_id: "linear-test", share_token: None };
+            let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir), None, &paint).unwrap();
             let (png, _, _) = svg_to_png(&svg, 1.0, 100, base_fontdb(), linear).unwrap();
             let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
             let v = pm.pixel(10, 10).unwrap().red();
@@ -1087,5 +1127,48 @@ mod checker_tests {
         let px = |x: u32, y: u32| out.pixel(x, y).unwrap();
         assert_eq!((px(1, 1).red(), px(9, 1).red()), (196, 150), "alternating cells");
         assert_eq!((px(20, 1).red(), px(20, 1).green()), (255, 0), "content on top");
+    }
+}
+
+#[cfg(test)]
+mod paint_render_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType, Op};
+
+    /// Server renders show a paint layer's tile snapshots, clipped to the layer.
+    #[test]
+    fn paint_layers_render_their_tiles() {
+        let dir = std::env::temp_dir().join(format!("flexma-paint-render-{}", std::process::id()));
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height) = (300.0, 100.0);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut p = Node::new("p:1", NodeType::Paint);
+        p.parent = Some("f:1".into());
+        (p.x, p.width, p.height) = (20.0, 260.0, 60.0);
+        p.fills = vec![];
+        doc.apply(&Op::Create { node: p }).unwrap();
+        // Tile (0, 0) red, tile (1, 0) blue.
+        for (tx, rgb) in [(0, (255u8, 0u8, 0u8)), (1, (0, 0, 255))] {
+            let mut pm = resvg::tiny_skia::Pixmap::new(256, 256).unwrap();
+            pm.fill(resvg::tiny_skia::Color::from_rgba8(rgb.0, rgb.1, rgb.2, 255));
+            let path = crate::paint::tile_path(&dir, "f", "p:1", tx, 0, crate::paint::Kind::Base);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, pm.encode_png().unwrap()).unwrap();
+        }
+        let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
+        let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir), None, &paint).unwrap();
+        let (png, _, _) = svg_to_png(&svg, 1.0, 400, base_fontdb(), false).unwrap();
+        let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let px = |x, y| {
+            let c = pm.pixel(x, y).unwrap();
+            (c.red(), c.green(), c.blue())
+        };
+        assert_eq!(px(100, 30), (255, 0, 0), "tile 0 at layer x 80");
+        assert_eq!(px(278, 30), (0, 0, 255), "tile 1 starts at layer x 256 = frame x 276");
+        assert_eq!(px(290, 30), (255, 255, 255), "clipped at the layer's right edge (frame x 280)");
+        assert_eq!(px(100, 80), (255, 255, 255), "clipped at the layer's bottom (y 60)");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

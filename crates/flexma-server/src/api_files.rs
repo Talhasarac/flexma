@@ -18,8 +18,9 @@ use serde_json::{json, Value};
 /// SVGs we serve contain user text; forbid scripts and remote loads outright.
 const SVG_CSP: &str = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self' data:";
 
-const FILE_SELECT: &str = "SELECT f.id, f.name, f.project_id, p.name, p.workspace_id, m.role, f.created_at, f.updated_at, u.name
+const FILE_SELECT: &str = "SELECT f.id, f.name, f.project_id, p.name, p.workspace_id, m.role, f.created_at, f.updated_at, u.name, w.paint_tools
     FROM files f JOIN projects p ON p.id = f.project_id
+    JOIN workspaces w ON w.id = p.workspace_id
     JOIN workspace_members m ON m.workspace_id = p.workspace_id AND m.user_id = ?1
     LEFT JOIN users u ON u.id = f.created_by";
 
@@ -34,6 +35,7 @@ fn file_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "createdAt": ts(r.get(6)?),
         "updatedAt": ts(r.get(7)?),
         "createdBy": r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+        "paintTools": r.get::<_, i64>(9)? != 0,
     }))
 }
 
@@ -163,6 +165,7 @@ pub async fn delete_file(State(st): State<AppState>, user: AuthUser, Path(id): P
         })
         .await?;
     st.rooms.close(&id, Some("This file was deleted.".into()));
+    crate::paint::delete_file_tiles(&st.cfg.data_dir, &id);
     Ok(Json(json!({})))
 }
 
@@ -184,13 +187,17 @@ pub async fn duplicate_file(State(st): State<AppState>, user: AuthUser, Path(id)
         })
         .await?;
     let doc = current_doc_json(&st, &id).await?;
-    let v = st
+    let src = id.clone();
+    let (v, new_id) = st
         .db
         .call(move |c| {
             let new_id = insert_file(c, &project, &format!("{name} (copy)"), &user.id, Some(doc))?;
-            get_file_json(c, &user.id, &new_id)
+            crate::paint::copy_file_rows(c, &src, &new_id)?;
+            Ok((get_file_json(c, &user.id, &new_id)?, new_id))
         })
         .await?;
+    let data_dir = st.cfg.data_dir.clone();
+    let _ = tokio::task::spawn_blocking(move || crate::paint::copy_file_tiles(&data_dir, &id, &new_id)).await;
     Ok(Json(v))
 }
 
@@ -229,7 +236,7 @@ pub async fn thumbnail_response(st: &AppState, file_id: &str) -> AppResult<Respo
     }
     let fid = file_id.to_string();
     let doc: String = st.db.call(move |c| Ok(c.query_row("SELECT document FROM files WHERE id = ?1", params![fid], |r| r.get(0))?)).await?;
-    let png = render_thumbnail(st, &ws, doc).await?;
+    let png = render_thumbnail(st, file_id, &ws, doc).await?;
     let (fid, stored) = (file_id.to_string(), png.clone());
     st.db
         .call(move |c| {
@@ -243,11 +250,15 @@ pub async fn thumbnail_response(st: &AppState, file_id: &str) -> AppResult<Respo
 }
 
 /// Rasterize a stored document's first page (None when it's empty).
-pub async fn render_thumbnail(st: &AppState, workspace_id: &str, doc_json: String) -> AppResult<Option<Vec<u8>>> {
+pub async fn render_thumbnail(st: &AppState, file_id: &str, workspace_id: &str, doc_json: String) -> AppResult<Option<Vec<u8>>> {
     let fonts = crate::fonts::fontdb_for(st, workspace_id).await;
     let data_dir = st.cfg.data_dir.clone();
+    let fid = file_id.to_string();
     let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
-    tokio::task::spawn_blocking(move || render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, fonts)))
+    tokio::task::spawn_blocking(move || {
+        let paint = render::PaintSource { data_dir: &data_dir, file_id: &fid, share_token: None };
+        render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, fonts, &paint))
+    })
         .await
         .map_err(AppError::internal)
 }
@@ -316,6 +327,7 @@ pub async fn export_svg_response(st: &AppState, id: &str, q: ExportQuery, share_
     let fid = id.to_string();
     let ws = st.db.call(move |c| crate::fonts::file_workspace(c, &fid)).await?;
     let fonts = crate::fonts::fontdb_for(st, &ws).await;
+    let (data_dir, pfid) = (st.cfg.data_dir.clone(), id.to_string());
     let svg = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
@@ -323,7 +335,8 @@ pub async fn export_svg_response(st: &AppState, id: &str, q: ExportQuery, share_
                 Some(t) => render::AssetMode::Shared(t),
                 None => render::AssetMode::Url,
             };
-            render::export_svg(doc, &ids, if with_bg { bg } else { None }, mode, Some(&fonts))
+            let paint = render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: share_token.as_deref() };
+            render::export_svg(doc, &ids, if with_bg { bg } else { None }, mode, Some(&fonts), &paint)
                 .map(|(s, _)| s)
                 .ok_or_else(|| "nothing to export".to_string())
         })
@@ -357,11 +370,13 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
     let scale = q.scale.unwrap_or(2.0);
     let with_bg = q.background.unwrap_or(true);
     let measure_fonts = fonts.clone();
+    let pfid = id.to_string();
     let (svg, linear) = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
             let linear = render::linear_for(doc, &ids);
-            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir), Some(&measure_fonts))
+            let paint = render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: None };
+            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir), Some(&measure_fonts), &paint)
                 .map(|(s, _)| (s, linear))
                 .ok_or_else(|| "nothing to export".to_string())
         })
