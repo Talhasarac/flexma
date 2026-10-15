@@ -1,7 +1,7 @@
 //! The WebGL2 backend (the fallback when WebGPU isn't available), its helpers
 //! and the GLSL shader sources.
 
-use crate::backend::{Backend, DabStyle, FrameParams, ImageSource, MeshId, PaintMode, Rows, SmudgeDab, TexId, DAB_FLOATS, SMUDGE_BUF};
+use crate::backend::{Backend, DabBatch, DabStyle, FrameParams, ImageSource, MeshId, PaintMode, Rows, SmudgeDab, TexId, DAB_FLOATS, SMUDGE_BUF};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -146,6 +146,10 @@ pub struct GlBackend {
     /// buffer (created on first use).
     smudge_window: Option<(WebGlTexture, WebGlFramebuffer)>,
     smudge_scratch: Option<(WebGlTexture, WebGlFramebuffer)>,
+    /// Tile readbacks in flight: pixels copy into a buffer on the GPU and are
+    /// collected once its fence has passed, so reading never stalls a frame.
+    readbacks: Vec<Readback>,
+    paint_passes: u64,
     /// Framebuffers for paint tiles, by texture slot.
     paint_fbos: HashMap<u32, WebGlFramebuffer>,
     shape_vao: WebGlVertexArrayObject,
@@ -168,6 +172,13 @@ pub struct GlBackend {
     screen: [f32; 9],
     px: f32,
     draw_calls: u32,
+}
+
+struct Readback {
+    buf: WebGlBuffer,
+    sync: web_sys::WebGlSync,
+    bytes: usize,
+    done: Box<dyn FnOnce(Vec<u8>)>,
 }
 
 /// Reuse a freed slot in `v` or append.
@@ -263,6 +274,8 @@ impl GlBackend {
             stamp_u,
             smudge_window: None,
             smudge_scratch: None,
+            readbacks: Vec::new(),
+            paint_passes: 0,
             paint_fbos: HashMap::new(),
             shape_vao,
             mesh_vao,
@@ -726,27 +739,54 @@ impl Backend for GlBackend {
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
     }
 
-    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode, style: &DabStyle) {
-        if dabs.is_empty() {
+    fn paint_dabs(&mut self, batches: &[DabBatch]) {
+        if batches.iter().all(|b| b.dabs.is_empty()) {
             return;
         }
-        let Some(fbo) = self.paint_fbo(tex) else { return };
         let gl = self.gl.clone();
-        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
-        gl.viewport(0, 0, size as i32, size as i32);
-        gl.disable(GL::STENCIL_TEST);
-        match mode {
-            PaintMode::Paint => gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA),
-            PaintMode::Erase => gl.blend_func(GL::ZERO, GL::ONE_MINUS_SRC_ALPHA),
-            PaintMode::AlphaLock => gl.blend_func(GL::DST_ALPHA, GL::ONE_MINUS_SRC_ALPHA),
+        // One upload for every batch; each batch points its attributes at its part.
+        let mut inst: Vec<f32> = Vec::with_capacity(batches.iter().map(|b| b.dabs.len()).sum());
+        let mut first = Vec::with_capacity(batches.len());
+        for b in batches {
+            first.push(inst.len());
+            inst.extend_from_slice(b.dabs);
         }
-        gl.use_program(Some(&self.dab_prog));
-        self.bind_style(&self.dab_u, style);
-        gl.uniform1f(self.dab_u.get(10), size as f32);
         gl.bind_vertex_array(Some(&self.dab_vao));
         gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.dab_buf));
-        upload_growable(&gl, GL::ARRAY_BUFFER, dabs, &mut self.dab_cap, GL::DYNAMIC_DRAW);
-        gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, (dabs.len() / DAB_FLOATS) as i32);
+        upload_growable(&gl, GL::ARRAY_BUFFER, &inst, &mut self.dab_cap, GL::DYNAMIC_DRAW);
+        gl.disable(GL::STENCIL_TEST);
+        gl.use_program(Some(&self.dab_prog));
+        gl.uniform1f(self.dab_u.get(10), flexma_doc::raster::TILE as f32);
+        let size = flexma_doc::raster::TILE as i32;
+        let (mut tex, mut style, mut mode) = (None, None, None);
+        for (b, start) in batches.iter().zip(first) {
+            if b.dabs.is_empty() {
+                continue;
+            }
+            if tex != Some(b.tex) {
+                let Some(fbo) = self.paint_fbo(b.tex) else { continue };
+                gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
+                gl.viewport(0, 0, size, size);
+                tex = Some(b.tex);
+                self.paint_passes += 1;
+            }
+            if mode != Some(b.mode) {
+                match b.mode {
+                    PaintMode::Paint => gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA),
+                    PaintMode::Erase => gl.blend_func(GL::ZERO, GL::ONE_MINUS_SRC_ALPHA),
+                    PaintMode::AlphaLock => gl.blend_func(GL::DST_ALPHA, GL::ONE_MINUS_SRC_ALPHA),
+                }
+                mode = Some(b.mode);
+            }
+            if style != Some(b.style) {
+                self.bind_style(&self.dab_u, &b.style);
+                style = Some(b.style);
+            }
+            for i in 0..3u32 {
+                gl.vertex_attrib_pointer_with_i32(i, 4, GL::FLOAT, false, (DAB_FLOATS * 4) as i32, (start * 4) as i32 + (i * 16) as i32);
+            }
+            gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, (b.dabs.len() / DAB_FLOATS) as i32);
+        }
         gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA);
         gl.bind_vertex_array(None);
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
@@ -758,10 +798,7 @@ impl Backend for GlBackend {
             return;
         }
         const WIN: u32 = 1024;
-        if self.smudge_window.is_none() {
-            self.smudge_window = self.target_texture(WIN);
-            self.smudge_scratch = self.target_texture(SMUDGE_BUF);
-        }
+        self.prewarm_paint();
         let (Some((win_t, win_f)), Some((_, scr_f))) = (self.smudge_window.clone(), self.smudge_scratch.clone()) else { return };
         let gl = self.gl.clone();
         gl.disable(GL::STENCIL_TEST);
@@ -770,18 +807,35 @@ impl Backend for GlBackend {
         for d in dabs {
             let Some(buf_f) = self.paint_fbo(d.buffer) else { continue };
             let Some(win) = window_of(d.tiles, WIN) else { continue };
-            // 1. The tiles under the dab, side by side.
-            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&win_f));
-            gl.viewport(0, 0, WIN as i32, WIN as i32);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.clear(GL::COLOR_BUFFER_BIT);
+            // 1. Only the pixels under the dab (plus a texel for filtering)
+            // go into the window; unpainted tiles' parts are cleared.
+            let reach = smudge_reach(d);
+            let tile = flexma_doc::raster::TILE as f32;
+            let (bx0, by0) = ((d.dab[0] - reach - 2.0).floor(), (d.dab[1] - reach - 2.0).floor());
+            let (bx1, by1) = ((d.dab[0] + reach + 2.0).ceil(), (d.dab[1] + reach + 2.0).ceil());
             for t in d.tiles {
-                let Some(src) = t.tex.and_then(|x| self.paint_fbo(x)) else { continue };
-                let (x, y) = ((t.origin[0] - win[0]) as i32, (t.origin[1] - win[1]) as i32);
-                let n = flexma_doc::raster::TILE as i32;
-                gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&src));
-                gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&win_f));
-                gl.blit_framebuffer(0, 0, n, n, x, y, x + n, y + n, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+                let (x0, y0) = (bx0.max(t.origin[0]), by0.max(t.origin[1]));
+                let (x1, y1) = (bx1.min(t.origin[0] + tile), by1.min(t.origin[1] + tile));
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let (sx, sy, w, h) = ((x0 - t.origin[0]) as i32, (y0 - t.origin[1]) as i32, (x1 - x0) as i32, (y1 - y0) as i32);
+                let (dx, dy) = ((x0 - win[0]) as i32, (y0 - win[1]) as i32);
+                match t.tex.and_then(|x| self.paint_fbo(x)) {
+                    Some(src) => {
+                        gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&src));
+                        gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&win_f));
+                        gl.blit_framebuffer(sx, sy, sx + w, sy + h, dx, dy, dx + w, dy + h, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+                    }
+                    None => {
+                        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&win_f));
+                        gl.enable(GL::SCISSOR_TEST);
+                        gl.scissor(dx, dy, w, h);
+                        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                        gl.clear(GL::COLOR_BUFFER_BIT);
+                        gl.disable(GL::SCISSOR_TEST);
+                    }
+                }
             }
             // 2. Pick up: blend the paint under the dab into the carried paint.
             gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&scr_f));
@@ -811,9 +865,9 @@ impl Backend for GlBackend {
             gl.use_program(Some(&self.stamp_prog));
             let u = &self.stamp_u;
             self.bind_style(u, &d.style);
-            let reach = smudge_reach(d);
             for (dst, t) in targets {
                 gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&dst));
+                self.paint_passes += 1;
                 let n = flexma_doc::raster::TILE;
                 gl.viewport(0, 0, n as i32, n as i32);
                 gl.uniform4f(u.get(10), d.dab[0], d.dab[1], d.dab[2], d.dab[8]);
@@ -850,15 +904,55 @@ impl Backend for GlBackend {
     fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>) {
         let Some(fbo) = self.paint_fbo(tex) else { return };
         let gl = &self.gl;
+        let Some(buf) = gl.create_buffer() else { return };
+        let bytes = (size * size * 4) as usize;
+        gl.bind_buffer(GL::PIXEL_PACK_BUFFER, Some(&buf));
+        gl.buffer_data_with_i32(GL::PIXEL_PACK_BUFFER, bytes as i32, GL::STREAM_READ);
         gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&fbo));
-        let mut px = vec![0u8; (size * size * 4) as usize];
-        let ok = gl
-            .read_pixels_with_opt_u8_array(0, 0, size as i32, size as i32, GL::RGBA, GL::UNSIGNED_BYTE, Some(&mut px))
-            .is_ok();
+        // Into the pack buffer: returns at once, the copy happens on the GPU.
+        let _ = gl.read_pixels_with_i32(0, 0, size as i32, size as i32, GL::RGBA, GL::UNSIGNED_BYTE, 0);
         gl.bind_framebuffer(GL::FRAMEBUFFER, None);
-        if ok {
-            done(px);
+        gl.bind_buffer(GL::PIXEL_PACK_BUFFER, None);
+        let Some(sync) = gl.fence_sync(GL::SYNC_GPU_COMMANDS_COMPLETE, 0) else {
+            gl.delete_buffer(Some(&buf));
+            return;
+        };
+        gl.flush();
+        self.readbacks.push(Readback { buf, sync, bytes, done });
+    }
+
+    fn poll_readbacks(&mut self) -> bool {
+        let gl = self.gl.clone();
+        let pending = std::mem::take(&mut self.readbacks);
+        for r in pending {
+            let status = gl.client_wait_sync_with_u32(&r.sync, 0, 0);
+            if status == GL::TIMEOUT_EXPIRED {
+                self.readbacks.push(r);
+                continue;
+            }
+            gl.delete_sync(Some(&r.sync));
+            let mut px = vec![0u8; r.bytes];
+            gl.bind_buffer(GL::PIXEL_PACK_BUFFER, Some(&r.buf));
+            gl.get_buffer_sub_data_with_i32_and_u8_array(GL::PIXEL_PACK_BUFFER, 0, &mut px);
+            gl.bind_buffer(GL::PIXEL_PACK_BUFFER, None);
+            gl.delete_buffer(Some(&r.buf));
+            if status != GL::WAIT_FAILED {
+                (r.done)(px);
+            }
         }
+        !self.readbacks.is_empty()
+    }
+
+    fn prewarm_paint(&mut self) {
+        // The programs compile at startup; the smudge targets are made here.
+        if self.smudge_window.is_none() {
+            self.smudge_window = self.target_texture(1024);
+            self.smudge_scratch = self.target_texture(SMUDGE_BUF);
+        }
+    }
+
+    fn paint_counters(&self) -> [u64; 2] {
+        [self.paint_passes, 0]
     }
 }
 

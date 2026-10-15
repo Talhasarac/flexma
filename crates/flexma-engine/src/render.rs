@@ -122,6 +122,8 @@ pub struct Renderer {
     pub wants_more: bool,
     /// Draw calls issued by the last frame (diagnostics).
     pub draw_calls: u32,
+    /// Display list rebuilds so far (diagnostics: painting shouldn't cause any).
+    pub builds: u64,
 }
 
 fn premul(c: Color, alpha: f32) -> [f32; 4] {
@@ -359,12 +361,18 @@ impl Renderer {
             max_tex,
             wants_more: false,
             draw_calls: 0,
+            builds: 0,
         }
     }
 
     /// "webgpu" or "webgl2".
     pub fn backend_name(&self) -> &'static str {
         self.gpu.name()
+    }
+
+    /// Paint-tile GPU work so far: (render passes, queue submits).
+    pub fn paint_counters(&self) -> [u64; 2] {
+        self.gpu.paint_counters()
     }
 
     pub fn invalidate(&mut self) {
@@ -487,6 +495,7 @@ impl Renderer {
     // ---------------- display list ----------------
 
     pub fn build(&mut self, doc: &Document, scene: &Scene, hidden: &HashSet<NodeId>, version: u64) {
+        self.builds += 1;
         self.upload_loaded_images();
         let mut inst: Vec<f32> = Vec::with_capacity(scene.order.len() * INST_FLOATS * 2);
         let mut cmds: Vec<Cmd> = Vec::new();

@@ -38,6 +38,7 @@ features = [
   "WebGlTexture",
   "WebGlUniformLocation",
   "WebGlFramebuffer",
+  "WebGlSync",
   "WebGlRenderbuffer",
   "WebGlContextAttributes",
   "Performance",

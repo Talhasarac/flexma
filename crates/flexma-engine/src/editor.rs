@@ -96,10 +96,9 @@ impl Editor {
     pub fn new(renderer: Option<Renderer>, text: Option<TextEngine>) -> Editor {
         let doc = Document::new_empty();
         let page = doc.pages()[0].clone();
-        let mut paint = crate::paint::PaintState::new();
-        if let Some(r) = &renderer {
-            paint.wake = r.wake.clone();
-        }
+        // Paint has its own wake: its events need a redraw, never a rebuild of
+        // the whole document's display list.
+        let paint = crate::paint::PaintState::new();
         Editor {
             doc,
             scene: Scene { page, dirty: true, ..Default::default() },
@@ -731,7 +730,7 @@ impl Editor {
         self.process_measurements();
         let wake = self.renderer.as_ref().map(|r| r.wake.replace(false)).unwrap_or(false);
         let settled_text = !self.interacting() && self.now_ms - self.last_camera_change < 400.0;
-        let paint = std::mem::take(&mut self.paint.dirty) || self.paint.busy() || self.paint.due.replace(false);
+        let paint = std::mem::take(&mut self.paint.dirty) || self.paint.busy() || self.paint.due.replace(false) || self.paint.wake.replace(false);
         if !self.dirty && !wake && !settled_text && !paint {
             return false;
         }

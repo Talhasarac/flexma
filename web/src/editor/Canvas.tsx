@@ -197,10 +197,12 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
       if (touchMove(e)) return;
       const [x, y] = local(e);
       if (engine.painting()) {
-        // Every sample the browser merged into this event, for smooth strokes.
+        // Every sample the browser merged into this event, for smooth strokes
+        // (the canvas rect is read once, not per sample: it can force layout).
         const samples = e.getCoalescedEvents?.() ?? [];
+        const rect = canvas.getBoundingClientRect();
         for (const c of samples.length ? samples : [e]) {
-          const [cx, cy] = local(c);
+          const [cx, cy] = [c.clientX - rect.left, c.clientY - rect.top];
           setPen(c);
           engine.pointer_move(cx, cy, e.shiftKey, e.altKey, meta(e));
         }

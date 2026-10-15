@@ -77,7 +77,8 @@ export async function createEditor(canvas: HTMLCanvasElement, opts: CreateEditor
   if (preferredRenderer() === 'webgpu' && gpu) {
     let device: GpuDeviceLike | null = null;
     try {
-      const adapter = await gpu.requestAdapter();
+      // Ask for the faster GPU on machines with two; any GPU if that fails.
+      const adapter = (await gpu.requestAdapter({ powerPreference: 'high-performance' })) ?? (await gpu.requestAdapter());
       device = adapter ? await adapter.requestDevice() : null;
     } catch (err) {
       console.warn('WebGPU is unavailable, drawing with WebGL2 instead.', err);

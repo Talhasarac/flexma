@@ -60,6 +60,15 @@ pub struct DabStyle {
     pub origin: [f32; 2],
 }
 
+/// Dabs for one paint tile (`Backend::paint_dabs`).
+pub struct DabBatch<'a> {
+    pub tex: TexId,
+    /// `DAB_FLOATS` per dab, texel space.
+    pub dabs: &'a [f32],
+    pub mode: PaintMode,
+    pub style: DabStyle,
+}
+
 /// A layer tile under a smudge dab.
 #[derive(Clone, Copy, Debug)]
 pub struct SmudgeTile {
@@ -149,6 +158,10 @@ pub trait Backend {
     fn end_frame(&mut self);
     /// Draw calls issued by the last frame (diagnostics).
     fn draw_calls(&self) -> u32;
+    /// Paint-tile GPU work so far: (render passes, queue submits).
+    fn paint_counters(&self) -> [u64; 2] {
+        [0, 0]
+    }
     /// A flag the backend can raise to ask for another frame (e.g. after a
     /// frame failed on the GPU and should be redrawn).
     fn attach_wake(&mut self, _wake: Rc<Cell<bool>>) {}
@@ -161,14 +174,22 @@ pub trait Backend {
     /// Replace a paint texture's pixels with an image (a tile snapshot).
     fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool;
     fn clear_paint_texture(&mut self, tex: TexId, size: u32);
-    /// Stamp dabs (`DAB_FLOATS` each, texel space) into a paint texture.
-    fn paint_dabs(&mut self, tex: TexId, size: u32, dabs: &[f32], mode: PaintMode, style: &DabStyle);
+    /// Stamp batches of dabs into `TILE`-sized paint textures, in order (one
+    /// GPU submission for all of them).
+    fn paint_dabs(&mut self, batches: &[DabBatch]);
     /// Smudge dabs, in order (each one reads what the ones before it left).
     fn smudge(&mut self, dabs: &[SmudgeDab]);
     fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32);
     /// Read a paint texture back: premultiplied RGBA rows, top first. `done`
-    /// may run later (WebGPU maps buffers asynchronously).
+    /// runs later, without stalling the GPU (see `poll_readbacks`).
     fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>);
+    /// Finish readbacks the GPU is done with. True while some are pending.
+    fn poll_readbacks(&mut self) -> bool {
+        false
+    }
+    /// Get painting's GPU programs ready before the first stroke (they would
+    /// otherwise compile mid-stroke).
+    fn prewarm_paint(&mut self) {}
 }
 
 /// Mip levels for the grain and tint textures: where a texel is about a layer

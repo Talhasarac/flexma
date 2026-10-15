@@ -277,6 +277,9 @@ impl FlexmaEditor {
             "renderer": self.ed.renderer.as_ref().map(|r| r.backend_name()).unwrap_or("none"),
             "textMemoryMB": self.ed.renderer.as_ref().map(|r| r.text_memory() as f64 / 1048576.0).unwrap_or(0.0),
             "zoom": self.ed.cam.zoom,
+            "rebuilds": self.ed.renderer.as_ref().map(|r| r.builds).unwrap_or(0),
+            "paintPasses": self.ed.renderer.as_ref().map(|r| r.paint_counters()[0]).unwrap_or(0),
+            "paintSubmits": self.ed.renderer.as_ref().map(|r| r.paint_counters()[1]).unwrap_or(0),
         })
         .to_string()
     }

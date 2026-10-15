@@ -155,6 +155,10 @@ impl Editor {
         if let Gesture::Pen { .. } = self.gesture {
             self.finish_pen();
         }
+        if t.paints() {
+            // Get painting's GPU programs and brush images ready now.
+            self.paint.warm = true;
+        }
         if self.tool != t {
             self.tool = t;
             self.ui_version += 1;
