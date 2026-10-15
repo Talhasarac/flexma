@@ -31,14 +31,17 @@ pub struct Imported {
     pub notes: Vec<String>,
 }
 
+const IMAGES_SKIPPED: &str = "embedded images were skipped (upload them with upload_image)";
+
 pub fn import(svg: &str, opts: &ImportOptions) -> Result<Imported, String> {
     if svg.len() > MAX_SVG_BYTES {
         return Err(format!("the SVG is larger than {} MB", MAX_SVG_BYTES / 1024 / 1024));
     }
+    // Never read files named by `<image href>` (see `render::svg_options`).
     let uopt = usvg::Options {
         fontdb: opts.fonts.clone().unwrap_or_else(base_fontdb),
         font_family: "Inter".into(),
-        ..Default::default()
+        ..crate::render::svg_options()
     };
     let tree = usvg::Tree::from_str(svg, &uopt).map_err(|e| format!("couldn't read the SVG: {e}"))?;
     let size = tree.size();
@@ -58,6 +61,11 @@ pub fn import(svg: &str, opts: &ImportOptions) -> Result<Imported, String> {
     }
     let (w, h) = ((w0 * scale).max(0.01), (h0 * scale).max(0.01));
     let mut notes = ctx.notes;
+    // Said for any <image>, loaded or not, so the note never tells whether
+    // some path exists (paths aren't read at all).
+    if svg.contains("<image") {
+        notes.push(IMAGES_SKIPPED.into());
+    }
     notes.sort();
     notes.dedup();
 
@@ -124,7 +132,7 @@ impl Ctx {
                 usvg::Node::Group(g) => self.walk(g, opacity * g.opacity().get()),
                 usvg::Node::Path(p) => self.path(p, opacity),
                 usvg::Node::Text(t) => self.walk(t.flattened(), opacity),
-                usvg::Node::Image(_) => self.notes.push("embedded images were skipped (upload them with upload_image)".into()),
+                usvg::Node::Image(_) => self.notes.push(IMAGES_SKIPPED.into()),
             }
         }
     }
@@ -350,4 +358,30 @@ mod tests {
         assert_eq!(translate_d("M10 20 L30 40 Z", -10.0, -20.0), "M0 0 L20 20 Z");
         assert_eq!(translate_d("C1 2 3 4 5 6", 1.0, 1.0), "C2 3 4 5 6 7");
     }
+
+    /// An `<image href>` naming a path is never read from the server's disk:
+    /// with usvg's default resolver a real PNG here would load as an image.
+    #[test]
+    fn image_paths_are_not_read() {
+        let dir = std::env::temp_dir().join(format!("flexma-svg-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("secret.png");
+        let mut pm = resvg::tiny_skia::Pixmap::new(2, 2).unwrap();
+        pm.fill(resvg::tiny_skia::Color::BLACK);
+        std::fs::write(&png, pm.encode_png().unwrap()).unwrap();
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{}" width="10" height="10"/></svg>"#, png.display());
+        fn images(g: &usvg::Group) -> usize {
+            g.children().iter().map(|n| match n { usvg::Node::Image(_) => 1, usvg::Node::Group(g) => images(g), _ => 0 }).sum()
+        }
+        let has_image = |o: &usvg::Options| images(usvg::Tree::from_str(&svg, o).unwrap().root()) > 0;
+        assert!(has_image(&usvg::Options::default()), "usvg's default resolver reads the file (the fixture is valid)");
+        assert!(!has_image(&crate::render::svg_options()), "the file was loaded");
+        // The note is the same whether or not the path exists.
+        let missing = svg.replace("secret.png", "nope.png");
+        let a = import(&svg, &opts(true)).map(|i| i.notes).unwrap_or_default();
+        let b = import(&missing, &opts(true)).map(|i| i.notes).unwrap_or_default();
+        assert_eq!(a, b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

@@ -5,7 +5,7 @@
 
 use flexma_doc::svg::{export, SvgOptions};
 use flexma_doc::{Color, Document, ImageCrop, NodeId, Rect};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -31,19 +31,20 @@ pub fn page_background(doc: &Document, page: &str) -> Color {
 
 /// PNG of the first page for dashboard thumbnails and version previews.
 /// `None` when the page is empty.
-pub fn thumbnail_png(doc: &Document, data_dir: &Path, fonts: Arc<FontDb>, paint: &PaintSource) -> Option<Vec<u8>> {
+pub fn thumbnail_png(doc: &Document, data_dir: &Path, allowed: &HashSet<String>, fonts: Arc<FontDb>, paint: &PaintSource) -> Option<Vec<u8>> {
     let page = doc.pages().first()?.clone();
     if doc.children(&page).is_empty() {
         return None;
     }
     let bg = page_background(doc, &page);
-    let mode = AssetMode::Inline(data_dir);
+    let mode = AssetMode::Inline(data_dir, allowed);
     let linear = linear_for(doc, std::slice::from_ref(&page));
     let resolve = |id: &str| resolve_asset(&mode, id);
+    let size = |id: &str| if mode.allows(id) { image_size(id) } else { None };
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t, linear);
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear).ok().map(|(png, _, _)| png)
 }
@@ -90,18 +91,33 @@ pub enum AssetMode<'a> {
     Url,
     /// Reference assets through a public share link (`/api/share/{token}/assets/{id}`).
     Shared(&'a str),
-    /// Inline assets as data URIs (for rasterizing on the server).
-    Inline(&'a Path),
+    /// Inline assets as data URIs (for rasterizing on the server): only the
+    /// file's own workspace's images (`allowed`); any other id renders as
+    /// missing, so a document can't pull in another workspace's pixels.
+    Inline(&'a Path, &'a HashSet<String>),
+}
+
+impl AssetMode<'_> {
+    /// Whether this render may use asset `id`.
+    fn allows(&self, id: &str) -> bool {
+        id.chars().all(|c| c.is_ascii_alphanumeric())
+            && match self {
+                AssetMode::Inline(_, allowed) => allowed.contains(id),
+                // Browsers fetch these through routes that check access.
+                AssetMode::Url | AssetMode::Shared(_) => true,
+            }
+    }
 }
 
 /// Export nodes (or a whole page) to SVG. With `fonts`, text breaks into
 /// lines by the real font metrics instead of estimates.
 pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>, paint: &PaintSource) -> Option<(String, Rect)> {
-    let inline = matches!(assets, AssetMode::Inline(_));
+    let inline = matches!(assets, AssetMode::Inline(..));
     // Linear blending only applies when the server rasterizes (inlined
     // images); browsers viewing an SVG blend in sRGB.
-    let linear = matches!(assets, AssetMode::Inline(_)) && linear_for(doc, ids);
+    let linear = inline && linear_for(doc, ids);
     let resolve = |id: &str| resolve_asset(&assets, id);
+    let size = |id: &str| if assets.allows(id) { image_size(id) } else { None };
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&assets, id, c, t, linear);
     let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
     let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
@@ -109,7 +125,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         padding: 0.0,
         background,
         resolve_asset: &resolve,
-        image_size: &image_size,
+        image_size: &size,
         measure_text: if measurer.is_some() { Some(&measure) } else { None },
         resolve_variant: &variant,
         linear,
@@ -223,7 +239,11 @@ impl TextMeasurer {
 /// of viewports and filters: smoothing never reaches past a sprite, and
 /// resvg can't drop a tint on a large or sliced layer.
 fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: Option<Color>, linear: bool) -> Option<String> {
-    let AssetMode::Inline(_) = assets else { return None };
+    let AssetMode::Inline(..) = assets else { return None };
+    // Checked before the cache, which is shared by every workspace.
+    if !assets.allows(id) {
+        return None;
+    }
     let (fw, fh) = image_size(id)?;
     let (x, y, w, h) = match crop {
         Some(c) => (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0)),
@@ -240,7 +260,7 @@ fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: O
     let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}"><image href="{src}" width="{fw}" height="{fh}" image-rendering="optimizeSpeed"/></svg>"#
     );
-    let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok()?;
+    let tree = resvg::usvg::Tree::from_str(&svg, &svg_options()).ok()?;
     let mut pm = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
     resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
     if linear {
@@ -277,6 +297,19 @@ fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: O
     Some(uri)
 }
 
+/// usvg options for every SVG the server parses: an `<image href>` that names
+/// a path is ignored instead of read from the server's disk (usvg's default),
+/// so only images embedded as data URIs load.
+pub fn svg_options() -> resvg::usvg::Options<'static> {
+    resvg::usvg::Options {
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: resvg::usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..resvg::usvg::Options::default()
+    }
+}
+
 static ASSETS_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where uploaded images live, so exports can read their pixel size (9-slice
@@ -295,13 +328,13 @@ fn image_size(id: &str) -> Option<(f64, f64)> {
 }
 
 fn resolve_asset(assets: &AssetMode, id: &str) -> Option<String> {
-    if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if !assets.allows(id) {
         return None;
     }
     match assets {
         AssetMode::Url => Some(format!("/api/assets/{id}")),
         AssetMode::Shared(token) => Some(format!("/api/share/{token}/assets/{id}")),
-        AssetMode::Inline(dir) => {
+        AssetMode::Inline(dir, _) => {
             let bytes = std::fs::read(asset_path(dir, id)).ok()?;
             let mime = sniff_mime(&bytes).unwrap_or("image/png");
             use base64::Engine;
@@ -381,7 +414,7 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linea
 /// `svg_to_png`, optionally over a checkerboard (agent screenshots of
 /// transparent layers).
 pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, checker: bool) -> Result<(Vec<u8>, u32, u32), String> {
-    let mut opt = resvg::usvg::Options::default();
+    let mut opt = svg_options();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
@@ -411,7 +444,7 @@ pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, li
 pub fn contact_sheet(tiles: &[(String, String, bool, bool)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
     const PAD: f32 = 16.0;
     const LABEL: f32 = 22.0;
-    let mut opt = resvg::usvg::Options::default();
+    let mut opt = svg_options();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
     let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg, _, _)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
@@ -1023,7 +1056,7 @@ mod linear_blend_tests {
             assert_eq!(linear_for(&doc, &["f:1".to_string()]), linear);
             let dir = std::env::temp_dir();
             let paint = PaintSource { data_dir: &dir, file_id: "linear-test", share_token: None };
-            let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir), None, &paint).unwrap();
+            let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &HashSet::new()), None, &paint).unwrap();
             let (png, _, _) = svg_to_png(&svg, 1.0, 100, base_fontdb(), linear).unwrap();
             let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
             let v = pm.pixel(10, 10).unwrap().red();
@@ -1158,7 +1191,7 @@ mod paint_render_tests {
             std::fs::write(&path, pm.encode_png().unwrap()).unwrap();
         }
         let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
-        let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir), None, &paint).unwrap();
+        let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &HashSet::new()), None, &paint).unwrap();
         let (png, _, _) = svg_to_png(&svg, 1.0, 400, base_fontdb(), false).unwrap();
         let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
         let px = |x, y| {
@@ -1169,6 +1202,45 @@ mod paint_render_tests {
         assert_eq!(px(278, 30), (0, 0, 255), "tile 1 starts at layer x 256 = frame x 276");
         assert_eq!(px(290, 30), (255, 255, 255), "clipped at the layer's right edge (frame x 280)");
         assert_eq!(px(100, 80), (255, 255, 255), "clipped at the layer's bottom (y 60)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod asset_scope_tests {
+    use super::*;
+    use flexma_doc::{ImageFit, Node, NodeType, Op, Paint};
+
+    /// A server render inlines the file's own workspace's images and nothing
+    /// else, even when a document names another workspace's asset.
+    #[test]
+    fn renders_only_inline_the_workspaces_own_images() {
+        let dir = std::env::temp_dir().join(format!("flexma-asset-scope-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(4, 4).unwrap();
+        pm.fill(resvg::tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+        std::fs::write(dir.join("assets").join("ours123"), pm.encode_png().unwrap()).unwrap();
+        std::fs::write(dir.join("assets").join("theirs456"), pm.encode_png().unwrap()).unwrap();
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height) = (20.0, 10.0);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        for (i, asset) in ["ours123", "theirs456"].into_iter().enumerate() {
+            let mut r = Node::new(&format!("r:{i}"), NodeType::Rectangle);
+            r.parent = Some("f:1".into());
+            (r.x, r.width, r.height) = (i as f64 * 10.0, 10.0, 10.0);
+            r.fills = vec![Paint::Image { asset: asset.into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+            doc.apply(&Op::Create { node: r }).unwrap();
+        }
+        let allowed: HashSet<String> = ["ours123".to_string()].into_iter().collect();
+        let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
+        let render = |allowed: &HashSet<String>| export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, allowed), None, &paint).unwrap().0;
+        let images = |svg: &str| svg.matches("data:image/png;base64").count();
+        assert_eq!(images(&render(&allowed)), 1, "only our image is inlined");
+        let both: HashSet<String> = ["ours123".to_string(), "theirs456".to_string()].into_iter().collect();
+        assert_eq!(images(&render(&both)), 2, "the test document really references both");
+        assert_eq!(images(&render(&HashSet::new())), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

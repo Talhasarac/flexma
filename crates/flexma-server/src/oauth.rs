@@ -394,7 +394,10 @@ async fn issue(st: &AppState, user_id: String, client_id: String, replace_token:
         .call(move |c| {
             let tx = c.transaction()?;
             if let Some(old) = replace_token {
-                tx.execute("DELETE FROM api_tokens WHERE id = ?1", params![old])?;
+                // Gone means revoked: the grant ends here.
+                if tx.execute("DELETE FROM api_tokens WHERE id = ?1", params![old])? == 0 {
+                    return Ok(false);
+                }
             }
             let tid = new_id();
             tx.execute(
@@ -407,11 +410,13 @@ async fn issue(st: &AppState, user_id: String, client_id: String, replace_token:
                 params![rh, client_id, user_id, tid, now() + REFRESH_TTL],
             )?;
             tx.commit()?;
-            Ok(())
+            Ok(true)
         })
         .await;
-    if res.is_err() {
-        return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "could not issue token");
+    match res {
+        Ok(true) => {}
+        Ok(false) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the grant was revoked"),
+        Err(_) => return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "could not issue token"),
     }
     (
         [(header::CACHE_CONTROL, "no-store")],
@@ -472,23 +477,7 @@ pub async fn token(State(st): State<AppState>, Form(f): Form<TokenForm>) -> Resp
                 return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "refresh_token is required");
             };
             let hash = sha256_hex(&rt);
-            let row = st
-                .db
-                .call(move |c| {
-                    let row: Option<(String, String, Option<String>, i64)> = c
-                        .query_row(
-                            "SELECT client_id, user_id, api_token_id, expires_at FROM oauth_refresh_tokens WHERE token_hash = ?1",
-                            params![hash],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                        )
-                        .optional()?;
-                    // Rotate: refresh tokens are single-use.
-                    c.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?1", params![hash])?;
-                    Ok(row)
-                })
-                .await
-                .ok()
-                .flatten();
+            let row = st.db.call(move |c| take_refresh_token(c, &hash)).await.ok().flatten();
             let Some((client_id, user_id, old_token, expires)) = row else {
                 return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "refresh token is invalid");
             };
@@ -501,6 +490,29 @@ pub async fn token(State(st): State<AppState>, Form(f): Form<TokenForm>) -> Resp
     }
 }
 
+/// Use up a refresh token: (client, user, its access token, expiry), or
+/// None if it's unknown or its grant was revoked.
+fn take_refresh_token(c: &mut rusqlite::Connection, hash: &str) -> crate::error::AppResult<Option<(String, String, Option<String>, i64)>> {
+    let row: Option<(String, String, Option<String>, i64)> = c
+        .query_row(
+            "SELECT client_id, user_id, api_token_id, expires_at FROM oauth_refresh_tokens WHERE token_hash = ?1",
+            params![hash],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    // Rotate: refresh tokens are single-use.
+    c.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?1", params![hash])?;
+    // Its access token was deleted (revoked in Flexma): the grant is over.
+    // Expired access tokens are kept, so a normal refresh still finds it.
+    if let Some((_, _, Some(tid), _)) = &row {
+        let alive: Option<i64> = c.query_row("SELECT 1 FROM api_tokens WHERE id = ?1", params![tid], |r| r.get(0)).optional()?;
+        if alive.is_none() {
+            return Ok(None);
+        }
+    }
+    Ok(row)
+}
+
 #[derive(Deserialize)]
 pub struct RevokeForm {
     token: String,
@@ -508,13 +520,103 @@ pub struct RevokeForm {
 
 pub async fn revoke(State(st): State<AppState>, Form(f): Form<RevokeForm>) -> StatusCode {
     let hash = sha256_hex(&f.token);
-    let _ = st
-        .db
-        .call(move |c| {
-            c.execute("DELETE FROM api_tokens WHERE token_hash = ?1 AND oauth_client_id IS NOT NULL", params![hash])?;
-            c.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?1", params![hash])?;
+    let _ = st.db.call(move |c| revoke_grant(c, &hash)).await;
+    StatusCode::OK
+}
+
+/// Revoking either half of a grant (the access token or its refresh token)
+/// revokes both, so neither can bring the client back.
+fn revoke_grant(c: &mut rusqlite::Connection, hash: &str) -> crate::error::AppResult<()> {
+    let tx = c.transaction()?;
+    let access: Option<String> = tx
+        .query_row("SELECT id FROM api_tokens WHERE token_hash = ?1 AND oauth_client_id IS NOT NULL", params![hash], |r| r.get(0))
+        .optional()?;
+    let linked: Option<String> = tx
+        .query_row("SELECT api_token_id FROM oauth_refresh_tokens WHERE token_hash = ?1", params![hash], |r| r.get(0))
+        .optional()?
+        .flatten();
+    for id in access.iter().chain(linked.iter()) {
+        tx.execute("DELETE FROM oauth_refresh_tokens WHERE api_token_id = ?1", params![id])?;
+        tx.execute("DELETE FROM api_tokens WHERE id = ?1 AND oauth_client_id IS NOT NULL", params![id])?;
+    }
+    tx.execute("DELETE FROM oauth_refresh_tokens WHERE token_hash = ?1", params![hash])?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod revoke_tests {
+    use super::*;
+    use crate::db::Db;
+
+    /// A user with an OAuth grant: access token "at" and refresh token "rt".
+    async fn grant(name: &str) -> (Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("flexma-oauth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        db.call(|c| {
+            c.execute("INSERT INTO users (id, email, name, password_hash, color, created_at) VALUES ('u', 'u@x', 'U', '-', '#000', 0)", [])?;
+            c.execute(
+                "INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, created_at, expires_at, oauth_client_id) VALUES ('t1', 'u', 'Agent (OAuth)', 'fx', ?1, 0, 1, 'client')",
+                params![sha256_hex("at")],
+            )?;
+            c.execute(
+                "INSERT INTO oauth_refresh_tokens (token_hash, client_id, user_id, api_token_id, expires_at) VALUES (?1, 'client', 'u', 't1', ?2)",
+                params![sha256_hex("rt"), now() + REFRESH_TTL],
+            )?;
             Ok(())
         })
-        .await;
-    StatusCode::OK
+        .await
+        .unwrap();
+        (db, dir)
+    }
+
+    async fn left(db: &Db) -> (i64, i64) {
+        db.call(|c| {
+            let a: i64 = c.query_row("SELECT COUNT(*) FROM api_tokens", [], |r| r.get(0))?;
+            let r: i64 = c.query_row("SELECT COUNT(*) FROM oauth_refresh_tokens", [], |r| r.get(0))?;
+            Ok((a, r))
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn revoking_either_half_ends_the_grant() {
+        for (name, token) in [("access", "at"), ("refresh", "rt")] {
+            let (db, dir) = grant(name).await;
+            let h = sha256_hex(token);
+            db.call(move |c| revoke_grant(c, &h)).await.unwrap();
+            assert_eq!(left(&db).await, (0, 0), "revoking the {name} token");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_works_until_the_access_token_is_revoked() {
+        let (db, dir) = grant("refresh-ok").await;
+        let h = sha256_hex("rt");
+        let row = db.call(move |c| take_refresh_token(c, &h)).await.unwrap();
+        assert_eq!(row.map(|r| r.2), Some(Some("t1".to_string())), "an expired access token still refreshes");
+        let _ = std::fs::remove_dir_all(dir);
+
+        // Deleted from api_tokens only (as before the fix): the refresh is refused.
+        let (db, dir) = grant("refresh-revoked").await;
+        db.call(|c| Ok(c.execute("DELETE FROM api_tokens WHERE id = 't1'", [])?)).await.unwrap();
+        let h = sha256_hex("rt");
+        assert!(db.call(move |c| take_refresh_token(c, &h)).await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_token_in_flexma_drops_its_refresh_token() {
+        let (db, dir) = grant("delete").await;
+        // Someone else can't delete it.
+        assert_eq!(db.call(|c| crate::api_tokens::delete_token(c, "t1", "other")).await.unwrap(), 0);
+        assert_eq!(left(&db).await, (1, 1));
+        assert_eq!(db.call(|c| crate::api_tokens::delete_token(c, "t1", "u")).await.unwrap(), 1);
+        assert_eq!(left(&db).await, (0, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

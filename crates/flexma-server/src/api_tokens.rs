@@ -67,14 +67,21 @@ pub async fn create(State(st): State<AppState>, user: AuthUser, Json(req): Json<
 }
 
 pub async fn delete(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Json<Value>> {
-    let n = st
-        .db
-        .call(move |c| Ok(c.execute("DELETE FROM api_tokens WHERE id = ?1 AND user_id = ?2", params![id, user.id])?))
-        .await?;
+    let n = st.db.call(move |c| delete_token(c, &id, &user.id)).await?;
     if n == 0 {
         return Err(AppError::not_found("token"));
     }
     Ok(Json(json!({})))
+}
+
+/// Delete one of a user's tokens. Returns the rows deleted (0: not theirs).
+pub fn delete_token(c: &mut rusqlite::Connection, id: &str, user_id: &str) -> AppResult<usize> {
+    let tx = c.transaction()?;
+    // An OAuth client's refresh token would mint a new access token, so it goes too.
+    tx.execute("DELETE FROM oauth_refresh_tokens WHERE api_token_id = ?1 AND user_id = ?2", params![id, user_id])?;
+    let n = tx.execute("DELETE FROM api_tokens WHERE id = ?1 AND user_id = ?2", params![id, user_id])?;
+    tx.commit()?;
+    Ok(n)
 }
 
 pub fn setup_snippets(base: &str) -> Value {

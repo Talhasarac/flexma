@@ -308,15 +308,25 @@ pub async fn thumbnail_response(st: &AppState, file_id: &str) -> AppResult<Respo
     Ok(thumbnail_image(png))
 }
 
+/// The ids of a workspace's uploaded images: the only ones its files' server
+/// renders may inline.
+pub fn workspace_asset_ids(c: &rusqlite::Connection, workspace_id: &str) -> AppResult<std::collections::HashSet<String>> {
+    let mut stmt = c.prepare("SELECT id FROM assets WHERE workspace_id = ?1")?;
+    let ids = stmt.query_map(params![workspace_id], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+
 /// Rasterize a stored document's first page (None when it's empty).
 pub async fn render_thumbnail(st: &AppState, file_id: &str, workspace_id: &str, doc_json: String) -> AppResult<Option<Vec<u8>>> {
     let fonts = crate::fonts::fontdb_for(st, workspace_id).await;
+    let ws = workspace_id.to_string();
+    let allowed = st.db.call(move |c| workspace_asset_ids(c, &ws)).await?;
     let data_dir = st.cfg.data_dir.clone();
     let fid = file_id.to_string();
     let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
     tokio::task::spawn_blocking(move || {
         let paint = render::PaintSource { data_dir: &data_dir, file_id: &fid, share_token: None };
-        render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, fonts, &paint))
+        render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, &allowed, fonts, &paint))
     })
         .await
         .map_err(AppError::internal)
@@ -424,7 +434,14 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
     let room = st.rooms.get(id).await?;
     let data_dir = st.cfg.data_dir.clone();
     let fid = id.to_string();
-    let ws = st.db.call(move |c| crate::fonts::file_workspace(c, &fid)).await?;
+    let (ws, allowed) = st
+        .db
+        .call(move |c| {
+            let ws = crate::fonts::file_workspace(c, &fid)?;
+            let allowed = workspace_asset_ids(c, &ws)?;
+            Ok((ws, allowed))
+        })
+        .await?;
     let fonts = crate::fonts::fontdb_for(st, &ws).await;
     let scale = q.scale.unwrap_or(2.0);
     let with_bg = q.background.unwrap_or(true);
@@ -435,7 +452,7 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
             let linear = render::linear_for(doc, &ids);
             let paint = render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: None };
-            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir), Some(&measure_fonts), &paint)
+            render::export_svg(doc, &ids, if with_bg { bg } else { None }, render::AssetMode::Inline(&data_dir, &allowed), Some(&measure_fonts), &paint)
                 .map(|(s, _)| (s, linear))
                 .ok_or_else(|| "nothing to export".to_string())
         })
