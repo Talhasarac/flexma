@@ -17,7 +17,7 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 
 **The editor**
 - Infinite canvas: pages, frames, groups, rectangles, ellipses, lines, polygons, stars, pen-drawn vectors, text and images.
-- Smooth GPU rendering. The scene renderer is written in Rust, compiled to WebAssembly, and drawn with WebGL2.
+- Smooth GPU rendering. The scene renderer is written in Rust, compiled to WebAssembly, and drawn with WebGPU, falling back to WebGL2 in browsers without it.
 - Auto layout (flexbox-style frames) with hug, fill and fixed sizing, gap, padding and alignment.
 - Fills (solid, linear gradient, image), strokes, corner radii, drop shadows, opacity, rotation and flips.
 - Constraints, like Unity anchors: pin layers to edges, center them, stretch or scale them as their frame or instance resizes.
@@ -94,7 +94,7 @@ Agents edit through the same pipeline as people, so collaborators watch the chan
 │  React UI (panels, dashboard)  ◄─ versioned snapshots ─┐          │
 │                                                         │          │
 │  flexma-engine (Rust → wasm): document replica, scene, │          │
-│  hit testing, tools, undo, LWW sync, WebGL2 renderer ───┘          │
+│  hit testing, tools, undo, LWW sync, WebGPU renderer ───┘          │
 └───────────────▲──────────────────────────────────────▲────────────┘
                 │ WebSocket (ops, presence)            │ HTTP (REST)
 ┌───────────────┴──────────────────────────────────────┴────────────┐
@@ -135,7 +135,7 @@ cd web && npx tsc -b
 | Path | What |
 |---|---|
 | `crates/flexma-doc` | Document model, ops, layout, SVG export (shared by the server and the engine) |
-| `crates/flexma-engine` | wasm editor engine and WebGL2 renderer |
+| `crates/flexma-engine` | wasm editor engine and WebGPU renderer (WebGL2 fallback) |
 | `crates/flexma-server` | HTTP/WebSocket server, MCP, OAuth, SQLite |
 | `web/` | React app (dashboard and editor UI) |
 | `skills/flexma` | Agent skill for Claude Code and Codex |

@@ -7,7 +7,7 @@ import { useMenu } from '../components/Menu';
 import { FullScreenLoader, FullScreenMessage } from '../components/StatusScreens';
 import { useDocumentTitle } from '../lib/useDocumentTitle';
 import { useAuth } from '../lib/auth';
-import { FlexmaEditor, loadEngine } from '../engine';
+import { createEditor, loadEngine } from '../engine';
 import { EditorStore, useCommentMode, useSelection, useUi } from './store';
 import { CommentsPanel } from './CommentsLayer';
 import { Canvas } from './Canvas';
@@ -34,10 +34,20 @@ export default function EditorPage() {
     let created: EditorStore | null = null;
     setError(null);
     Promise.all([api.files.get(fileId), loadEngine()])
-      .then(([info]) => {
+      .then(async ([info]) => {
         if (cancelled) return;
         setFile(info);
-        const engine = new FlexmaEditor(canvas);
+        const engine = await createEditor(canvas, {
+          // Send pending edits before reloading onto WebGL2.
+          onGpuFailure: () => {
+            created?.close();
+            window.location.reload();
+          },
+        });
+        if (cancelled) {
+          engine.free();
+          return;
+        }
         created = new EditorStore(engine, fileId, { workspaceId: info.workspaceId, userId });
         created.onFatal = (m) => setFatal(m);
         created.connect(api.files.socketUrl(fileId));

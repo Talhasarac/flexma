@@ -1,7 +1,12 @@
-//! Thin WebGL2 helpers and the shader sources.
+//! The WebGL2 backend (the fallback when WebGPU isn't available), its helpers
+//! and the GLSL shader sources.
 
+use crate::backend::{Backend, FrameParams, ImageSource, MeshId, Rows, TexId};
 use wasm_bindgen::JsCast;
-use web_sys::{WebGl2RenderingContext as GL, WebGlProgram, WebGlShader, WebGlUniformLocation};
+use web_sys::{
+    WebGl2RenderingContext as GL, WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderbuffer, WebGlShader, WebGlTexture,
+    WebGlUniformLocation, WebGlVertexArrayObject,
+};
 
 pub fn compile(gl: &GL, kind: u32, src: &str) -> Result<WebGlShader, String> {
     let sh = gl.create_shader(kind).ok_or("create_shader failed")?;
@@ -92,6 +97,477 @@ pub fn context(canvas: &web_sys::HtmlCanvasElement) -> Result<GL, String> {
 
 /// Floats per shape instance (13 vec4 attributes).
 pub const INST_FLOATS: usize = 52;
+
+const STRIDE: i32 = (INST_FLOATS * 4) as i32;
+
+/// A multisampled sRGB color + depth/stencil target and the texture it
+/// resolves into. Blending into an sRGB attachment happens in linear light.
+struct LinearTarget {
+    w: i32,
+    h: i32,
+    msaa_fbo: WebGlFramebuffer,
+    msaa_color: WebGlRenderbuffer,
+    msaa_depth: WebGlRenderbuffer,
+    resolve_fbo: WebGlFramebuffer,
+    resolve_tex: WebGlTexture,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Prog {
+    None,
+    Shape,
+    Mesh,
+    Tex,
+    Label,
+}
+
+pub struct GlBackend {
+    gl: GL,
+    shape_prog: WebGlProgram,
+    shape_u: Uniforms,
+    mesh_prog: WebGlProgram,
+    mesh_u: Uniforms,
+    tex_prog: WebGlProgram,
+    tex_u: Uniforms,
+    composite_prog: WebGlProgram,
+    composite_u: Uniforms,
+    shape_vao: WebGlVertexArrayObject,
+    mesh_vao: WebGlVertexArrayObject,
+    empty_vao: WebGlVertexArrayObject,
+    inst_buf: WebGlBuffer,
+    inst_cap: usize,
+    overlay_buf: WebGlBuffer,
+    overlay_cap: usize,
+    white: WebGlTexture,
+    textures: Vec<Option<WebGlTexture>>,
+    meshes: Vec<Option<(WebGlBuffer, WebGlBuffer, i32)>>,
+    max_tex: u32,
+    linear_target: Option<LinearTarget>,
+    /// Shaders currently write linear light (into `linear_target`).
+    linear_out: bool,
+    depth: i32,
+    current: Prog,
+    view: [f32; 9],
+    screen: [f32; 9],
+    px: f32,
+    draw_calls: u32,
+}
+
+/// Reuse a freed slot in `v` or append.
+fn slot<T>(v: &mut Vec<Option<T>>, item: T) -> u32 {
+    match v.iter().position(Option::is_none) {
+        Some(i) => {
+            v[i] = Some(item);
+            i as u32
+        }
+        None => {
+            v.push(Some(item));
+            (v.len() - 1) as u32
+        }
+    }
+}
+
+impl GlBackend {
+    pub fn new(gl: GL) -> Result<GlBackend, String> {
+        let shape_prog = program(&gl, SHAPE_VS, SHAPE_FS)?;
+        let mesh_prog = program(&gl, MESH_VS, MESH_FS)?;
+        let tex_prog = program(&gl, TEX_VS, TEX_FS)?;
+        let composite_prog = program(&gl, COMPOSITE_VS, COMPOSITE_FS)?;
+        let shape_u = Uniforms::new(&gl, &shape_prog, &["u_view", "u_px", "u_tex", "u_linear"]);
+        let mesh_u = Uniforms::new(&gl, &mesh_prog, &["u_view", "u_m0", "u_m1", "u_color", "u_linear"]);
+        let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha", "u_linear"]);
+        let composite_u = Uniforms::new(&gl, &composite_prog, &["u_tex"]);
+        let shape_vao = gl.create_vertex_array().ok_or("vao")?;
+        let mesh_vao = gl.create_vertex_array().ok_or("vao")?;
+        let empty_vao = gl.create_vertex_array().ok_or("vao")?;
+        let inst_buf = gl.create_buffer().ok_or("buffer")?;
+        let overlay_buf = gl.create_buffer().ok_or("buffer")?;
+        gl.bind_vertex_array(Some(&shape_vao));
+        for i in 0..13 {
+            gl.enable_vertex_attrib_array(i);
+            gl.vertex_attrib_divisor(i, 1);
+        }
+        gl.bind_vertex_array(Some(&mesh_vao));
+        gl.enable_vertex_attrib_array(0);
+        gl.bind_vertex_array(None);
+
+        let white = gl.create_texture().ok_or("texture")?;
+        gl.bind_texture(GL::TEXTURE_2D, Some(&white));
+        let px = [255u8, 255, 255, 255];
+        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            GL::TEXTURE_2D,
+            0,
+            GL::RGBA as i32,
+            1,
+            1,
+            0,
+            GL::RGBA,
+            GL::UNSIGNED_BYTE,
+            Some(&px),
+        );
+        let max_tex = gl.get_parameter(GL::MAX_TEXTURE_SIZE).ok().and_then(|v| v.as_f64()).unwrap_or(4096.0).min(8192.0) as u32;
+        gl.enable(GL::BLEND);
+        gl.blend_func(GL::ONE, GL::ONE_MINUS_SRC_ALPHA);
+        gl.pixel_storei(GL::UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
+        Ok(GlBackend {
+            gl,
+            shape_prog,
+            shape_u,
+            mesh_prog,
+            mesh_u,
+            tex_prog,
+            tex_u,
+            composite_prog,
+            composite_u,
+            shape_vao,
+            mesh_vao,
+            empty_vao,
+            inst_buf,
+            inst_cap: 0,
+            overlay_buf,
+            overlay_cap: 0,
+            white,
+            textures: Vec::new(),
+            meshes: Vec::new(),
+            max_tex,
+            linear_target: None,
+            linear_out: false,
+            depth: 0,
+            current: Prog::None,
+            view: [0.0; 9],
+            screen: [0.0; 9],
+            px: 1.0,
+            draw_calls: 0,
+        })
+    }
+
+    fn tex(&self, t: Option<TexId>) -> &WebGlTexture {
+        t.and_then(|t| self.textures.get(t.0 as usize)).and_then(Option::as_ref).unwrap_or(&self.white)
+    }
+
+    fn bind_shape_attribs(&self, start: u32) {
+        let gl = &self.gl;
+        let base = start as i32 * STRIDE;
+        for i in 0..13u32 {
+            gl.vertex_attrib_pointer_with_i32(i, 4, GL::FLOAT, false, STRIDE, base + (i as i32) * 16);
+        }
+    }
+
+    fn use_shape(&mut self) {
+        if self.current == Prog::Shape {
+            return;
+        }
+        let gl = &self.gl;
+        gl.use_program(Some(&self.shape_prog));
+        gl.bind_vertex_array(Some(&self.shape_vao));
+        gl.uniform_matrix3fv_with_f32_array(self.shape_u.get(0), false, &self.view);
+        gl.uniform1f(self.shape_u.get(1), self.px);
+        gl.uniform1i(self.shape_u.get(2), 0);
+        gl.uniform1f(self.shape_u.get(3), if self.linear_out { 1.0 } else { 0.0 });
+        gl.active_texture(GL::TEXTURE0);
+        self.current = Prog::Shape;
+    }
+
+    /// Bind (creating or resizing) the linear-blending target.
+    fn bind_linear_target(&mut self, w: i32, h: i32) -> bool {
+        let gl = self.gl.clone();
+        if self.linear_target.as_ref().is_some_and(|t| t.w != w || t.h != h) {
+            if let Some(t) = self.linear_target.take() {
+                gl.delete_framebuffer(Some(&t.msaa_fbo));
+                gl.delete_renderbuffer(Some(&t.msaa_color));
+                gl.delete_renderbuffer(Some(&t.msaa_depth));
+                gl.delete_framebuffer(Some(&t.resolve_fbo));
+                gl.delete_texture(Some(&t.resolve_tex));
+            }
+        }
+        if self.linear_target.is_none() {
+            let samples = gl.get_parameter(GL::MAX_SAMPLES).ok().and_then(|v| v.as_f64()).unwrap_or(0.0).min(4.0) as i32;
+            let (Some(msaa_fbo), Some(msaa_color), Some(msaa_depth), Some(resolve_fbo), Some(resolve_tex)) =
+                (gl.create_framebuffer(), gl.create_renderbuffer(), gl.create_renderbuffer(), gl.create_framebuffer(), gl.create_texture())
+            else {
+                return false;
+            };
+            gl.bind_renderbuffer(GL::RENDERBUFFER, Some(&msaa_color));
+            gl.renderbuffer_storage_multisample(GL::RENDERBUFFER, samples, GL::SRGB8_ALPHA8, w, h);
+            gl.bind_renderbuffer(GL::RENDERBUFFER, Some(&msaa_depth));
+            gl.renderbuffer_storage_multisample(GL::RENDERBUFFER, samples, GL::DEPTH24_STENCIL8, w, h);
+            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&msaa_fbo));
+            gl.framebuffer_renderbuffer(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::RENDERBUFFER, Some(&msaa_color));
+            gl.framebuffer_renderbuffer(GL::FRAMEBUFFER, GL::DEPTH_STENCIL_ATTACHMENT, GL::RENDERBUFFER, Some(&msaa_depth));
+            let ok_msaa = gl.check_framebuffer_status(GL::FRAMEBUFFER) == GL::FRAMEBUFFER_COMPLETE;
+            gl.bind_texture(GL::TEXTURE_2D, Some(&resolve_tex));
+            gl.tex_storage_2d(GL::TEXTURE_2D, 1, GL::SRGB8_ALPHA8, w, h);
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::NEAREST as i32);
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MAG_FILTER, GL::NEAREST as i32);
+            gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&resolve_fbo));
+            gl.framebuffer_texture_2d(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::TEXTURE_2D, Some(&resolve_tex), 0);
+            let ok_resolve = gl.check_framebuffer_status(GL::FRAMEBUFFER) == GL::FRAMEBUFFER_COMPLETE;
+            gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+            let t = LinearTarget { w, h, msaa_fbo, msaa_color, msaa_depth, resolve_fbo, resolve_tex };
+            if !(ok_msaa && ok_resolve) {
+                gl.delete_framebuffer(Some(&t.msaa_fbo));
+                gl.delete_renderbuffer(Some(&t.msaa_color));
+                gl.delete_renderbuffer(Some(&t.msaa_depth));
+                gl.delete_framebuffer(Some(&t.resolve_fbo));
+                gl.delete_texture(Some(&t.resolve_tex));
+                return false;
+            }
+            self.linear_target = Some(t);
+        }
+        let t = self.linear_target.as_ref().unwrap();
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&t.msaa_fbo));
+        true
+    }
+
+    /// Resolve the linear target and encode it onto the canvas.
+    fn composite_linear_target(&mut self) {
+        let gl = self.gl.clone();
+        let Some(t) = self.linear_target.as_ref() else { return };
+        gl.bind_framebuffer(GL::READ_FRAMEBUFFER, Some(&t.msaa_fbo));
+        gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&t.resolve_fbo));
+        gl.blit_framebuffer(0, 0, t.w, t.h, 0, 0, t.w, t.h, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        gl.disable(GL::BLEND);
+        gl.use_program(Some(&self.composite_prog));
+        gl.bind_vertex_array(Some(&self.empty_vao));
+        gl.active_texture(GL::TEXTURE0);
+        gl.bind_texture(GL::TEXTURE_2D, Some(&t.resolve_tex));
+        gl.uniform1i(self.composite_u.get(0), 0);
+        gl.draw_arrays(GL::TRIANGLES, 0, 3);
+        gl.enable(GL::BLEND);
+        self.draw_calls += 1;
+        self.current = Prog::None;
+    }
+}
+
+impl Backend for GlBackend {
+    fn name(&self) -> &'static str {
+        "webgl2"
+    }
+
+    fn max_texture_size(&self) -> u32 {
+        self.max_tex
+    }
+
+    fn upload_texture(&mut self, reuse: Option<TexId>, src: ImageSource, _w: u32, _h: u32, mipmaps: bool) -> Option<TexId> {
+        let gl = &self.gl;
+        let existing = reuse.and_then(|t| self.textures.get(t.0 as usize).cloned().flatten());
+        let tex = match existing {
+            Some(t) => t,
+            None => gl.create_texture()?,
+        };
+        gl.bind_texture(GL::TEXTURE_2D, Some(&tex));
+        let ok = match src {
+            ImageSource::Image(img) => gl
+                .tex_image_2d_with_u32_and_u32_and_html_image_element(GL::TEXTURE_2D, 0, GL::RGBA as i32, GL::RGBA, GL::UNSIGNED_BYTE, img)
+                .is_ok(),
+            ImageSource::Canvas(c) => gl
+                .tex_image_2d_with_u32_and_u32_and_html_canvas_element(GL::TEXTURE_2D, 0, GL::RGBA as i32, GL::RGBA, GL::UNSIGNED_BYTE, c)
+                .is_ok(),
+        };
+        if mipmaps {
+            gl.generate_mipmap(GL::TEXTURE_2D);
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR_MIPMAP_LINEAR as i32);
+        } else {
+            gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR as i32);
+        }
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MAG_FILTER, GL::LINEAR as i32);
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_S, GL::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_T, GL::CLAMP_TO_EDGE as i32);
+        if !ok {
+            gl.delete_texture(Some(&tex));
+            if let Some(t) = reuse {
+                if let Some(s) = self.textures.get_mut(t.0 as usize) {
+                    *s = None;
+                }
+            }
+            return None;
+        }
+        match reuse.filter(|t| self.textures.get(t.0 as usize).is_some_and(Option::is_some)) {
+            Some(t) => Some(t),
+            None => Some(TexId(slot(&mut self.textures, tex))),
+        }
+    }
+
+    fn delete_texture(&mut self, t: TexId) {
+        if let Some(Some(tex)) = self.textures.get_mut(t.0 as usize).map(Option::take) {
+            self.gl.delete_texture(Some(&tex));
+        }
+    }
+
+    fn create_mesh(&mut self, vertices: &[f32], indices: &[u32]) -> Option<MeshId> {
+        if indices.is_empty() {
+            return None;
+        }
+        let gl = &self.gl;
+        let vb = gl.create_buffer()?;
+        let ib = gl.create_buffer()?;
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&vb));
+        buffer_f32(gl, GL::ARRAY_BUFFER, vertices, GL::STATIC_DRAW);
+        gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&ib));
+        unsafe {
+            let view = js_sys::Uint32Array::view(indices);
+            gl.buffer_data_with_array_buffer_view(GL::ELEMENT_ARRAY_BUFFER, &view, GL::STATIC_DRAW);
+        }
+        Some(MeshId(slot(&mut self.meshes, (vb, ib, indices.len() as i32))))
+    }
+
+    fn delete_mesh(&mut self, m: MeshId) {
+        if let Some(Some((vb, ib, _))) = self.meshes.get_mut(m.0 as usize).map(Option::take) {
+            self.gl.delete_buffer(Some(&vb));
+            self.gl.delete_buffer(Some(&ib));
+        }
+    }
+
+    fn set_scene_instances(&mut self, data: &[f32]) {
+        self.gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
+        upload_growable(&self.gl, GL::ARRAY_BUFFER, data, &mut self.inst_cap, GL::DYNAMIC_DRAW);
+    }
+
+    fn begin_frame(&mut self, p: &FrameParams) {
+        self.draw_calls = 0;
+        self.current = Prog::None;
+        self.depth = 0;
+        self.view = p.view;
+        self.screen = p.screen;
+        self.px = p.px;
+        let (pw, ph) = (p.width as i32, p.height as i32);
+        // Linear blending: draw the scene into an sRGB target (blends happen in
+        // linear light), then encode it onto the canvas before the overlays.
+        self.linear_out = p.linear && pw > 0 && ph > 0 && self.bind_linear_target(pw, ph);
+        let gl = &self.gl;
+        if !self.linear_out {
+            gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+        }
+        gl.viewport(0, 0, pw, ph);
+        // An sRGB target takes the clear color in linear light.
+        let bg = if self.linear_out { p.background.to_linear() } else { p.background };
+        gl.clear_color(bg.r, bg.g, bg.b, 1.0);
+        gl.clear_stencil(0);
+        gl.clear(GL::COLOR_BUFFER_BIT | GL::STENCIL_BUFFER_BIT);
+        gl.enable(GL::STENCIL_TEST);
+        gl.stencil_func(GL::EQUAL, 0, 0xff);
+        gl.stencil_op(GL::KEEP, GL::KEEP, GL::KEEP);
+    }
+
+    fn draw_shapes(&mut self, first: u32, count: u32, tex: Option<TexId>) {
+        self.use_shape();
+        let gl = &self.gl;
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
+        self.bind_shape_attribs(first);
+        gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(tex)));
+        gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, count as i32);
+        self.draw_calls += 1;
+    }
+
+    fn clip(&mut self, parts: &[(u32, Option<TexId>)], push: bool) {
+        self.use_shape();
+        let gl = self.gl.clone();
+        gl.color_mask(false, false, false, false);
+        gl.stencil_func(GL::EQUAL, self.depth, 0xff);
+        // Overlapping parts only count once: a pixel already changed fails EQUAL.
+        gl.stencil_op(GL::KEEP, GL::KEEP, if push { GL::INCR } else { GL::DECR });
+        for (inst, tex) in parts {
+            gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.inst_buf));
+            self.bind_shape_attribs(*inst);
+            gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(*tex)));
+            gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, 1);
+            self.draw_calls += 1;
+        }
+        self.depth = if push { self.depth + 1 } else { (self.depth - 1).max(0) };
+        gl.color_mask(true, true, true, true);
+        gl.stencil_op(GL::KEEP, GL::KEEP, GL::KEEP);
+        gl.stencil_func(GL::EQUAL, self.depth, 0xff);
+    }
+
+    fn draw_mesh(&mut self, mesh: MeshId, m: Rows, color: [f32; 4]) {
+        let Some(Some((vb, ib, count))) = self.meshes.get(mesh.0 as usize) else { return };
+        let gl = &self.gl;
+        if self.current != Prog::Mesh {
+            gl.use_program(Some(&self.mesh_prog));
+            gl.bind_vertex_array(Some(&self.mesh_vao));
+            gl.uniform_matrix3fv_with_f32_array(self.mesh_u.get(0), false, &self.view);
+            gl.uniform1f(self.mesh_u.get(4), if self.linear_out { 1.0 } else { 0.0 });
+            self.current = Prog::Mesh;
+        }
+        gl.uniform3f(self.mesh_u.get(1), m.0[0], m.0[1], m.0[2]);
+        gl.uniform3f(self.mesh_u.get(2), m.1[0], m.1[1], m.1[2]);
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(vb));
+        gl.vertex_attrib_pointer_with_i32(0, 2, GL::FLOAT, false, 8, 0);
+        gl.bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(ib));
+        gl.uniform4f(self.mesh_u.get(3), color[0], color[1], color[2], color[3]);
+        gl.draw_elements_with_i32(GL::TRIANGLES, *count, GL::UNSIGNED_INT, 0);
+        self.draw_calls += 1;
+    }
+
+    fn draw_texture(&mut self, tex: TexId, m: Rows, rect: [f32; 4], alpha: f32) {
+        let gl = &self.gl;
+        if self.current != Prog::Tex {
+            gl.use_program(Some(&self.tex_prog));
+            gl.bind_vertex_array(Some(&self.empty_vao));
+            gl.uniform_matrix3fv_with_f32_array(self.tex_u.get(0), false, &self.view);
+            gl.uniform1f(self.tex_u.get(6), if self.linear_out { 1.0 } else { 0.0 });
+            self.current = Prog::Tex;
+        }
+        gl.uniform3f(self.tex_u.get(1), m.0[0], m.0[1], m.0[2]);
+        gl.uniform3f(self.tex_u.get(2), m.1[0], m.1[1], m.1[2]);
+        gl.uniform4f(self.tex_u.get(3), rect[0], rect[1], rect[2], rect[3]);
+        gl.uniform1f(self.tex_u.get(5), alpha);
+        gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(Some(tex))));
+        gl.draw_arrays(GL::TRIANGLE_STRIP, 0, 4);
+        self.draw_calls += 1;
+    }
+
+    fn end_scene(&mut self) {
+        self.gl.disable(GL::STENCIL_TEST);
+        if self.linear_out {
+            self.composite_linear_target();
+            self.linear_out = false;
+        }
+        self.current = Prog::None;
+    }
+
+    fn draw_overlay(&mut self, data: &[f32]) {
+        if data.is_empty() {
+            return;
+        }
+        self.use_shape();
+        let gl = &self.gl;
+        gl.bind_buffer(GL::ARRAY_BUFFER, Some(&self.overlay_buf));
+        upload_growable(gl, GL::ARRAY_BUFFER, data, &mut self.overlay_cap, GL::DYNAMIC_DRAW);
+        self.bind_shape_attribs(0);
+        gl.bind_texture(GL::TEXTURE_2D, Some(&self.white));
+        gl.draw_arrays_instanced(GL::TRIANGLE_STRIP, 0, 4, (data.len() / INST_FLOATS) as i32);
+        self.draw_calls += 1;
+    }
+
+    fn draw_label(&mut self, tex: TexId, rect: [f32; 4]) {
+        let gl = &self.gl;
+        if self.current != Prog::Label {
+            gl.use_program(Some(&self.tex_prog));
+            gl.bind_vertex_array(Some(&self.empty_vao));
+            gl.uniform_matrix3fv_with_f32_array(self.tex_u.get(0), false, &self.screen);
+            gl.uniform3f(self.tex_u.get(1), 1.0, 0.0, 0.0);
+            gl.uniform3f(self.tex_u.get(2), 0.0, 1.0, 0.0);
+            gl.uniform1f(self.tex_u.get(5), 1.0);
+            gl.uniform1f(self.tex_u.get(6), 0.0);
+            self.current = Prog::Label;
+        }
+        gl.uniform4f(self.tex_u.get(3), rect[0], rect[1], rect[2], rect[3]);
+        gl.bind_texture(GL::TEXTURE_2D, Some(self.tex(Some(tex))));
+        gl.draw_arrays(GL::TRIANGLE_STRIP, 0, 4);
+        self.draw_calls += 1;
+    }
+
+    fn end_frame(&mut self) {
+        self.gl.bind_vertex_array(None);
+        self.current = Prog::None;
+    }
+
+    fn draw_calls(&self) -> u32 {
+        self.draw_calls
+    }
+}
 
 pub const SHAPE_VS: &str = r#"#version 300 es
 precision highp float;

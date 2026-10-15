@@ -7,7 +7,7 @@ Flexma is a self-hosted, Figma-like collaborative design tool. It has three Rust
 | Path | What it holds |
 |---|---|
 | `crates/flexma-doc` | The document model, shared by the server and the wasm engine. Change the node schema here only. The `define_node!` macro in `node.rs` is the single list of node properties; serialization, `set_prop` and `get_prop` derive from it. |
-| `crates/flexma-engine` | The wasm editor. `editor.rs` holds state and the local/remote op pipeline. Interaction is in `tools.rs`, commands in `commands.rs`, overlays in `overlay.rs`, WebGL2 in `render.rs` and `gl.rs`, and the JS API in `lib.rs`. |
+| `crates/flexma-engine` | The wasm editor. `editor.rs` holds state and the local/remote op pipeline. Interaction is in `tools.rs`, commands in `commands.rs`, overlays in `overlay.rs`, and the JS API in `lib.rs`. `render.rs` decides what to draw and hands it to a `backend.rs` backend: WebGPU in `gpu.rs` (WGSL in `shaders/`) or the WebGL2 fallback in `gl.rs`. Keep the two backends' shaders in step. |
 | `crates/flexma-server` | The axum server. `rooms.rs` has one actor per open document. `mcp.rs` is the MCP tools, `oauth.rs` is the OAuth 2.1 server for MCP clients, and the `api_*.rs` files are REST. |
 | `web/src/editor` | Editor UI. `store.ts` bridges engine and socket into React via version counters. |
 | `web/src/{pages,components,lib}` | Dashboard, auth and settings. |
@@ -36,3 +36,4 @@ cargo run -p flexma-server                   # http://localhost:8080 (serves web
 - Local edits go through `Editor::apply_local`, which records undo, queues the op for sync and re-runs layout. Remote ops go through `apply_remote`.
 - Agent (MCP) edits go through `RoomHandle::mutate`, the same pipeline as people, so they broadcast live.
 - The wasm-bindgen crate version is pinned (`=0.2.129`) and must match the CLI.
+- The editor draws with WebGPU when the browser has it and falls back to WebGL2 (`web/src/engine/index.ts`). `?renderer=webgl` or `?renderer=webgpu` forces one; after a WebGPU failure a browser remembers to use WebGL2 until `?renderer=webgpu`.

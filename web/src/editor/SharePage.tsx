@@ -11,7 +11,7 @@ import { MadeBy } from '../components/MadeBy';
 import { useMenu } from '../components/Menu';
 import { FullScreenLoader, FullScreenMessage } from '../components/StatusScreens';
 import { useDocumentTitle } from '../lib/useDocumentTitle';
-import { FlexmaEditor, loadEngine } from '../engine';
+import { createEditor, loadEngine } from '../engine';
 import { Editor } from './EditorPage';
 import { EditorStore, useStatus, useUi } from './store';
 import { Presence, ZoomButton } from './TopBar';
@@ -50,8 +50,12 @@ export default function SharePage() {
           }
         }
         if (cancelled) return;
+        const engine = await createEditor(canvas);
+        if (cancelled) {
+          engine.free();
+          return;
+        }
         setInfo(shared);
-        const engine = new FlexmaEditor(canvas);
         created = new EditorStore(engine, shared.fileId, { shareToken: token });
         created.onFatal = (m) => setFatal(m);
         created.connect(api.share.urls.socket(token));

@@ -1,14 +1,16 @@
 //! # flexma-engine
 //!
 //! The Flexma editor engine compiled to WebAssembly. It owns the document
-//! replica, the scene, interaction and a WebGL2 renderer. JavaScript forwards
+//! replica, the scene, interaction and a WebGPU/WebGL2 renderer. JavaScript forwards
 //! input events and network messages in, and reads small JSON snapshots out
 //! (only when version counters change), keeping React out of the hot path.
 
+pub mod backend;
 pub mod camera;
 pub mod commands;
 pub mod editor;
 pub mod gl;
+pub mod gpu;
 pub mod history;
 pub mod keys;
 pub mod overlay;
@@ -44,9 +46,27 @@ impl FlexmaEditor {
     pub fn new(canvas: HtmlCanvasElement) -> Result<FlexmaEditor, JsValue> {
         console_error_panic_hook::set_once();
         let gl = gl::context(&canvas).map_err(|e| JsValue::from_str(&e))?;
-        let renderer = render::Renderer::new(gl).map_err(|e| JsValue::from_str(&e))?;
+        let backend = gl::GlBackend::new(gl).map_err(|e| JsValue::from_str(&e))?;
+        let renderer = render::Renderer::new(Box::new(backend));
         let text = text::TextEngine::new()?;
         Ok(FlexmaEditor { ed: Editor::new(Some(renderer), Some(text)) })
+    }
+
+    /// An editor drawing with WebGPU. JavaScript requests the device and
+    /// configures the canvas's "webgpu" context (both async), then passes them in.
+    #[wasm_bindgen(js_name = withWebGpu)]
+    /// `on_error(message)` is called if frames keep failing on the GPU.
+    pub fn with_webgpu(device: JsValue, context: JsValue, format: String, on_error: js_sys::Function) -> Result<FlexmaEditor, JsValue> {
+        console_error_panic_hook::set_once();
+        let backend = gpu::GpuBackend::new(device, context, format, on_error).map_err(|e| JsValue::from_str(&e))?;
+        let renderer = render::Renderer::new(Box::new(backend));
+        let text = text::TextEngine::new()?;
+        Ok(FlexmaEditor { ed: Editor::new(Some(renderer), Some(text)) })
+    }
+
+    /// "webgpu" or "webgl2".
+    pub fn renderer(&self) -> String {
+        self.ed.renderer.as_ref().map(|r| r.backend_name()).unwrap_or("none").to_string()
     }
 
     /// Load (or reload after reconnect) the document snapshot from the server.
@@ -247,6 +267,7 @@ impl FlexmaEditor {
             "nodes": self.ed.doc.len(),
             "instances": self.ed.renderer.as_ref().map(|r| r.instance_count()).unwrap_or(0),
             "drawCalls": self.ed.renderer.as_ref().map(|r| r.draw_calls).unwrap_or(0),
+            "renderer": self.ed.renderer.as_ref().map(|r| r.backend_name()).unwrap_or("none"),
             "textMemoryMB": self.ed.renderer.as_ref().map(|r| r.text_memory() as f64 / 1048576.0).unwrap_or(0.0),
             "zoom": self.ed.cam.zoom,
         })
