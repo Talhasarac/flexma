@@ -1,11 +1,11 @@
-//! Short-lived upload links for agents. MCP tool calls can't carry file bytes
-//! (a font or photo would flood the agent's context), so `upload_font`,
-//! `upload_image` and `upload_nodes` hand out a link the agent posts files to
-//! with curl.
+//! Short-lived upload and download links for agents. MCP tool calls can't
+//! carry file bytes (a font or photo would flood the agent's context), so
+//! `upload_font`, `upload_image` and `upload_nodes` hand out a link the agent
+//! posts files to with curl, and `export_png` one it saves a PNG from.
 //!
-//! A link is tied to a workspace (and a file, for images) and to the person
-//! who authorized the agent. It accepts a set number of files within 15
-//! minutes and lives in memory only, so a restart cancels it.
+//! A link is tied to a workspace (and a file, for images and exports) and to
+//! the person who authorized the agent. It works a set number of times within
+//! 15 minutes and lives in memory only, so a restart cancels it.
 
 use crate::db::random_string;
 use crate::error::{AppError, AppResult};
@@ -26,6 +26,8 @@ pub enum Kind {
     /// A JSON node tree for `create_nodes`, created as the agent that asked
     /// (its API token name, so undo and presence match its other edits).
     Nodes { file_id: String, parent_id: Option<String>, index: Option<usize>, token_name: Option<String> },
+    /// A PNG export of a node or page (the REST export's options).
+    Png { file_id: String, node: Option<String>, page: Option<String>, scale: f32, background: bool },
 }
 
 impl Kind {
@@ -34,6 +36,7 @@ impl Kind {
             Kind::Font => "upload_font",
             Kind::Image { .. } => "upload_image",
             Kind::Nodes { .. } => "upload_nodes",
+            Kind::Png { .. } => "export_png",
         }
     }
 }
@@ -44,7 +47,7 @@ pub struct Grant {
     pub kind: Kind,
     pub workspace_id: String,
     pub user_id: String,
-    /// Uploads left on the link after this one.
+    /// Uses left on the link after this one.
     pub remaining: u32,
 }
 
@@ -61,7 +64,7 @@ fn links() -> &'static Mutex<HashMap<String, Link>> {
     LINKS.get_or_init(Default::default)
 }
 
-/// A new link for `files` uploads (clamped to 1..=MAX_FILES).
+/// A new link for `files` uploads or downloads (clamped to 1..=MAX_FILES).
 pub fn create(kind: Kind, workspace_id: &str, user_id: &str, files: u32) -> String {
     let token = random_string(TOKEN_LEN);
     let now = Instant::now();
@@ -80,10 +83,10 @@ pub fn create(kind: Kind, workspace_id: &str, user_id: &str, files: u32) -> Stri
     token
 }
 
-/// Use up one upload of a live link whose kind passes `expect`. Validate the
-/// file before calling this, so a broken file doesn't cost an upload.
+/// Use up one use of a live link whose kind passes `expect`. Validate an
+/// upload before calling this, so a broken file doesn't cost one.
 pub fn take(token: &str, expect: impl Fn(&Kind) -> bool, tool: &str) -> AppResult<Grant> {
-    let dead = || AppError::new(StatusCode::NOT_FOUND, format!("this upload link has expired or been used up; get a new one with {tool}"));
+    let dead = || AppError::new(StatusCode::NOT_FOUND, format!("this link has expired or been used up; get a new one with {tool}"));
     if token.len() != TOKEN_LEN || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(dead());
     }
@@ -120,6 +123,19 @@ mod tests {
         let last = take(&t, is_image, "upload_image").unwrap();
         assert_eq!((last.remaining, last.workspace_id.as_str()), (0, "ws"));
         assert!(take(&t, is_image, "upload_image").is_err());
+    }
+
+    #[test]
+    fn export_links_work_a_few_times_for_their_kind_only() {
+        let kind = Kind::Png { file_id: "f".into(), node: Some("1:2".into()), page: None, scale: 2.0, background: true };
+        let t = create(kind.clone(), "ws", "u", 3);
+        assert!(take(&t, |k| matches!(k, Kind::Image { .. }), "upload_image").is_err());
+        let is_png = |k: &Kind| matches!(k, Kind::Png { .. });
+        for left in [2, 1, 0] {
+            let g = take(&t, is_png, "export_png").unwrap();
+            assert_eq!((g.remaining, &g.kind), (left, &kind));
+        }
+        assert!(take(&t, is_png, "export_png").is_err());
     }
 
     #[test]

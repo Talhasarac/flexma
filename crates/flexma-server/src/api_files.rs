@@ -583,6 +583,22 @@ pub async fn upload_image_with_link(State(st): State<AppState>, Path(token): Pat
     Ok(Json(asset))
 }
 
+/// `GET /api/png-exports/{token}`: a PNG export, no sign-in (the link from
+/// MCP `export_png` is the credential).
+pub async fn export_png_with_link(State(st): State<AppState>, Path(token): Path<String>) -> AppResult<Response> {
+    let grant = crate::uploads::take(&token, |k| matches!(k, crate::uploads::Kind::Png { .. }), "export_png")?;
+    let crate::uploads::Kind::Png { file_id, node, page, scale, background } = grant.kind else {
+        return Err(AppError::internal("wrong link kind"));
+    };
+    // The person may have lost access since the link was made.
+    let (uid, fid) = (grant.user_id.clone(), file_id.clone());
+    st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer).map(|_| ())).await?;
+    let q = ExportQuery { node, page, scale: Some(scale), background: Some(background) };
+    let mut res = export_png_response(&st, &file_id, q, st.cfg.max_export_px).await?;
+    res.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+    Ok(res)
+}
+
 pub async fn get_asset(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Response> {
     let uid = user.id.clone();
     serve_asset(&st, &id, move |c, ws| require_workspace(c, &uid, ws, Role::Viewer).map(|_| ())).await

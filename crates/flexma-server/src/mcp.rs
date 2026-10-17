@@ -197,6 +197,18 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
+        tool("export_png", "Save nodes or a page as PNG files on the user's computer, at full resolution. Returns one curl command per image with a short-lived download link; run each to save the file. To look at a design yourself, use get_screenshot instead.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "node_id": { "type": "string" },
+                "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Up to 50 nodes, one PNG each" },
+                "page_id": { "type": "string", "description": "Export a whole page (default: the first page, when no node is given)" },
+                "scale": { "type": "number", "description": "Default 2 (1 = design pixels); the long side is capped by the server (8192px by default)" },
+                "background": { "type": "boolean", "description": "Page exports only: false leaves the page background transparent. Default true" }
+            },
+            "required": ["file_id"]
+        })),
         tool("export_svg", "Export a node or page as SVG markup.", json!({
             "type": "object",
             "properties": { "file_id": file_id, "node_id": { "type": "string" }, "page_id": { "type": "string" } },
@@ -561,6 +573,7 @@ impl Ctx {
             "create_page" => self.create_page(args).await,
             "get_screenshot" => self.get_screenshot(args).await,
             "export_svg" => self.export_svg(args).await,
+            "export_png" => self.export_png(args).await,
             "get_selection" => self.get_selection(args).await,
             "save_version" => self.save_version(args).await,
             "list_comments" => self.list_comments(args).await,
@@ -1569,6 +1582,67 @@ impl Ctx {
             text.push_str(&format!("\"{name}\" [{id}] at x={} y={} ({}×{} px)\n", r[0], r[1], r[2], r[3]));
         }
         Ok(json!({ "content": [{ "type": "image", "data": data, "mimeType": "image/png" }, { "type": "text", "text": text }] }))
+    }
+
+    async fn export_png(&self, args: &Value) -> ToolResult {
+        const MAX_NODES: usize = 50;
+        let fid = s(args, "file_id")?.to_string();
+        let page = opt_s(args, "page_id").map(str::to_string);
+        let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(2.0) as f32;
+        let background = args.get("background").and_then(Value::as_bool).unwrap_or(true);
+        let nodes = match args.get("node_ids").and_then(id_list) {
+            Some(ids) if ids.len() > MAX_NODES => return Err(format!("node_ids takes up to {MAX_NODES} nodes per call")),
+            Some(ids) => ids.into_iter().map(Some).collect(),
+            None => vec![opt_s(args, "node_id").map(str::to_string)],
+        };
+        let (uid, f2) = (self.user.id.clone(), fid.clone());
+        let ws = self.st.db.call(move |c| Ok(file_access(c, &uid, &f2, Role::Viewer)?.0)).await.map_err(err_msg)?;
+        let room = self.st.rooms.get(&fid).await.map_err(err_msg)?;
+        let (pfid, data_dir) = (fid.clone(), self.st.cfg.data_dir.clone());
+        let page2 = page.clone();
+        // Check every target now (a bad id fails here, not in curl) and
+        // measure it: (node, name, width, height).
+        let targets = room
+            .read(move |doc, _| {
+                let paint = render::PaintSource { data_dir: &data_dir, file_id: &pfid, share_token: None };
+                nodes
+                    .into_iter()
+                    .map(|node| {
+                        let (ids, _) = export_targets(doc, node.as_deref(), page2.as_deref())?;
+                        let name = doc.get(&ids[0]).map(|n| n.name.clone()).unwrap_or_default();
+                        let (_, b) = render::export_svg(doc, &ids, None, render::AssetMode::Url, None, &paint).ok_or_else(|| format!("nothing to export in '{}'", ids[0]))?;
+                        Ok((node, name, b.width as f32, b.height as f32))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .await
+            .map_err(err_msg)??;
+        let max = self.st.cfg.max_export_px;
+        let mut names: HashMap<String, usize> = HashMap::new();
+        let mut text = String::from("PNG download links, each good for 3 downloads over the next 15 minutes. Run these to save the files:\n\n");
+        let mut sizes = String::new();
+        for (node, name, w, h) in targets {
+            let (pw, ph, s) = render::png_size(w, h, scale, max);
+            // A file name from the layer name (shell-safe), numbered when repeated.
+            let base: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_')).collect();
+            let base = match base.trim() {
+                "" => "export".to_string(),
+                b => b.to_string(),
+            };
+            let n = names.entry(base.clone()).or_insert(0);
+            *n += 1;
+            let file = match *n {
+                1 => format!("{base}@{}x.png", fmt_num(scale as f64)),
+                k => format!("{base} {k}@{}x.png", fmt_num(scale as f64)),
+            };
+            let kind = crate::uploads::Kind::Png { file_id: fid.clone(), node, page: page.clone(), scale, background };
+            let token = crate::uploads::create(kind, &ws, &self.user.id, 3);
+            text.push_str(&format!("curl -sSf -o \"{file}\" {}/api/png-exports/{token}\n", self.base));
+            let shrunk = if s < scale.clamp(0.01, 8.0) { format!(" (shrunk to fit {max}px)") } else { String::new() };
+            sizes.push_str(&format!("{file}: {pw}×{ph} px{shrunk}\n"));
+        }
+        text.push_str(&format!("\n{sizes}\nDon't share these links."));
+        Ok(text_result(text))
     }
 
     async fn export_svg(&self, args: &Value) -> ToolResult {
@@ -2834,6 +2908,7 @@ mod arg_tests {
     fn unknown_arguments_are_reported() {
         assert_eq!(unknown_args("get_screenshot", &json!({ "file_id": "f", "node_ids": [], "zoom": 2 })), vec!["zoom".to_string()]);
         assert!(unknown_args("get_screenshot", &json!({ "file_id": "f", "scale": 2 })).is_empty());
+        assert!(unknown_args("export_png", &json!({ "file_id": "f", "node_ids": ["a"], "scale": 3, "background": false, "page_id": "p" })).is_empty());
         assert!(unknown_args("no_such_tool", &json!({ "x": 1 })).is_empty());
     }
 }

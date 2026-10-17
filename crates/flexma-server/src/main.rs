@@ -192,6 +192,7 @@ async fn main() {
         .route("/font-uploads/{token}", post(api_fonts::upload_with_link))
         .route("/image-uploads/{token}", post(api_files::upload_image_with_link))
         .route("/node-uploads/{token}", post(mcp::upload_nodes_with_link))
+        .route("/png-exports/{token}", get(api_files::export_png_with_link))
         .route("/fonts/{id}", get(api_fonts::file))
         .route("/google-fonts", get(api_fonts::google_catalogue))
         .route("/google-fonts/preview", get(api_fonts::google_preview))

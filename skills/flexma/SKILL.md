@@ -159,6 +159,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `delete_nodes` | Delete nodes and their children |
 | `get_screenshot` | Render a node or page to PNG so you can see it. `node_ids` (up to 24) puts several frames side by side in one labelled image. Layers without an opaque fill show transparency as a grey checkerboard |
 | `export_svg` | Get SVG markup, e.g. for icons or handoff |
+| `export_png` | Save nodes or a page as PNG files (`scale` default 2, `node_ids` for several): returns one `curl` command per image with a 15-minute download link; run them to save the files. Use this when the user wants image files, `get_screenshot` when you only need to look |
 
 See `references/node-spec.md` for every property and shorthand, and `references/recipes.md` for ready-made patterns: screens, buttons, inputs, cards, nav bars, pricing tables, and design-to-code mapping.
 

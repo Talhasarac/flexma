@@ -513,6 +513,17 @@ pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linea
 /// group), so a strip is short enough for such a layer to stay this size.
 const LAYER_PIXELS: u32 = 4 << 20;
 
+/// Pixel size (and the scale used) of a `width` × `height` render at `scale`,
+/// shrunk so the longest side is at most `max_dim`.
+pub fn png_size(width: f32, height: f32, scale: f32, max_dim: u32) -> (u32, u32, f32) {
+    let mut s = scale.clamp(0.01, 8.0);
+    let longest = width.max(height) * s;
+    if longest > max_dim as f32 {
+        s *= max_dim as f32 / longest;
+    }
+    (((width * s).ceil() as u32).max(1), ((height * s).ceil() as u32).max(1), s)
+}
+
 /// Rows per strip for an image `w` × `h` (all of it when it's small).
 fn strip_rows(w: u32, h: u32) -> u32 {
     if w.saturating_mul(h) <= LAYER_PIXELS {
@@ -529,14 +540,7 @@ pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, li
     opt.font_family = "Inter".into();
     opt.image_href_resolver.resolve_string = image_resolver(images);
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
-    let size = tree.size();
-    let mut s = scale.clamp(0.01, 8.0);
-    let longest = size.width().max(size.height()) * s;
-    if longest > max_dim as f32 {
-        s *= max_dim as f32 / longest;
-    }
-    let w = ((size.width() * s).ceil() as u32).max(1);
-    let h = ((size.height() * s).ceil() as u32).max(1);
+    let (w, h, s) = png_size(tree.size().width(), tree.size().height(), scale, max_dim);
     let strip = strip_rows(w, h);
     let mut png = Vec::new();
     {

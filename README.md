@@ -81,7 +81,7 @@ The MCP tools are:
 | Browse | `list_workspaces`, `list_files`, `create_project`, `create_file`, `create_page` |
 | Read | `get_file_tree`, `get_nodes`, `find_nodes`, `get_selection` |
 | Edit | `create_nodes`, `update_nodes`, `move_nodes`, `duplicate_nodes`, `delete_nodes` |
-| Look | `get_screenshot`, `export_svg` |
+| Look | `get_screenshot`, `export_svg`, `export_png` (saves PNG files through `curl` download links) |
 | Design system | `list_components`, `create_component`, `detach_instance` (plus `{type:"instance"}` in `create_nodes`) |
 | Feedback | `list_comments`, `add_comment`, `resolve_comment` |
 | Safety | `save_version` (checkpoint before big edits; people restore from Version history) |
