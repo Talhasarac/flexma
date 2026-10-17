@@ -35,6 +35,7 @@ import type { ConstraintType, Constraints, EffectValue, FillMethod, FillOrigin, 
 import { FILL_ORIGINS } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
 import { BrushPanel } from './BrushPanel';
+import { download, exportPngs, safeName } from './download';
 
 type Props = { store: EditorStore };
 
@@ -1080,32 +1081,27 @@ function EffectsSection({ sel, set, begin, end }: SectionProps) {
   );
 }
 
-function download(name: string, blob: Blob) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function safeName(s: string) {
-  return s.replace(/[^\w\- ]+/g, '').trim() || 'export';
-}
-
 function ExportSection({ store, sel }: { store: EditorStore; sel: NodeData[] }) {
   const toast = useToast();
+  const [exporting, setExporting] = useState(false);
   const one = sel.length === 1 ? sel[0] : null;
+  // The server renders each selected layer to its own PNG.
+  const exportPng = async (scale: number) => {
+    setExporting(true);
+    await exportPngs(
+      toast,
+      sel.map((n) => ({ url: store.exportPngUrl({ node: n.id, scale }), name: `${safeName(n.name)}@${scale}x.png` })),
+    );
+    setExporting(false);
+  };
   return (
     <Section title="Export">
       {/* Exporting is allowed in read-only mode too. */}
       <div className="row-actions wrap readonly-ok">
         {[1, 2, 3].map((s) => (
-          <a key={s} className="btn btn-xs" href={one ? store.exportPngUrl({ node: one.id, scale: s }) : undefined} download={one ? `${safeName(one.name)}@${s}x.png` : undefined} aria-disabled={!one}>
+          <button key={s} type="button" className="btn btn-xs" disabled={exporting || sel.length === 0} onClick={() => void exportPng(s)}>
             PNG {s}x
-          </a>
+          </button>
         ))}
         <button
           type="button"

@@ -1477,6 +1477,7 @@ impl Ctx {
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
         let pfid = fid.clone();
+        let images = (data_dir.clone(), allowed.clone());
         let (svg, bounds, linear, checker) = room
             .read(move |doc, _| {
                 let (ids, bg) = export_targets(doc, node.as_deref(), page.as_deref())?;
@@ -1490,7 +1491,12 @@ impl Ctx {
             })
             .await
             .map_err(err_msg)??;
-        let (png, w, h) = tokio::task::spawn_blocking(move || render::svg_to_png_on(&svg, scale, 1600, fonts, linear, checker))
+        let _permit = render::RENDERS.acquire().await.map_err(|e| e.to_string())?;
+        let (png, w, h) = tokio::task::spawn_blocking(move || {
+            let png = render::svg_to_png_on(&svg, scale, 1600, fonts, linear, checker, Some((&images.0, &images.1)));
+            render::release_memory();
+            png
+        })
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;
@@ -1530,6 +1536,7 @@ impl Ctx {
         let fonts = crate::fonts::fontdb_for(&self.st, &ws).await;
         let measure_fonts = fonts.clone();
         let pfid = fid.clone();
+        let images = (data_dir.clone(), allowed.clone());
         let tiles: Vec<(String, String, String, bool, bool)> = room
             .read(move |doc, _| {
                 let mut out = Vec::new();
@@ -1547,7 +1554,12 @@ impl Ctx {
             .await
             .map_err(err_msg)??;
         let labelled: Vec<(String, String, bool, bool)> = tiles.iter().map(|(id, name, svg, linear, checker)| (format!("{name} [{id}]"), svg.clone(), *linear, *checker)).collect();
-        let (png, w, h, rects) = tokio::task::spawn_blocking(move || render::contact_sheet(&labelled, scale, 2400, fonts))
+        let _permit = render::RENDERS.acquire().await.map_err(|e| e.to_string())?;
+        let (png, w, h, rects) = tokio::task::spawn_blocking(move || {
+            let png = render::contact_sheet(&labelled, scale, 2400, fonts, Some((&images.0, &images.1)));
+            render::release_memory();
+            png
+        })
             .await
             .map_err(|e| e.to_string())??;
         use base64::Engine;

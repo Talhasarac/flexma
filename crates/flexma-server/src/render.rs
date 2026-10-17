@@ -40,13 +40,13 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, allowed: &HashSet<String>,
     let mode = AssetMode::Inline(data_dir, allowed);
     let linear = linear_for(doc, std::slice::from_ref(&page));
     let resolve = |id: &str| resolve_asset(&mode, id);
-    let size = |id: &str| if mode.allows(id) { image_size(id) } else { None };
+    let size = |id: &str| mode.image_size(id);
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t, linear);
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
     let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
     let (svg, _) = export(doc, &[page], &opts)?;
-    svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear).ok().map(|(png, _, _)| png)
+    svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear, Some((data_dir, allowed))).ok().map(|(png, _, _)| png)
 }
 
 /// Where a file's paint-layer tiles are (see `paint.rs`).
@@ -107,6 +107,19 @@ impl AssetMode<'_> {
                 AssetMode::Url | AssetMode::Shared(_) => true,
             }
     }
+
+    /// Pixel size of uploaded image `id`, read from its header.
+    fn image_size(&self, id: &str) -> Option<(f64, f64)> {
+        if !self.allows(id) {
+            return None;
+        }
+        let dir = match self {
+            AssetMode::Inline(dir, _) => dir,
+            AssetMode::Url | AssetMode::Shared(_) => ASSETS_DIR.get()?.as_path(),
+        };
+        let s = imagesize::size(asset_path(dir, id)).ok()?;
+        Some((s.width as f64, s.height as f64))
+    }
 }
 
 /// Export nodes (or a whole page) to SVG. With `fonts`, text breaks into
@@ -117,7 +130,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
     // images); browsers viewing an SVG blend in sRGB.
     let linear = inline && linear_for(doc, ids);
     let resolve = |id: &str| resolve_asset(&assets, id);
-    let size = |id: &str| if assets.allows(id) { image_size(id) } else { None };
+    let size = |id: &str| assets.image_size(id);
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&assets, id, c, t, linear);
     let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
     let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
@@ -235,32 +248,30 @@ impl TextMeasurer {
 }
 
 /// An inlined image with its crop cut out (whole pixels) and/or its tint
-/// multiplied in, as a cached PNG data URI. Server renders use these instead
-/// of viewports and filters: smoothing never reaches past a sprite, and
-/// resvg can't drop a tint on a large or sliced layer.
+/// multiplied in. Server renders use these instead of viewports and filters:
+/// smoothing never reaches past a sprite, and resvg can't drop a tint on a
+/// large or sliced layer. Returns a `flexma-variant:` href; the PNG stays in
+/// a cache bounded by size (see `image_resolver`).
 fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: Option<Color>, linear: bool) -> Option<String> {
-    let AssetMode::Inline(..) = assets else { return None };
-    // Checked before the cache, which is shared by every workspace.
-    if !assets.allows(id) {
-        return None;
-    }
-    let (fw, fh) = image_size(id)?;
+    let AssetMode::Inline(dir, allowed) = assets else { return None };
+    // Checked before the cache, which every workspace shares.
+    let (fw, fh) = assets.image_size(id)?;
     let (x, y, w, h) = match crop {
         Some(c) => (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0)),
         None => (0.0, 0.0, fw, fh),
     };
     let key = format!("{id}/{x}/{y}/{w}/{h}/{}/{linear}", tint.map(|t| t.to_hex()).unwrap_or_default());
-    static CACHE: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(hit) = cache.lock().ok()?.get(&key) {
-        return Some(hit.clone());
+    let href = format!("flexma-variant:{id}:{:016x}", fnv(&key));
+    if variants().lock().ok()?.get(&href).is_some() {
+        return Some(href);
     }
-    let src = resolve_asset(assets, id)?;
     // Render the region 1:1 with nearest sampling: an exact pixel copy.
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}"><image href="{src}" width="{fw}" height="{fh}" image-rendering="optimizeSpeed"/></svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}"><image href="flexma-asset:{id}" width="{fw}" height="{fh}" image-rendering="optimizeSpeed"/></svg>"#
     );
-    let tree = resvg::usvg::Tree::from_str(&svg, &svg_options()).ok()?;
+    let mut opt = svg_options();
+    opt.image_href_resolver.resolve_string = image_resolver(Some((dir, allowed)));
+    let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
     let mut pm = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
     resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
     if linear {
@@ -286,15 +297,111 @@ fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: O
                 .unwrap_or(resvg::tiny_skia::PremultipliedColorU8::TRANSPARENT);
         }
     }
-    use base64::Engine;
-    let uri = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(pm.encode_png().ok()?));
-    if let Ok(mut m) = cache.lock() {
-        if m.len() > 512 {
-            m.clear();
-        }
-        m.insert(key, uri.clone());
+    let png = Arc::new(pm.encode_png().ok()?);
+    if let Ok(mut cache) = variants().lock() {
+        cache.insert(href.clone(), png);
     }
-    Some(uri)
+    Some(href)
+}
+
+/// Rendered image variants (PNG), by href. Bounded by total size: when full
+/// it starts over (a variant is cheap to remake; memory on a small server isn't).
+struct Variants {
+    by_href: HashMap<String, Arc<Vec<u8>>>,
+    bytes: usize,
+}
+
+const VARIANT_CACHE_BYTES: usize = 24 << 20;
+
+impl Variants {
+    fn get(&self, href: &str) -> Option<Arc<Vec<u8>>> {
+        self.by_href.get(href).cloned()
+    }
+
+    fn insert(&mut self, href: String, png: Arc<Vec<u8>>) {
+        if self.bytes + png.len() > VARIANT_CACHE_BYTES {
+            self.by_href.clear();
+            self.bytes = 0;
+        }
+        self.bytes += png.len();
+        if let Some(old) = self.by_href.insert(href, png) {
+            self.bytes -= old.len();
+        }
+    }
+}
+
+fn variants() -> &'static std::sync::Mutex<Variants> {
+    static V: OnceLock<std::sync::Mutex<Variants>> = OnceLock::new();
+    V.get_or_init(|| std::sync::Mutex::new(Variants { by_href: HashMap::new(), bytes: 0 }))
+}
+
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The uploaded images a render may load: the data dir and the ids allowed.
+pub type Images<'a> = Option<(&'a Path, &'a HashSet<String>)>;
+
+/// Resolves the image hrefs server renders write: `flexma-asset:<id>` reads
+/// the uploaded file, `flexma-variant:<id>:<key>` a cached variant of it,
+/// both only for allowed ids. Nothing else loads (no paths from disk, no
+/// other schemes).
+fn image_resolver(images: Images<'_>) -> resvg::usvg::ImageHrefStringResolverFn<'_> {
+    // A sprite used many times is read (and held) once.
+    let read: std::sync::Mutex<HashMap<String, Arc<Vec<u8>>>> = Default::default();
+    Box::new(move |href: &str, _: &resvg::usvg::Options| {
+        let (dir, allowed) = images?;
+        let allows = |id: &str| id.chars().all(|c| c.is_ascii_alphanumeric()) && allowed.contains(id);
+        let bytes = if let Some(id) = href.strip_prefix("flexma-asset:") {
+            if !allows(id) {
+                return None;
+            }
+            let mut read = read.lock().ok()?;
+            match read.get(id) {
+                Some(b) => b.clone(),
+                None => {
+                    let b = Arc::new(std::fs::read(asset_path(dir, id)).ok()?);
+                    read.insert(id.to_string(), b.clone());
+                    b
+                }
+            }
+        } else if let Some((id, _)) = href.strip_prefix("flexma-variant:").and_then(|v| v.split_once(':')) {
+            // The cache is shared by every workspace.
+            if !allows(id) {
+                return None;
+            }
+            variants().lock().ok()?.get(href)?
+        } else {
+            return None;
+        };
+        use resvg::usvg::ImageKind;
+        match sniff_mime(&bytes)? {
+            "image/png" => Some(ImageKind::PNG(bytes)),
+            "image/jpeg" => Some(ImageKind::JPEG(bytes)),
+            "image/gif" => Some(ImageKind::GIF(bytes)),
+            "image/webp" => Some(ImageKind::WEBP(bytes)),
+            _ => None,
+        }
+    })
+}
+
+/// Rasterizing is memory-hungry, so one render runs at a time (exports,
+/// thumbnails, version previews and agent screenshots alike).
+pub static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Give memory freed by a render back to the system (glibc keeps it
+/// otherwise, and a long-running server creeps up to its memory limit).
+pub fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: malloc_trim only hands free heap pages back to the OS.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }
 
 /// usvg options for every SVG the server parses: an `<image href>` that names
@@ -318,14 +425,6 @@ pub fn set_data_dir(data_dir: &Path) {
     let _ = ASSETS_DIR.set(data_dir.to_path_buf());
 }
 
-/// Pixel size of an uploaded image, read from its header.
-fn image_size(id: &str) -> Option<(f64, f64)> {
-    if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return None;
-    }
-    let s = imagesize::size(asset_path(ASSETS_DIR.get()?, id)).ok()?;
-    Some((s.width as f64, s.height as f64))
-}
 
 fn resolve_asset(assets: &AssetMode, id: &str) -> Option<String> {
     if !assets.allows(id) {
@@ -334,12 +433,8 @@ fn resolve_asset(assets: &AssetMode, id: &str) -> Option<String> {
     match assets {
         AssetMode::Url => Some(format!("/api/assets/{id}")),
         AssetMode::Shared(token) => Some(format!("/api/share/{token}/assets/{id}")),
-        AssetMode::Inline(dir, _) => {
-            let bytes = std::fs::read(asset_path(dir, id)).ok()?;
-            let mime = sniff_mime(&bytes).unwrap_or("image/png");
-            use base64::Engine;
-            Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
-        }
+        // Read when rasterized (`image_resolver`), never copied into the SVG.
+        AssetMode::Inline(dir, _) => asset_path(dir, id).exists().then(|| format!("flexma-asset:{id}")),
     }
 }
 
@@ -379,14 +474,15 @@ pub fn base_fontdb() -> Arc<FontDb> {
 /// Rasterize SVG to PNG at `scale`, clamped so the longest side is ≤ `max_dim`.
 /// Put a render over a grey checkerboard, so transparent areas (and white
 /// content on them) show, like design tools draw transparency.
-pub fn over_checkerboard(pm: &resvg::tiny_skia::Pixmap) -> resvg::tiny_skia::Pixmap {
+/// `y0`: the row `pm` starts at in the whole image, for strips.
+pub fn over_checkerboard(pm: &resvg::tiny_skia::Pixmap, y0: u32) -> resvg::tiny_skia::Pixmap {
     const CELL: u32 = 8;
     let (w, h) = (pm.width(), pm.height());
     let mut out = resvg::tiny_skia::Pixmap::new(w, h).unwrap_or_else(|| pm.clone());
     // Mid greys, so both white and dark content stand out.
     let (light, dark) = (resvg::tiny_skia::PremultipliedColorU8::from_rgba(196, 196, 202, 255).unwrap(), resvg::tiny_skia::PremultipliedColorU8::from_rgba(150, 150, 158, 255).unwrap());
     for (i, px) in out.pixels_mut().iter_mut().enumerate() {
-        let (x, y) = (i as u32 % w, i as u32 / w);
+        let (x, y) = (i as u32 % w, i as u32 / w + y0);
         *px = if (x / CELL + y / CELL) % 2 == 0 { light } else { dark };
     }
     out.draw_pixmap(0, 0, pm.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), resvg::tiny_skia::Transform::identity(), None);
@@ -407,16 +503,31 @@ pub fn wants_checkerboard(doc: &Document, ids: &[NodeId]) -> bool {
     !opaque
 }
 
-pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool) -> Result<(Vec<u8>, u32, u32), String> {
-    svg_to_png_on(svg, scale, max_dim, fonts, linear, false)
+pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, images: Images) -> Result<(Vec<u8>, u32, u32), String> {
+    svg_to_png_on(svg, scale, max_dim, fonts, linear, false, images)
+}
+
+/// Bigger images render in horizontal strips that stream into the PNG, so
+/// memory stays bounded however large the export. resvg gives a clipped or
+/// translucent group a layer up to 5× the canvas around it (clipped to the
+/// group), so a strip is short enough for such a layer to stay this size.
+const LAYER_PIXELS: u32 = 4 << 20;
+
+/// Rows per strip for an image `w` × `h` (all of it when it's small).
+fn strip_rows(w: u32, h: u32) -> u32 {
+    if w.saturating_mul(h) <= LAYER_PIXELS {
+        return h;
+    }
+    (LAYER_PIXELS / (5 * w.max(1))).max(16).min(h)
 }
 
 /// `svg_to_png`, optionally over a checkerboard (agent screenshots of
-/// transparent layers).
-pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, checker: bool) -> Result<(Vec<u8>, u32, u32), String> {
+/// transparent layers). `images`: the uploaded images it may load.
+pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, checker: bool, images: Images) -> Result<(Vec<u8>, u32, u32), String> {
     let mut opt = svg_options();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
+    opt.image_href_resolver.resolve_string = image_resolver(images);
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
     let size = tree.size();
     let mut s = scale.clamp(0.01, 8.0);
@@ -426,27 +537,57 @@ pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, li
     }
     let w = ((size.width() * s).ceil() as u32).max(1);
     let h = ((size.height() * s).ceil() as u32).max(1);
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or("image too large")?;
-    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut pixmap.as_mut());
-    if linear {
-        encode_linear(&mut pixmap);
+    let strip = strip_rows(w, h);
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+        let mut out = wr.stream_writer().map_err(|e| e.to_string())?;
+        let mut y0 = 0;
+        while y0 < h {
+            let sh = strip.min(h - y0);
+            let mut pm = resvg::tiny_skia::Pixmap::new(w, sh).ok_or("image too large")?;
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_row(s, 0.0, 0.0, s, 0.0, -(y0 as f32)), &mut pm.as_mut());
+            if linear {
+                encode_linear(&mut pm);
+            }
+            if checker {
+                pm = over_checkerboard(&pm, y0);
+            }
+            use std::io::Write;
+            out.write_all(&straight_rgba(pm)).map_err(|e| e.to_string())?;
+            y0 += sh;
+        }
+        out.finish().map_err(|e| e.to_string())?;
+        wr.finish().map_err(|e| e.to_string())?;
     }
-    if checker {
-        pixmap = over_checkerboard(&pixmap);
-    }
-    let png = pixmap.encode_png().map_err(|e| e.to_string())?;
     Ok((png, w, h))
+}
+
+/// A pixmap's pixels as straight (not premultiplied) RGBA, for PNG.
+fn straight_rgba(pm: resvg::tiny_skia::Pixmap) -> Vec<u8> {
+    let mut data = pm.take();
+    for px in data.chunks_exact_mut(4) {
+        let c = resvg::tiny_skia::PremultipliedColorU8::from_rgba(px[0], px[1], px[2], px[3]).map(|c| c.demultiply());
+        if let Some(c) = c {
+            px.copy_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        }
+    }
+    data
 }
 
 /// One image of several renders in a labelled grid (a contact sheet), so an
 /// agent can compare screens at a glance. `tiles` are (label, svg). Returns
 /// the PNG, its size and each tile's rect in it.
-pub fn contact_sheet(tiles: &[(String, String, bool, bool)], scale: f32, max_dim: u32, fonts: Arc<FontDb>) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
+pub fn contact_sheet(tiles: &[(String, String, bool, bool)], scale: f32, max_dim: u32, fonts: Arc<FontDb>, images: Images) -> Result<(Vec<u8>, u32, u32, Vec<[u32; 4]>), String> {
     const PAD: f32 = 16.0;
     const LABEL: f32 = 22.0;
     let mut opt = svg_options();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
+    opt.image_href_resolver.resolve_string = image_resolver(images);
     let trees: Vec<resvg::usvg::Tree> = tiles.iter().map(|(_, svg, _, _)| resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
     if trees.is_empty() {
         return Err("nothing to render".into());
@@ -502,7 +643,7 @@ pub fn contact_sheet(tiles: &[(String, String, bool, bool)], scale: f32, max_dim
             encode_linear(&mut tile);
         }
         if *checker {
-            tile = over_checkerboard(&tile);
+            tile = over_checkerboard(&tile, 0);
         }
         let ty = (y + LABEL).round() as i32;
         pm.draw_pixmap(x.round() as i32, ty, tile.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), resvg::tiny_skia::Transform::identity(), None);
@@ -1057,7 +1198,7 @@ mod linear_blend_tests {
             let dir = std::env::temp_dir();
             let paint = PaintSource { data_dir: &dir, file_id: "linear-test", share_token: None };
             let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &HashSet::new()), None, &paint).unwrap();
-            let (png, _, _) = svg_to_png(&svg, 1.0, 100, base_fontdb(), linear).unwrap();
+            let (png, _, _) = svg_to_png(&svg, 1.0, 100, base_fontdb(), linear, None).unwrap();
             let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
             let v = pm.pixel(10, 10).unwrap().red();
             assert!(v.abs_diff(want) <= 2, "linear={linear}: got {v}, Unity/sRGB math says {want}");
@@ -1156,7 +1297,7 @@ mod checker_tests {
                 pm.pixels_mut()[i] = resvg::tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap();
             }
         }
-        let out = over_checkerboard(&pm);
+        let out = over_checkerboard(&pm, 0);
         let px = |x: u32, y: u32| out.pixel(x, y).unwrap();
         assert_eq!((px(1, 1).red(), px(9, 1).red()), (196, 150), "alternating cells");
         assert_eq!((px(20, 1).red(), px(20, 1).green()), (255, 0), "content on top");
@@ -1192,7 +1333,7 @@ mod paint_render_tests {
         }
         let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
         let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &HashSet::new()), None, &paint).unwrap();
-        let (png, _, _) = svg_to_png(&svg, 1.0, 400, base_fontdb(), false).unwrap();
+        let (png, _, _) = svg_to_png(&svg, 1.0, 400, base_fontdb(), false, None).unwrap();
         let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
         let px = |x, y| {
             let c = pm.pixel(x, y).unwrap();
@@ -1230,17 +1371,53 @@ mod asset_scope_tests {
             let mut r = Node::new(&format!("r:{i}"), NodeType::Rectangle);
             r.parent = Some("f:1".into());
             (r.x, r.width, r.height) = (i as f64 * 10.0, 10.0, 10.0);
-            r.fills = vec![Paint::Image { asset: asset.into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+            // The second one cropped, so it renders through a cached variant.
+            let crop = (i == 1).then_some(ImageCrop { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+            r.fills = vec![Paint::Image { asset: asset.into(), fit: ImageFit::Stretch, tint: None, slice: None, filled: None, crop, tile_scale: 1.0, opacity: 1.0, visible: true }];
             doc.apply(&Op::Create { node: r }).unwrap();
         }
         let allowed: HashSet<String> = ["ours123".to_string()].into_iter().collect();
         let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
         let render = |allowed: &HashSet<String>| export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, allowed), None, &paint).unwrap().0;
-        let images = |svg: &str| svg.matches("data:image/png;base64").count();
-        assert_eq!(images(&render(&allowed)), 1, "only our image is inlined");
+        let images = |svg: &str| svg.matches("flexma-asset:").count() + svg.matches("flexma-variant:").count();
+        assert_eq!(images(&render(&allowed)), 1, "only our image is referenced");
         let both: HashSet<String> = ["ours123".to_string(), "theirs456".to_string()].into_iter().collect();
         assert_eq!(images(&render(&both)), 2, "the test document really references both");
         assert_eq!(images(&render(&HashSet::new())), 0);
+        // Rasterizing loads only allowed ids, even when the SVG names another
+        // (here, the other workspace's variant is already in the cache).
+        let svg = render(&both);
+        assert!(svg.contains("flexma-variant:theirs456:"));
+        let red = |images: &HashSet<String>| {
+            let (png, w, h) = svg_to_png(&svg, 1.0, 100, base_fontdb(), false, Some((&dir, images))).unwrap();
+            let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            [5, 15].map(|x| pm.pixel(x * w / 20, h / 2).map(|p| p.red() > 200 && p.green() < 50).unwrap())
+        };
+        assert_eq!(red(&both), [true, true]);
+        assert_eq!(red(&allowed), [true, false]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A render taller than one strip comes out the same as a single pass:
+    /// clipped, translucent and blurred groups across strip edges, and the
+    /// checkerboard.
+    #[test]
+    fn strips_match_a_single_render() {
+        // `y`: the first strip boundary.
+        let y = strip_rows(1000, u32::MAX);
+        let (w, h) = (1000, y * 2 + 37);
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"><defs><linearGradient id="g" x2="0" y2="1"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f" stop-opacity="0.3"/></linearGradient><clipPath id="c"><rect x="100" y="10" width="800" height="{y}" rx="40"/></clipPath><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter></defs><rect width="{w}" height="{h}" fill="url(#g)"/><g clip-path="url(#c)" opacity="0.6"><circle cx="500" cy="{y}" r="300" fill="#0f0"/></g><rect x="200" y="{}" width="600" height="80" fill="#ff0" filter="url(#b)"/></svg>"##,
+            y * 2 - 40
+        );
+        let (png, pw, ph) = svg_to_png_on(&svg, 1.0, 100_000, base_fontdb(), false, true, None).unwrap();
+        assert_eq!((pw, ph), (w, h));
+        let got = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let tree = resvg::usvg::Tree::from_str(&svg, &svg_options()).unwrap();
+        let mut whole = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut whole.as_mut());
+        let want = over_checkerboard(&whole, 0);
+        let off = got.pixels().iter().zip(want.pixels()).filter(|(a, b)| a.red().abs_diff(b.red()).max(a.green().abs_diff(b.green())).max(a.blue().abs_diff(b.blue())) > 1).count();
+        assert_eq!(off, 0, "pixels differ from a single render");
     }
 }

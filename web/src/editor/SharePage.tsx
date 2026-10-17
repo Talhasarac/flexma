@@ -9,12 +9,14 @@ import { useAuth } from '../lib/auth';
 import { Logo } from '../components/Logo';
 import { MadeBy } from '../components/MadeBy';
 import { useMenu } from '../components/Menu';
+import { useToast } from '../components/Toast';
 import { FullScreenLoader, FullScreenMessage } from '../components/StatusScreens';
 import { useDocumentTitle } from '../lib/useDocumentTitle';
 import { createEditor, loadEngine } from '../engine';
 import { Editor } from './EditorPage';
 import { EditorStore, useStatus, useUi } from './store';
 import { Presence, ZoomButton } from './TopBar';
+import { exportPngs, safeName } from './download';
 import './editor.css';
 
 const DEAD_LINK = 'This link was turned off, reset or has expired. Ask the person who shared it for a new one.';
@@ -94,6 +96,7 @@ function ShareTopBar({ store, info, signedIn }: { store: EditorStore; info: Shar
   const ui = useUi(store);
   const status = useStatus(store);
   const menu = useMenu();
+  const toast = useToast();
   const next = encodeURIComponent(window.location.pathname);
   return (
     <header className="editor-topbar">
@@ -128,7 +131,7 @@ function ShareTopBar({ store, info, signedIn }: { store: EditorStore; info: Shar
             menu.open(
               ev.currentTarget,
               [
-                { label: 'Export page as PNG', onSelect: () => window.open(store.exportPngUrl({ page: ui.page, scale: 2 }), '_blank') },
+                { label: 'Export page as PNG', onSelect: () => void exportPngs(toast, [{ url: store.exportPngUrl({ page: ui.page, scale: 2 }), name: `${safeName(info.name)}@2x.png` }]) },
                 { label: 'Export page as SVG', onSelect: () => window.open(store.exportSvgUrl({ page: ui.page }), '_blank') },
               ],
               { align: 'end' },

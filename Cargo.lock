@@ -473,6 +473,7 @@ dependencies = [
  "futures-util",
  "hex",
  "imagesize",
+ "png",
  "rand 0.8.8",
  "resvg",
  "rusqlite",

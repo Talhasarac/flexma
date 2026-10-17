@@ -395,6 +395,25 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
   return (data ?? {}) as T;
 }
 
+/** A binary download (an export). Failures throw an ApiError with the server's message. */
+export async function fetchBlob(path: string): Promise<Blob> {
+  let res: Response;
+  try {
+    res = await fetch(path, { credentials: 'same-origin' });
+  } catch {
+    throw new ApiError(0, 'Could not reach the Flexma server. Check your connection.');
+  }
+  if (!res.ok) {
+    const data: unknown = await res.json().catch(() => undefined);
+    const serverMessage =
+      data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+        ? data.error
+        : '';
+    throw new ApiError(res.status, serverMessage || defaultMessage(res.status, res.statusText));
+  }
+  return res.blob();
+}
+
 function defaultMessage(status: number, statusText: string): string {
   switch (status) {
     case 401:

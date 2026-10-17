@@ -12,6 +12,7 @@ import { AgentDialog } from './AgentDialog';
 import { ShareDialog } from '../components/ShareDialog';
 import { VersionsDialog } from './VersionsDialog';
 import { MissingFontsButton } from './MissingFonts';
+import { exportPngs, safeName } from './download';
 import { useAuth } from '../lib/auth';
 
 interface Props {
@@ -73,7 +74,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
               { label: 'Undo', hint: '⌘Z', disabled: !ui.canUndo, onSelect: act(() => e.undo()) },
               { label: 'Redo', hint: '⇧⌘Z', disabled: !ui.canRedo, onSelect: act(() => e.redo()) },
               { type: 'separator' },
-              { label: 'Export page as PNG', onSelect: () => window.open(store.exportPngUrl({ page: ui.page, scale: 2 }), '_blank') },
+              { label: 'Export page as PNG', onSelect: () => void exportPngs(toast, [{ url: store.exportPngUrl({ page: ui.page, scale: 2 }), name: `${safeName(file.name)}@2x.png` }]) },
               { label: 'Export page as SVG', onSelect: () => window.open(store.exportSvgUrl({ page: ui.page }), '_blank') },
               { type: 'separator' },
               { label: 'Rename file…', disabled: !ui.canEdit, onSelect: () => void rename() },

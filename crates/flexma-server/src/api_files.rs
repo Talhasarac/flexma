@@ -323,10 +323,12 @@ pub async fn render_thumbnail(st: &AppState, file_id: &str, workspace_id: &str, 
     let allowed = st.db.call(move |c| workspace_asset_ids(c, &ws)).await?;
     let data_dir = st.cfg.data_dir.clone();
     let fid = file_id.to_string();
-    let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
+    let _permit = render::RENDERS.acquire().await.map_err(AppError::internal)?;
     tokio::task::spawn_blocking(move || {
         let paint = render::PaintSource { data_dir: &data_dir, file_id: &fid, share_token: None };
-        render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, &allowed, fonts, &paint))
+        let png = render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, &allowed, fonts, &paint));
+        render::release_memory();
+        png
     })
         .await
         .map_err(AppError::internal)
@@ -425,10 +427,6 @@ pub async fn export_png(
     export_png_response(&st, &id, q, st.cfg.max_export_px).await
 }
 
-/// Rasterizing is memory-hungry (up to 4 bytes per pixel), so only a few
-/// PNG exports run at once; the rest wait their turn.
-static PNG_RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
-
 /// PNG export of a file (access already checked), longest side ≤ `max_dim`.
 pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_dim: u32) -> AppResult<Response> {
     let room = st.rooms.get(id).await?;
@@ -447,6 +445,7 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
     let with_bg = q.background.unwrap_or(true);
     let measure_fonts = fonts.clone();
     let pfid = id.to_string();
+    let images = (data_dir.clone(), allowed.clone());
     let (svg, linear) = room
         .read(move |doc, _| {
             let (ids, bg) = export_targets(doc, q.node.as_deref(), q.page.as_deref())?;
@@ -458,8 +457,13 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
         })
         .await?
         .map_err(AppError::bad_request)?;
-    let _permit = PNG_RENDERS.acquire().await.map_err(AppError::internal)?;
-    let (png, _, _) = tokio::task::spawn_blocking(move || render::svg_to_png(&svg, scale, max_dim, fonts, linear))
+    let _permit = render::RENDERS.acquire().await.map_err(AppError::internal)?;
+    let (png, _, _) = tokio::task::spawn_blocking(move || {
+        let png = render::svg_to_png(&svg, scale, max_dim, fonts, linear, Some((&images.0, &images.1)));
+        drop(svg);
+        render::release_memory();
+        png
+    })
         .await
         .map_err(AppError::internal)?
         .map_err(AppError::bad_request)?;
