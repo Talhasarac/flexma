@@ -10,13 +10,14 @@
 //! JavaScript creates the device and configures the canvas (both are async),
 //! then hands them over; see `FlexmaEditor::with_webgpu`.
 
-use crate::backend::{texture_lods, Backend, DabBatch, DabStyle, FrameParams, ImageSource, MeshId, PaintMode, Rows, SmudgeDab, TexId, DAB_FLOATS, SMUDGE_BUF};
+use crate::backend::{texture_lods, Backend, DabBatch, DabStyle, FrameParams, ImageSource, MeshId, PaintMode, Rows, SmudgeDab, SmudgeTile, TexId, DAB_FLOATS, SMUDGE_BUF};
 use crate::gl::INST_FLOATS;
 use js_sys::{Array, Object, Reflect};
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+use web_sys::{HtmlCanvasElement, HtmlImageElement};
 
 #[wasm_bindgen]
 extern "C" {
@@ -61,6 +62,8 @@ extern "C" {
     fn copy_external_image_to_texture(this: &GpuQueue, src: &Object, dst: &Object, size: &Array) -> Result<(), JsValue>;
     #[wasm_bindgen(method)]
     fn submit(this: &GpuQueue, buffers: &Array);
+    #[wasm_bindgen(method, js_name = onSubmittedWorkDone)]
+    fn on_submitted_work_done(this: &GpuQueue) -> js_sys::Promise;
 
     #[derive(Clone)]
     pub type GpuBuffer;
@@ -170,11 +173,12 @@ const SLOT_BYTES: usize = 256;
 /// The smudge window: the tiles under a dab, side by side.
 const SMUDGE_WINDOW: u32 = 1024;
 /// Most dabs drawn in one GPU submission, and most smudge dabs (each a few
-/// passes). Replaying a file's strokes is a lot of GPU work at once; mobile
-/// GPUs lose the device when one command buffer runs too long (an iPad Air 4
-/// did), so long replays go out in several.
+/// passes): replaying a file's strokes goes out in many small submissions,
+/// which the paint queue paces (see `GpuBackend::paint_cap`).
 const DABS_PER_SUBMIT: u32 = 4096;
 const SMUDGE_DABS_PER_SUBMIT: usize = 48;
+/// Dab batches (about a pass each) per queued slice.
+const DAB_BATCHES_PER_OP: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Stencil {
@@ -302,6 +306,68 @@ pub struct GpuBackend {
     wake: Rc<Cell<bool>>,
     /// Checks each frame's error scope (one closure, reused every frame).
     frame_check: Option<Closure<dyn FnMut(JsValue)>>,
+    /// Most paint passes encoded that the GPU hasn't finished: a long replay
+    /// (opening a painting) is encoded a slice at a time as the GPU finishes
+    /// the last, so it neither freezes the page nor piles up in the GPU
+    /// process (see `FlexmaEditor::with_webgpu`).
+    paint_cap: u32,
+    /// Paint work waiting for the GPU to catch up (see `paint_cap`).
+    paint_queue: VecDeque<PaintOp>,
+    /// Paint passes submitted that the GPU hasn't finished, each submit's
+    /// share (submits finish in order), and the callback that settles them.
+    paint_inflight: Rc<Cell<u32>>,
+    paint_costs: Rc<RefCell<VecDeque<u32>>>,
+    paint_done: Closure<dyn FnMut(JsValue)>,
+    /// The most paint ops that have waited at once (stats).
+    paint_queue_peak: usize,
+}
+
+/// Paint work that waits in `GpuBackend::paint_queue`, with its own copies
+/// of the data.
+enum PaintOp {
+    Dabs(Vec<(TexId, Vec<f32>, PaintMode, DabStyle)>),
+    Smudge(Vec<QueuedSmudge>),
+    Load(TexId, QueuedImage, u32),
+    Clear(TexId, u32),
+    Copy(TexId, TexId, u32),
+    Read(TexId, u32, Box<dyn FnOnce(Vec<u8>)>),
+    Delete(TexId),
+}
+
+enum QueuedImage {
+    Image(HtmlImageElement),
+    Canvas(HtmlCanvasElement),
+}
+
+/// A `SmudgeDab` that owns its tiles.
+struct QueuedSmudge {
+    tiles: Vec<SmudgeTile>,
+    dab: [f32; DAB_FLOATS],
+    style: DabStyle,
+    buffer: TexId,
+    first: bool,
+    keep: f32,
+    paint: [f32; 4],
+    mix: f32,
+    alpha_lock: bool,
+}
+
+impl PaintOp {
+    /// About how many passes (and copies) the op encodes.
+    fn cost(&self) -> u32 {
+        match self {
+            PaintOp::Dabs(b) => b.len() as u32,
+            PaintOp::Smudge(d) => smudge_cost(d.iter().map(|d| d.tiles.len())),
+            PaintOp::Delete(_) => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// Passes and copies for smudge dabs over these numbers of tiles: a pick,
+/// a buffer copy, and a copy and a stamp per tile.
+fn smudge_cost(tiles: impl Iterator<Item = usize>) -> u32 {
+    tiles.map(|n| 2 + 2 * n as u32).sum()
 }
 
 /// Consecutive failed frames before WebGPU counts as broken. A single failed
@@ -316,7 +382,7 @@ fn premul_blend() -> Object {
 }
 
 impl GpuBackend {
-    pub fn new(device: JsValue, context: JsValue, format: String, on_error: js_sys::Function) -> Result<GpuBackend, String> {
+    pub fn new(device: JsValue, context: JsValue, format: String, on_error: js_sys::Function, paint_cap: u32) -> Result<GpuBackend, String> {
         let device: GpuDevice = device.unchecked_into();
         let context: GpuCanvasContext = context.unchecked_into();
         let queue = device.queue();
@@ -401,6 +467,16 @@ impl GpuBackend {
             ]),
         });
         let white = TexEntry { tex, bind, w: 1, h: 1, mips: 1 };
+        let paint_inflight = Rc::new(Cell::new(0u32));
+        let paint_costs: Rc<RefCell<VecDeque<u32>>> = Rc::default();
+        let paint_done = {
+            let (inflight, costs) = (paint_inflight.clone(), paint_costs.clone());
+            Closure::new(move |_: JsValue| {
+                if let Some(n) = costs.borrow_mut().pop_front() {
+                    inflight.set(inflight.get().saturating_sub(n));
+                }
+            })
+        };
         Ok(GpuBackend {
             device,
             queue,
@@ -453,6 +529,12 @@ impl GpuBackend {
             on_error,
             wake: Rc::new(Cell::new(false)),
             frame_check: None,
+            paint_cap: paint_cap.max(1),
+            paint_queue: VecDeque::new(),
+            paint_inflight,
+            paint_costs,
+            paint_done,
+            paint_queue_peak: 0,
         })
     }
 
@@ -911,11 +993,6 @@ impl Backend for GpuBackend {
         }
     }
 
-    fn delete_texture(&mut self, t: TexId) {
-        if let Some(Some(e)) = self.textures.get_mut(t.0 as usize).map(Option::take) {
-            self.trash_tex.push(e.tex);
-        }
-    }
 
     fn upload_brush_texture(&mut self, src: ImageSource, w: u32, h: u32, _repeat: bool) -> Option<TexId> {
         // Repeating is the sampler's job here (grain and tint bind `repeat_sampler`).
@@ -1133,18 +1210,107 @@ impl Backend for GpuBackend {
         for b in self.trash_buf.drain(..) {
             b.destroy();
         }
+        // Paint work waiting for the GPU (opening a painting) goes on as it catches up.
+        self.pump_paint();
     }
 
     fn draw_calls(&self) -> u32 {
         self.draw_calls
     }
 
-    fn paint_counters(&self) -> [u64; 2] {
-        [self.paint_passes, self.paint_submits]
+    fn paint_counters(&self) -> [u64; 3] {
+        [self.paint_passes, self.paint_submits, self.paint_queue_peak as u64]
     }
 
     fn attach_wake(&mut self, wake: Rc<Cell<bool>>) {
         self.wake = wake;
+    }
+
+    fn delete_texture(&mut self, t: TexId) {
+        // Queued paint work may still use it.
+        if self.paint_queue.is_empty() {
+            self.delete_now(t);
+        } else {
+            self.queue_paint(PaintOp::Delete(t));
+        }
+    }
+
+    fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool {
+        if self.can_paint_now(1) {
+            let ok = self.load_now(tex, src, size);
+            self.paint_sent(1);
+            return ok;
+        }
+        if !matches!(self.textures.get(tex.0 as usize), Some(Some(_))) {
+            return false;
+        }
+        // Queued: a load that fails later clears the tile instead, as the
+        // caller would have.
+        let src = match src {
+            ImageSource::Image(i) => QueuedImage::Image(i.clone()),
+            ImageSource::Canvas(c) => QueuedImage::Canvas(c.clone()),
+        };
+        self.queue_paint(PaintOp::Load(tex, src, size));
+        true
+    }
+
+    fn clear_paint_texture(&mut self, tex: TexId, size: u32) {
+        if self.can_paint_now(1) {
+            self.clear_now(tex, size);
+            self.paint_sent(1);
+        } else {
+            self.queue_paint(PaintOp::Clear(tex, size));
+        }
+    }
+
+    fn paint_dabs(&mut self, batches: &[DabBatch]) {
+        for chunk in batches.chunks(DAB_BATCHES_PER_OP) {
+            let cost = chunk.len() as u32;
+            if self.can_paint_now(cost) {
+                self.paint_dabs_now(chunk);
+                self.paint_sent(cost);
+            } else {
+                self.queue_paint(PaintOp::Dabs(chunk.iter().map(|b| (b.tex, b.dabs.to_vec(), b.mode, b.style)).collect()));
+            }
+        }
+    }
+
+    fn smudge(&mut self, dabs: &[SmudgeDab]) {
+        for chunk in dabs.chunks(SMUDGE_DABS_PER_SUBMIT) {
+            let cost = smudge_cost(chunk.iter().map(|d| d.tiles.len()));
+            if self.can_paint_now(cost) {
+                self.smudge_now(chunk);
+                self.paint_sent(cost);
+            } else {
+                let queued = chunk
+                    .iter()
+                    .map(|d| QueuedSmudge { tiles: d.tiles.to_vec(), dab: d.dab, style: d.style, buffer: d.buffer, first: d.first, keep: d.keep, paint: d.paint, mix: d.mix, alpha_lock: d.alpha_lock })
+                    .collect();
+                self.queue_paint(PaintOp::Smudge(queued));
+            }
+        }
+    }
+
+    fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32) {
+        if self.can_paint_now(1) {
+            self.copy_now(src, dst, size);
+            self.paint_sent(1);
+        } else {
+            self.queue_paint(PaintOp::Copy(src, dst, size));
+        }
+    }
+
+    fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>) {
+        if self.can_paint_now(1) {
+            self.read_now(tex, size, done);
+            self.paint_sent(1);
+        } else {
+            self.queue_paint(PaintOp::Read(tex, size, done));
+        }
+    }
+
+    fn paint_pending(&self) -> bool {
+        !self.paint_queue.is_empty()
     }
 
     fn create_paint_texture(&mut self, size: u32) -> Option<TexId> {
@@ -1169,7 +1335,106 @@ impl Backend for GpuBackend {
         }))
     }
 
-    fn load_paint_texture(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool {
+
+
+
+
+    fn prewarm_paint(&mut self) {
+        if self.smudge_window.is_some() {
+            return;
+        }
+        // Creating the pipelines now lets the GPU process compile them while
+        // nothing is being painted yet.
+        for p in [Pipe::Dab(PaintMode::Paint), Pipe::Dab(PaintMode::Erase), Pipe::Dab(PaintMode::AlphaLock), Pipe::SmudgePick, Pipe::SmudgeStamp] {
+            self.pipeline(p);
+        }
+        let target = |label: &str, size: u32, usage: u32| {
+            self.device.create_texture(&obj! { "label": label, "size": arr(vec![size.into(), size.into()]), "format": TEX_FORMAT, "usage": usage })
+        };
+        let tile = flexma_doc::raster::TILE;
+        self.smudge_window = Some(target("smudge window", SMUDGE_WINDOW, TEX_BINDING | TEX_COPY_DST | TEX_RENDER));
+        self.smudge_scratch = Some(target("smudge scratch", SMUDGE_BUF, TEX_COPY_SRC | TEX_RENDER));
+        // New textures start transparent: unpainted tiles copy from this one.
+        self.smudge_blank = Some(target("blank tile", tile, TEX_COPY_SRC));
+    }
+
+
+}
+
+/// Paint work: done now, or queued until the GPU catches up.
+impl GpuBackend {
+    /// Whether paint work of `cost` passes can be encoded now: nothing waits
+    /// ahead of it and the GPU isn't too far behind.
+    fn can_paint_now(&self, cost: u32) -> bool {
+        let inflight = self.paint_inflight.get();
+        self.paint_queue.is_empty() && (inflight == 0 || inflight + cost <= self.paint_cap)
+    }
+
+    /// Count work just submitted as in flight until the GPU finishes it.
+    fn paint_sent(&mut self, cost: u32) {
+        if cost == 0 {
+            return;
+        }
+        self.paint_inflight.set(self.paint_inflight.get() + cost);
+        self.paint_costs.borrow_mut().push_back(cost);
+        let _ = self.queue.on_submitted_work_done().then(&self.paint_done);
+    }
+
+    fn queue_paint(&mut self, op: PaintOp) {
+        self.paint_queue.push_back(op);
+        self.paint_queue_peak = self.paint_queue_peak.max(self.paint_queue.len());
+        self.pump_paint();
+    }
+
+    /// Encode queued paint work, in order, as far as the GPU keeps up.
+    fn pump_paint(&mut self) {
+        while let Some(cost) = self.paint_queue.front().map(PaintOp::cost) {
+            let inflight = self.paint_inflight.get();
+            if inflight > 0 && inflight + cost > self.paint_cap {
+                break;
+            }
+            let op = self.paint_queue.pop_front().unwrap();
+            self.run_paint(op);
+            self.paint_sent(cost);
+        }
+    }
+
+    fn run_paint(&mut self, op: PaintOp) {
+        match op {
+            PaintOp::Dabs(b) => {
+                let batches: Vec<DabBatch> = b.iter().map(|(tex, dabs, mode, style)| DabBatch { tex: *tex, dabs, mode: *mode, style: *style }).collect();
+                self.paint_dabs_now(&batches);
+            }
+            PaintOp::Smudge(d) => {
+                let dabs: Vec<SmudgeDab> = d
+                    .iter()
+                    .map(|q| SmudgeDab { tiles: &q.tiles, dab: q.dab, style: q.style, buffer: q.buffer, first: q.first, keep: q.keep, paint: q.paint, mix: q.mix, alpha_lock: q.alpha_lock })
+                    .collect();
+                self.smudge_now(&dabs);
+            }
+            PaintOp::Load(tex, img, size) => {
+                let ok = match &img {
+                    QueuedImage::Image(i) => self.load_now(tex, ImageSource::Image(i), size),
+                    QueuedImage::Canvas(c) => self.load_now(tex, ImageSource::Canvas(c), size),
+                };
+                if !ok {
+                    self.clear_now(tex, size);
+                }
+            }
+            PaintOp::Clear(tex, size) => self.clear_now(tex, size),
+            PaintOp::Copy(src, dst, size) => self.copy_now(src, dst, size),
+            PaintOp::Read(tex, size, done) => self.read_now(tex, size, done),
+            PaintOp::Delete(tex) => self.delete_now(tex),
+        }
+    }
+
+    fn delete_now(&mut self, t: TexId) {
+        if let Some(Some(e)) = self.textures.get_mut(t.0 as usize).map(Option::take) {
+            self.trash_tex.push(e.tex);
+        }
+    }
+
+    fn load_now(&mut self, tex: TexId, src: ImageSource, size: u32) -> bool {
         let Some(Some(e)) = self.textures.get(tex.0 as usize) else { return false };
         let source: JsValue = match src {
             ImageSource::Image(i) => i.clone().into(),
@@ -1184,7 +1449,7 @@ impl Backend for GpuBackend {
             .is_ok()
     }
 
-    fn clear_paint_texture(&mut self, tex: TexId, _size: u32) {
+    fn clear_now(&mut self, tex: TexId, _size: u32) {
         let Some(Some(e)) = self.textures.get(tex.0 as usize) else { return };
         let enc = self.device.create_command_encoder();
         self.paint_passes += 1;
@@ -1197,7 +1462,7 @@ impl Backend for GpuBackend {
         self.queue.submit(&arr(vec![enc.finish()]));
     }
 
-    fn paint_dabs(&mut self, batches: &[DabBatch]) {
+    fn paint_dabs_now(&mut self, batches: &[DabBatch]) {
         let batches: Vec<&DabBatch> = batches.iter().filter(|b| !b.dabs.is_empty()).collect();
         if batches.is_empty() {
             return;
@@ -1275,7 +1540,7 @@ impl Backend for GpuBackend {
         self.queue.submit(&arr(vec![enc.finish()]));
     }
 
-    fn smudge(&mut self, dabs: &[SmudgeDab]) {
+    fn smudge_now(&mut self, dabs: &[SmudgeDab]) {
         if dabs.is_empty() {
             return;
         }
@@ -1384,26 +1649,7 @@ impl Backend for GpuBackend {
         self.queue.submit(&arr(vec![enc.finish()]));
     }
 
-    fn prewarm_paint(&mut self) {
-        if self.smudge_window.is_some() {
-            return;
-        }
-        // Creating the pipelines now lets the GPU process compile them while
-        // nothing is being painted yet.
-        for p in [Pipe::Dab(PaintMode::Paint), Pipe::Dab(PaintMode::Erase), Pipe::Dab(PaintMode::AlphaLock), Pipe::SmudgePick, Pipe::SmudgeStamp] {
-            self.pipeline(p);
-        }
-        let target = |label: &str, size: u32, usage: u32| {
-            self.device.create_texture(&obj! { "label": label, "size": arr(vec![size.into(), size.into()]), "format": TEX_FORMAT, "usage": usage })
-        };
-        let tile = flexma_doc::raster::TILE;
-        self.smudge_window = Some(target("smudge window", SMUDGE_WINDOW, TEX_BINDING | TEX_COPY_DST | TEX_RENDER));
-        self.smudge_scratch = Some(target("smudge scratch", SMUDGE_BUF, TEX_COPY_SRC | TEX_RENDER));
-        // New textures start transparent: unpainted tiles copy from this one.
-        self.smudge_blank = Some(target("blank tile", tile, TEX_COPY_SRC));
-    }
-
-    fn copy_paint_texture(&mut self, src: TexId, dst: TexId, size: u32) {
+    fn copy_now(&mut self, src: TexId, dst: TexId, size: u32) {
         let (Some(Some(a)), Some(Some(b))) = (self.textures.get(src.0 as usize), self.textures.get(dst.0 as usize)) else { return };
         let enc = self.device.create_command_encoder();
         enc.copy_texture_to_texture(&obj! { "texture": a.tex.clone() }, &obj! { "texture": b.tex.clone() }, &arr(vec![size.into(), size.into()]));
@@ -1411,7 +1657,7 @@ impl Backend for GpuBackend {
         self.queue.submit(&arr(vec![enc.finish()]));
     }
 
-    fn read_paint_texture(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>) {
+    fn read_now(&mut self, tex: TexId, size: u32, done: Box<dyn FnOnce(Vec<u8>)>) {
         let Some(Some(e)) = self.textures.get(tex.0 as usize) else { return };
         let bytes = size * size * 4;
         let buf = self.device.create_buffer(&obj! { "size": bytes as f64, "usage": BUF_MAP_READ | BUF_COPY_DST });

@@ -370,8 +370,8 @@ impl Renderer {
         self.gpu.name()
     }
 
-    /// Paint-tile GPU work so far: (render passes, queue submits).
-    pub fn paint_counters(&self) -> [u64; 2] {
+    /// Paint-tile GPU work so far: (render passes, queue submits, queue peak).
+    pub fn paint_counters(&self) -> [u64; 3] {
         self.gpu.paint_counters()
     }
 
@@ -1153,7 +1153,7 @@ impl Renderer {
         }
         self.gpu.end_frame();
         self.draw_calls = self.gpu.draw_calls();
-        if self.wake.get() || paint.busy() {
+        if self.wake.get() || paint.busy() || self.gpu.paint_pending() {
             self.wants_more = true;
         }
     }

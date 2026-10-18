@@ -58,9 +58,13 @@ impl FlexmaEditor {
     /// configures the canvas's "webgpu" context (both async), then passes them in.
     #[wasm_bindgen(js_name = withWebGpu)]
     /// `on_error(message)` is called if frames keep failing on the GPU.
-    pub fn with_webgpu(device: JsValue, context: JsValue, format: String, on_error: js_sys::Function) -> Result<FlexmaEditor, JsValue> {
+    /// `paint_cap`: most paint passes encoded ahead of the GPU. Safari keeps
+    /// memory in its GPU process for each one (about 14 KB on an iPad Air 4),
+    /// and iPadOS ends that process near 300 MB, so iPads and iPhones want
+    /// about 1024; computers 4096 (fewer is slower to open heavy paintings).
+    pub fn with_webgpu(device: JsValue, context: JsValue, format: String, on_error: js_sys::Function, paint_cap: u32) -> Result<FlexmaEditor, JsValue> {
         console_error_panic_hook::set_once();
-        let backend = gpu::GpuBackend::new(device, context, format, on_error).map_err(|e| JsValue::from_str(&e))?;
+        let backend = gpu::GpuBackend::new(device, context, format, on_error, paint_cap).map_err(|e| JsValue::from_str(&e))?;
         let renderer = render::Renderer::new(Box::new(backend));
         let text = text::TextEngine::new()?;
         Ok(FlexmaEditor { ed: Editor::new(Some(renderer), Some(text)) })
@@ -280,6 +284,7 @@ impl FlexmaEditor {
             "rebuilds": self.ed.renderer.as_ref().map(|r| r.builds).unwrap_or(0),
             "paintPasses": self.ed.renderer.as_ref().map(|r| r.paint_counters()[0]).unwrap_or(0),
             "paintSubmits": self.ed.renderer.as_ref().map(|r| r.paint_counters()[1]).unwrap_or(0),
+            "paintQueuePeak": self.ed.renderer.as_ref().map(|r| r.paint_counters()[2]).unwrap_or(0),
         })
         .to_string()
     }

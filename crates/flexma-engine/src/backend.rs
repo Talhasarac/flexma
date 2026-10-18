@@ -158,9 +158,10 @@ pub trait Backend {
     fn end_frame(&mut self);
     /// Draw calls issued by the last frame (diagnostics).
     fn draw_calls(&self) -> u32;
-    /// Paint-tile GPU work so far: (render passes, queue submits).
-    fn paint_counters(&self) -> [u64; 2] {
-        [0, 0]
+    /// Paint-tile GPU work so far: (render passes, queue submits, most ops
+    /// that waited for the GPU at once).
+    fn paint_counters(&self) -> [u64; 3] {
+        [0, 0, 0]
     }
     /// A flag the backend can raise to ask for another frame (e.g. after a
     /// frame failed on the GPU and should be redrawn).
@@ -190,6 +191,12 @@ pub trait Backend {
     /// Get painting's GPU programs ready before the first stroke (they would
     /// otherwise compile mid-stroke).
     fn prewarm_paint(&mut self) {}
+
+    /// Paint work is waiting for the GPU to catch up (the editor keeps
+    /// drawing frames until it's done).
+    fn paint_pending(&self) -> bool {
+        false
+    }
 }
 
 /// Mip levels for the grain and tint textures: where a texel is about a layer

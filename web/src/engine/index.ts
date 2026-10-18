@@ -70,6 +70,16 @@ export interface CreateEditorOptions {
   onGpuFailure?: (message: string) => void;
 }
 
+/**
+ * Most paint passes the engine encodes ahead of the GPU (see
+ * `FlexmaEditor.withWebGpu`). iPads and iPhones (Apple's engine with a touch
+ * screen) get the smaller budget their GPU process memory allows.
+ */
+function paintCap(): number {
+  const appleMobile = navigator.vendor.startsWith('Apple') && navigator.maxTouchPoints > 1;
+  return appleMobile ? 1024 : 4096;
+}
+
 /** A new editor drawing on `canvas` with the best available renderer. */
 export async function createEditor(canvas: HTMLCanvasElement, opts: CreateEditorOptions = {}): Promise<FlexmaEditor> {
   await loadEngine();
@@ -101,13 +111,13 @@ export async function createEditor(canvas: HTMLCanvasElement, opts: CreateEditor
         };
         device.addEventListener('uncapturederror', (e) => fail(e.error.message));
         // Flexma never destroys its device while the editor is open, so any
-        // loss then is a failure. Safari reports the system ending it (an iPad
-        // whose GPU work ran too long) as "destroyed" too.
+        // loss then is a failure. Safari reports the system ending its GPU
+        // process (an iPad out of memory) as "destroyed" too.
         void device.lost.then((info) => {
           if (canvas.isConnected) fail(`device lost (${info.reason}): ${info.message}`);
         });
         try {
-          const editor = FlexmaEditor.withWebGpu(device, context, format, (message: string) => fail(message));
+          const editor = FlexmaEditor.withWebGpu(device, context, format, (message: string) => fail(message), paintCap());
           // Safari throws from WebGPU calls (on a lost device, say) where
           // Chrome reports an error later. A throw inside the engine leaves it
           // unusable, so the first one switches to WebGL2 like any GPU failure.

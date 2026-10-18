@@ -951,8 +951,8 @@ impl Backend for GlBackend {
         }
     }
 
-    fn paint_counters(&self) -> [u64; 2] {
-        [self.paint_passes, 0]
+    fn paint_counters(&self) -> [u64; 3] {
+        [self.paint_passes, 0, 0]
     }
 }
 
