@@ -100,11 +100,27 @@ export async function createEditor(canvas: HTMLCanvasElement, opts: CreateEditor
           (opts.onGpuFailure ?? (() => window.location.reload()))(message);
         };
         device.addEventListener('uncapturederror', (e) => fail(e.error.message));
+        // Flexma never destroys its device while the editor is open, so any
+        // loss then is a failure. Safari reports the system ending it (an iPad
+        // whose GPU work ran too long) as "destroyed" too.
         void device.lost.then((info) => {
-          if (info.reason !== 'destroyed') fail(`device lost: ${info.message}`);
+          if (canvas.isConnected) fail(`device lost (${info.reason}): ${info.message}`);
         });
         try {
-          return FlexmaEditor.withWebGpu(device, context, format, (message: string) => fail(message));
+          const editor = FlexmaEditor.withWebGpu(device, context, format, (message: string) => fail(message));
+          // Safari throws from WebGPU calls (on a lost device, say) where
+          // Chrome reports an error later. A throw inside the engine leaves it
+          // unusable, so the first one switches to WebGL2 like any GPU failure.
+          const frame = editor.frame.bind(editor);
+          editor.frame = (now: number) => {
+            try {
+              return frame(now);
+            } catch (err) {
+              fail(String(err));
+              throw err;
+            }
+          };
+          return editor;
         } catch (err) {
           // The canvas now has a WebGPU context and can't switch to WebGL2.
           fail(String(err));

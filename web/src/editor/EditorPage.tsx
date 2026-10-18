@@ -39,10 +39,14 @@ export default function EditorPage() {
         if (cancelled) return;
         setFile(info);
         const engine = await createEditor(canvas, {
-          // Send pending edits before reloading onto WebGL2.
+          // Send pending edits before reloading onto WebGL2 (when the engine
+          // can still give them up: after a throw inside it, it can't).
           onGpuFailure: () => {
-            created?.close();
-            window.location.reload();
+            try {
+              created?.close();
+            } finally {
+              window.location.reload();
+            }
           },
         });
         if (cancelled) {

@@ -169,6 +169,12 @@ const SMUDGE_BYTES: u32 = 176;
 const SLOT_BYTES: usize = 256;
 /// The smudge window: the tiles under a dab, side by side.
 const SMUDGE_WINDOW: u32 = 1024;
+/// Most dabs drawn in one GPU submission, and most smudge dabs (each a few
+/// passes). Replaying a file's strokes is a lot of GPU work at once; mobile
+/// GPUs lose the device when one command buffer runs too long (an iPad Air 4
+/// did), so long replays go out in several.
+const DABS_PER_SUBMIT: u32 = 4096;
+const SMUDGE_DABS_PER_SUBMIT: usize = 48;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Stencil {
@@ -1211,8 +1217,10 @@ impl Backend for GpuBackend {
         let ubuf = Self::write_uniforms(&self.device, &self.queue, &mut self.dab_uniforms, &mut self.trash_buf, &uni);
         let pipes = [PaintMode::Paint, PaintMode::Erase, PaintMode::AlphaLock].map(|m| (m, self.pipeline(Pipe::Dab(m))));
         let mut binds: HashMap<[Option<TexId>; 3], JsValue> = HashMap::new();
-        let enc = self.device.create_command_encoder();
+        let mut enc = self.device.create_command_encoder();
         let inst_buf = self.dab_inst.as_ref().unwrap().buf.clone();
+        // Dabs drawn since the last submit (see DABS_PER_SUBMIT).
+        let mut in_submit = 0u32;
         let mut i = 0;
         while i < batches.len() {
             let tex = batches[i].tex;
@@ -1221,11 +1229,15 @@ impl Backend for GpuBackend {
                 continue;
             };
             // Consecutive batches for the same tile share a render pass.
+            let begin = |enc: &GpuCommandEncoder| {
+                let pass = enc.begin_render_pass(&obj! {
+                    "colorAttachments": arr(vec![obj! { "view": view.clone(), "loadOp": "load", "storeOp": "store" }.into()]),
+                });
+                pass.set_vertex_buffer(0, &inst_buf);
+                pass
+            };
             self.paint_passes += 1;
-            let pass = enc.begin_render_pass(&obj! {
-                "colorAttachments": arr(vec![obj! { "view": view, "loadOp": "load", "storeOp": "store" }.into()]),
-            });
-            pass.set_vertex_buffer(0, &inst_buf);
+            let mut pass = begin(&enc);
             while i < batches.len() && batches[i].tex == tex {
                 let b = batches[i];
                 let key = [b.style.tip, b.style.grain, b.style.tint];
@@ -1235,9 +1247,26 @@ impl Backend for GpuBackend {
                     binds.insert(key, self.device.create_bind_group(&obj! { "layout": self.dab_bgl.clone(), "entries": arr(entries) }));
                 }
                 let pipe = &pipes.iter().find(|(m, _)| *m == b.mode).unwrap().1;
-                pass.set_pipeline(pipe);
-                pass.set_bind_group_offsets(0, &binds[&key], &[(i * SLOT_BYTES) as u32]);
-                pass.draw(4, (b.dabs.len() / DAB_FLOATS) as u32, 0, first[i]);
+                // In order, split across submissions when the batch is long.
+                let total = (b.dabs.len() / DAB_FLOATS) as u32;
+                let mut done = 0;
+                while done < total {
+                    if in_submit >= DABS_PER_SUBMIT {
+                        pass.end();
+                        self.paint_submits += 1;
+                        self.queue.submit(&arr(vec![enc.finish()]));
+                        enc = self.device.create_command_encoder();
+                        in_submit = 0;
+                        self.paint_passes += 1;
+                        pass = begin(&enc);
+                    }
+                    let n = (total - done).min(DABS_PER_SUBMIT - in_submit);
+                    pass.set_pipeline(pipe);
+                    pass.set_bind_group_offsets(0, &binds[&key], &[(i * SLOT_BYTES) as u32]);
+                    pass.draw(4, n, 0, first[i] + done);
+                    done += n;
+                    in_submit += n;
+                }
                 i += 1;
             }
             pass.end();
@@ -1292,8 +1321,14 @@ impl Backend for GpuBackend {
         let ubuf = Self::write_uniforms(&self.device, &self.queue, &mut self.smudge_uniform, &mut self.trash_buf, &data);
         let (pick_pipe, stamp_pipe) = (self.pipeline(Pipe::SmudgePick), self.pipeline(Pipe::SmudgeStamp));
         let mut binds: HashMap<[Option<TexId>; 4], JsValue> = HashMap::new();
-        let enc = self.device.create_command_encoder();
-        for (d, win, reach, pick, stamps) in plans {
+        let mut enc = self.device.create_command_encoder();
+        for (n, (d, win, reach, pick, stamps)) in plans.into_iter().enumerate() {
+            // Long smudge replays go out in several submissions (see DABS_PER_SUBMIT).
+            if n > 0 && n % SMUDGE_DABS_PER_SUBMIT == 0 {
+                self.paint_submits += 1;
+                self.queue.submit(&arr(vec![enc.finish()]));
+                enc = self.device.create_command_encoder();
+            }
             let Some(buf) = self.textures.get(d.buffer.0 as usize).and_then(Option::as_ref).map(|e| e.tex.clone()) else { continue };
             // 1. Only the pixels under the dab (plus a texel for filtering)
             // are copied into the window; unpainted tiles copy as transparent.
