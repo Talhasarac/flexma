@@ -1,5 +1,5 @@
 //! API tokens for AI agents, agent setup snippets, and the skill files served to
-//! Claude Code / Codex installs.
+//! Claude Code / Codex / OpenCode installs.
 
 use crate::auth::{new_api_token, AuthUser};
 use crate::db::{new_id, now, sha256_hex, ts};
@@ -97,6 +97,8 @@ pub fn setup_snippets(base: &str) -> Value {
         "codexConfig": format!(
             "[mcp_servers.flexma]\nurl = \"{mcp}\"\n# Optional: let Codex use Flexma tools without asking each time (needed for `codex exec`)\n# default_tools_approval_mode = \"approve\""
         ),
+        "opencodeCommand": format!("opencode mcp add flexma --url {mcp} && opencode mcp auth flexma"),
+        "opencodeConfig": opencode_config(&mcp, None),
         // API token alternative for headless / CI agents.
         "claudeTokenCommand": format!(
             "claude mcp add --scope user --transport http flexma {mcp} --header \"Authorization: Bearer $FLEXMA_TOKEN\""
@@ -105,6 +107,9 @@ pub fn setup_snippets(base: &str) -> Value {
         "codexTokenConfig": format!(
             "[mcp_servers.flexma]\nurl = \"{mcp}\"\nbearer_token_env_var = \"FLEXMA_TOKEN\"\ndefault_tools_approval_mode = \"approve\""
         ),
+        // OpenCode reads the token from FLEXMA_TOKEN when it connects ({env:…}).
+        "opencodeTokenCommand": format!("opencode mcp add flexma --url {mcp} --header 'Authorization=Bearer {{env:FLEXMA_TOKEN}}'"),
+        "opencodeTokenConfig": opencode_config(&mcp, Some("Bearer {env:FLEXMA_TOKEN}")),
         // Windows PowerShell variants (5.1 has no `&&`, and no `sh` to pipe into).
         "windows": {
             "skillInstallCommand": format!("irm {base}/agents/install.ps1 | iex"),
@@ -115,8 +120,23 @@ pub fn setup_snippets(base: &str) -> Value {
                 "claude mcp add --scope user --transport http flexma {mcp} --header \"Authorization: Bearer $env:FLEXMA_TOKEN\""
             ),
             "codexTokenCommand": format!("codex mcp add flexma --url {mcp} --bearer-token-env-var FLEXMA_TOKEN"),
+            "opencodeCommand": format!("opencode mcp add flexma --url {mcp}; opencode mcp auth flexma"),
+            "opencodeTokenCommand": format!("opencode mcp add flexma --url {mcp} --header 'Authorization=Bearer {{env:FLEXMA_TOKEN}}'"),
         },
     })
+}
+
+/// `opencode.json` with the Flexma server: signed in through the browser
+/// (OAuth), or with an `Authorization` header (OAuth then stays off).
+fn opencode_config(mcp: &str, authorization: Option<&str>) -> String {
+    // Written by hand so the keys read in the usual order (type and url first).
+    let auth = authorization
+        .map(|a| format!(",\n      \"headers\": {{ \"Authorization\": {} }},\n      \"oauth\": false", json!(a)))
+        .unwrap_or_default();
+    format!(
+        "{{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {{\n    \"flexma\": {{\n      \"type\": \"remote\",\n      \"url\": {}{auth}\n    }}\n  }}\n}}",
+        json!(mcp)
+    )
 }
 
 pub async fn agent_setup(State(st): State<AppState>, headers: HeaderMap, _user: AuthUser) -> Json<Value> {
@@ -215,8 +235,8 @@ fn install_sh(base: &str, skills: &[&Skill]) -> String {
     let what = names(skills);
     format!(
         r#"#!/bin/sh
-# Flexma skill installer for Claude Code and Codex.
-# Installs {what} into ~/.claude/skills and ~/.codex/skills.
+# Flexma skill installer for Claude Code, Codex and OpenCode.
+# Installs {what} into ~/.claude/skills, ~/.codex/skills and ~/.config/opencode/skills.
 set -e
 BASE="{base}"
 install_to() {{
@@ -232,6 +252,7 @@ install_to() {{
 echo "Installing {what} from $BASE"
 install_to "$HOME/.claude/skills"
 install_to "$HOME/.codex/skills"
+install_to "${{XDG_CONFIG_HOME:-$HOME/.config}}/opencode/skills"
 echo ""
 echo "Next, connect the Flexma MCP server (your agent will open a browser to sign in):"
 echo ""
@@ -241,9 +262,13 @@ echo ""
 echo "  Codex:"
 echo '    {codex}'
 echo ""
+echo "  OpenCode:"
+echo '    {opencode}'
+echo ""
 "#,
         claude = snippets["claudeCommand"].as_str().unwrap_or_default().replace('\'', "'\\''"),
         codex = snippets["codexCommand"].as_str().unwrap_or_default().replace('\'', "'\\''"),
+        opencode = snippets["opencodeCommand"].as_str().unwrap_or_default().replace('\'', "'\\''"),
     )
 }
 
@@ -253,8 +278,8 @@ fn install_ps1(base: &str, skills: &[&Skill]) -> String {
     let files: Vec<String> = skills.iter().flat_map(|s| s.files.iter().map(move |(p, _)| format!("'{}/{p}'", s.name))).collect();
     let what = names(skills);
     format!(
-        r#"# Flexma skill installer for Claude Code and Codex (Windows PowerShell).
-# Installs {what} into ~\.claude\skills and ~\.codex\skills.
+        r#"# Flexma skill installer for Claude Code, Codex and OpenCode (Windows PowerShell).
+# Installs {what} into ~\.claude\skills, ~\.codex\skills and ~\.config\opencode\skills.
 # Runs in its own scope so nothing leaks into your session.
 & {{
 $ErrorActionPreference = 'Stop'
@@ -272,6 +297,7 @@ function Install-FlexmaSkills([string]$Root) {{
 Write-Host "Installing {what} from $FlexmaBase"
 Install-FlexmaSkills (Join-Path $HOME '.claude\skills')
 Install-FlexmaSkills (Join-Path $HOME '.codex\skills')
+Install-FlexmaSkills (Join-Path $HOME '.config\opencode\skills')
 Write-Host ''
 Write-Host 'Next, connect the Flexma MCP server (your agent will open a browser to sign in):'
 Write-Host ''
@@ -281,6 +307,9 @@ Write-Host ''
 Write-Host '  Codex:'
 Write-Host '    {codex}'
 Write-Host ''
+Write-Host '  OpenCode:'
+Write-Host '    {opencode}'
+Write-Host ''
 }}
 "#,
         what = ps(&what),
@@ -288,6 +317,7 @@ Write-Host ''
         files = files.join(", "),
         claude = ps(snippets["windows"]["claudeCommand"].as_str().unwrap_or_default()),
         codex = ps(snippets["windows"]["codexCommand"].as_str().unwrap_or_default()),
+        opencode = ps(snippets["windows"]["opencodeCommand"].as_str().unwrap_or_default()),
     )
 }
 
@@ -308,6 +338,21 @@ mod skill_tests {
         assert!(ps.contains("'unity-ui-to-flexma/scripts/FlexmaClient.cs'"));
         // The default installer stays flexma-only.
         assert!(!install_sh("https://f.example", &[&FLEXMA_SKILL]).contains("unity-ui-to-flexma"));
+    }
+
+    #[test]
+    fn opencode_is_set_up_like_the_others() {
+        let sh = install_sh("https://f.example", &[&FLEXMA_SKILL]);
+        assert!(sh.contains("install_to \"${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills\""));
+        assert!(sh.contains("opencode mcp add flexma --url https://f.example/mcp && opencode mcp auth flexma"));
+        assert!(install_ps1("https://f.example", &[&FLEXMA_SKILL]).contains("Join-Path $HOME '.config\\opencode\\skills'"));
+        let s = setup_snippets("https://f.example");
+        let oauth: Value = serde_json::from_str(s["opencodeConfig"].as_str().unwrap()).unwrap();
+        assert_eq!(oauth["mcp"]["flexma"], json!({ "type": "remote", "url": "https://f.example/mcp" }));
+        let token: Value = serde_json::from_str(s["opencodeTokenConfig"].as_str().unwrap()).unwrap();
+        assert_eq!(token["mcp"]["flexma"]["headers"]["Authorization"], "Bearer {env:FLEXMA_TOKEN}");
+        assert_eq!(token["mcp"]["flexma"]["oauth"], false);
+        assert!(s["opencodeTokenCommand"].as_str().unwrap().ends_with("--header 'Authorization=Bearer {env:FLEXMA_TOKEN}'"));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 <h1 align="center">Flexma</h1>
 
 <p align="center"><b>The open-source, self-hosted design canvas for teams and their AI agents.</b><br>
-Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code and Codex built in through MCP.</p>
+Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code, Codex and OpenCode built in through MCP.</p>
 
 <p align="center">
   <a href="https://sillytoast.studio"><img src="docs/sillytoast.svg" width="18" height="18" alt=""> Made by <b>silly toast</b> studio</a>
@@ -38,11 +38,11 @@ Real-time multiplayer like Figma. Your own server, like Nextcloud. Claude Code a
 - Public view-only share links: anyone with the link can watch a file live and export it, without an account. Links can expire, be reset or be turned off.
 
 **AI agents**
-- A built-in MCP server lets Claude Code, Codex or any MCP client list, read, create, edit and screenshot designs live.
+- A built-in MCP server lets Claude Code, Codex, OpenCode or any MCP client list, read, create, edit and screenshot designs live.
 - Unlimited connections.
 - Agents can upload images and fonts, place any of 1,900 built-in icons, import SVG as editable vectors, fill components with data, audit a design for contrast and consistency, manage shared styles, and undo their own changes.
 - OAuth browser sign-in, like Figma's hosted MCP, plus API tokens for headless agents.
-- The Flexma skill teaches agents the platform and good design practice. It installs into Claude Code and Codex with one command.
+- The Flexma skill teaches agents the platform and good design practice. It installs into Claude Code, Codex and OpenCode with one command.
 
 **Self-hosting**
 - A single Rust binary with an SQLite database.
@@ -68,7 +68,10 @@ claude mcp add --scope user --transport http flexma https://<your domain>/mcp
 # Codex
 codex mcp add flexma --url https://<your domain>/mcp && codex mcp login flexma
 
-# Teach them Flexma (installs ~/.claude/skills/flexma and ~/.codex/skills/flexma)
+# OpenCode
+opencode mcp add flexma --url https://<your domain>/mcp && opencode mcp auth flexma
+
+# Teach them Flexma (installs into ~/.claude/skills, ~/.codex/skills and ~/.config/opencode/skills)
 curl -fsSL https://<your domain>/agents/install.sh | sh
 ```
 
@@ -101,7 +104,7 @@ Agents edit through the same pipeline as people, so collaborators watch the chan
 ┌───────────────┴──────────────────────────────────────┴────────────┐
 │ flexma-server (Rust, axum): auth, workspaces, files, assets,       │
 │ one actor per open document (authoritative, ordered ops, snapshots)│
-│ MCP endpoint + OAuth 2.1 ◄──── Claude Code / Codex / MCP clients   │
+│ MCP endpoint + OAuth 2.1 ◄── Claude Code / Codex / OpenCode / MCP  │
 │ SQLite (WAL)                                                      │
 └────────────────────────────────────────────────────────────────────┘
           flexma-doc (shared Rust crate): nodes, ops, fractional
@@ -140,7 +143,7 @@ cd web && npx tsc -b
 | `crates/flexma-engine` | wasm editor engine and WebGPU renderer (WebGL2 fallback) |
 | `crates/flexma-server` | HTTP/WebSocket server, MCP, OAuth, SQLite |
 | `web/` | React app (dashboard and editor UI) |
-| `skills/flexma` | Agent skill for Claude Code and Codex |
+| `skills/flexma` | Agent skill for Claude Code, Codex and OpenCode |
 | `docs/` | API reference, deployment guide, performance research |
 
 ## Configuration

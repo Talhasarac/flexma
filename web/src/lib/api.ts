@@ -176,18 +176,25 @@ export interface AgentSetup {
   claudeCommand: string;
   codexConfig: string;
   codexCommand: string;
-  /** Bearer-token variants for headless agents; contain `$FLEXMA_TOKEN`. */
+  /** `opencode mcp add` + `opencode mcp auth`, and the same as `opencode.json`. */
+  opencodeCommand: string;
+  opencodeConfig: string;
+  /** Bearer-token variants for headless agents; contain `$FLEXMA_TOKEN` (OpenCode's read it from the environment). */
   claudeTokenCommand: string;
   codexTokenCommand: string;
   codexTokenConfig: string;
+  opencodeTokenCommand: string;
+  opencodeTokenConfig: string;
   /** Windows PowerShell variants. */
   windows?: {
     skillInstallCommand: string;
     unitySkillInstallCommand: string;
     claudeCommand: string;
     codexCommand: string;
+    opencodeCommand: string;
     claudeTokenCommand: string;
     codexTokenCommand: string;
+    opencodeTokenCommand: string;
   };
 }
 

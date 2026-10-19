@@ -1,6 +1,6 @@
 # Deploy Flexma on a DigitalOcean droplet
 
-This guide takes you from an empty droplet to `https://design.yourdomain.com` with HTTPS, multiplayer, and an MCP endpoint that Claude Code and Codex can sign in to from anywhere, the same way Figma's hosted MCP works.
+This guide takes you from an empty droplet to `https://design.yourdomain.com` with HTTPS, multiplayer, and an MCP endpoint that Claude Code, Codex and OpenCode can sign in to from anywhere, the same way Figma's hosted MCP works.
 
 ## 1. Create the droplet
 
@@ -53,7 +53,7 @@ The first build takes a while (Rust plus the web app). When it finishes:
 - Open the setup link to create the admin account and your first workspace. It's in the log (`docker compose logs flexma | grep setup`) and looks like `https://design.yourdomain.com/setup?token=…`. The token is also saved in the data directory: `docker compose exec flexma cat /data/setup-token`. It stops strangers from claiming a fresh instance, survives restarts, and is deleted once the first account exists. To choose it yourself, set `FLEXMA_SETUP_TOKEN`.
 - Invite teammates from **Workspace settings → Invite people**. The invite link is the only way in unless you set `FLEXMA_ALLOW_SIGNUP=true`.
 
-## 6. Connect Claude Code and Codex (remote MCP)
+## 6. Connect Claude Code, Codex and OpenCode (remote MCP)
 
 On your laptop (any machine), connect Claude Code:
 
@@ -71,6 +71,13 @@ codex mcp login flexma
 ```
 
 For non-interactive `codex exec` runs, also add `default_tools_approval_mode = "approve"` under `[mcp_servers.flexma]` in `~/.codex/config.toml`. Otherwise Codex asks before every Flexma tool call.
+
+Connect OpenCode:
+
+```bash
+opencode mcp add flexma --url https://design.yourdomain.com/mcp
+opencode mcp auth flexma
+```
 
 Install the Flexma skill so your agents know how to design well with it:
 

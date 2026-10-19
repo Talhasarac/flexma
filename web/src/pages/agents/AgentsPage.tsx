@@ -17,7 +17,7 @@ export default function AgentsPage() {
 
   return (
     <div className="page page-narrow">
-      <PageHeader title="AI Agents" subtitle="Design together with Claude Code, Codex and any other MCP-capable agent." />
+      <PageHeader title="AI Agents" subtitle="Design together with Claude Code, Codex, OpenCode and any other MCP-capable agent." />
 
       <section className="card agents-hero">
         <div className="agents-hero-icon" aria-hidden="true">
@@ -26,7 +26,7 @@ export default function AgentsPage() {
         <div className="stack">
           <h2 className="agents-hero-title">Bring your coding agents into the canvas</h2>
           <p className="text-muted">
-            Flexma speaks the Model Context Protocol (MCP). Connect Claude Code or Codex like any hosted MCP server: add the
+            Flexma speaks the Model Context Protocol (MCP). Connect Claude Code, Codex or OpenCode like any hosted MCP server: add the
             URL and sign in with your browser. They can then open, create and edit your design files, and see what they make.
           </p>
           <ul className="feature-list">

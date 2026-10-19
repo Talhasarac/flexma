@@ -110,7 +110,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
         </button>
         <MissingFontsButton store={store} />
         <Presence store={store} self={user ? { name: user.name, color: user.color } : null} />
-        <button type="button" className="btn btn-sm tb-ai" onClick={() => setAgentsOpen(true)} title="Connect Claude Code or Codex">
+        <button type="button" className="btn btn-sm tb-ai" onClick={() => setAgentsOpen(true)} title="Connect Claude Code, Codex or OpenCode">
           <Sparkles size={14} /> AI
         </button>
         <button type="button" className="btn btn-sm btn-primary" onClick={() => setShareOpen(true)}>

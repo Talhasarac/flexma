@@ -38,14 +38,18 @@ export interface OsSnippets {
   shell: string;
   claudeCommand: string;
   codexCommand: string;
+  opencodeCommand: string;
   skillInstallCommand: string;
   unitySkillInstallCommand: string;
   /** Linux machines don't always have curl. */
   skillInstallFallback: string | null;
   claudeTokenCommand: string;
   codexTokenCommand: string;
+  opencodeTokenCommand: string;
   codexConfigPath: string;
-  skillDirs: [string, string];
+  opencodeConfigPath: string;
+  /** Claude Code, Codex and OpenCode skill folders. */
+  skillDirs: [string, string, string];
   /** How to make FLEXMA_TOKEN available to agents. */
   setTokenCommand: string;
 }
@@ -57,7 +61,8 @@ export function snippetsFor(s: AgentSetup, os: OS): OsSnippets {
       ...s.windows,
       skillInstallFallback: null,
       codexConfigPath: '%USERPROFILE%\\.codex\\config.toml',
-      skillDirs: ['%USERPROFILE%\\.claude\\skills', '%USERPROFILE%\\.codex\\skills'],
+      opencodeConfigPath: '%USERPROFILE%\\.config\\opencode\\opencode.json',
+      skillDirs: ['%USERPROFILE%\\.claude\\skills', '%USERPROFILE%\\.codex\\skills', '%USERPROFILE%\\.config\\opencode\\skills'],
       setTokenCommand: 'setx FLEXMA_TOKEN "$FLEXMA_TOKEN"',
     };
   }
@@ -65,13 +70,16 @@ export function snippetsFor(s: AgentSetup, os: OS): OsSnippets {
     shell: 'Terminal',
     claudeCommand: s.claudeCommand,
     codexCommand: s.codexCommand,
+    opencodeCommand: s.opencodeCommand,
     skillInstallCommand: s.skillInstallCommand,
     unitySkillInstallCommand: s.unitySkillInstallCommand,
     skillInstallFallback: os === 'linux' ? s.skillInstallCommand.replace('curl -fsSL', 'wget -qO-') : null,
     claudeTokenCommand: s.claudeTokenCommand,
     codexTokenCommand: s.codexTokenCommand,
+    opencodeTokenCommand: s.opencodeTokenCommand,
     codexConfigPath: '~/.codex/config.toml',
-    skillDirs: ['~/.claude/skills', '~/.codex/skills'],
+    opencodeConfigPath: '~/.config/opencode/opencode.json',
+    skillDirs: ['~/.claude/skills', '~/.codex/skills', '~/.config/opencode/skills'],
     setTokenCommand: `echo 'export FLEXMA_TOKEN="$FLEXMA_TOKEN"' >> ${os === 'mac' ? '~/.zshrc' : '~/.bashrc'}`,
   };
 }

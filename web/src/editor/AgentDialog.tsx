@@ -1,4 +1,4 @@
-// "Connect AI" dialog: how to point Claude Code / Codex at this server via MCP,
+// "Connect AI" dialog: how to point Claude Code / Codex / OpenCode at this server via MCP,
 // with commands for the person's OS (Terminal on macOS/Linux, PowerShell on Windows).
 import { Link } from 'react-router-dom';
 import { Modal } from '../components/Modal';
@@ -17,7 +17,7 @@ export function AgentDialog({ open, onClose, fileId, fileName }: { open: boolean
   const prompt = `In my Flexma file "${fileName}" (file id ${fileId}), `;
   const s = setup && snippetsFor(setup, os);
   return (
-    <Modal open={open} onClose={onClose} title="Design with AI agents" description="Claude Code, Codex and any MCP client can read and edit this file live. Their changes appear here instantly." size="md">
+    <Modal open={open} onClose={onClose} title="Design with AI agents" description="Claude Code, Codex, OpenCode and any MCP client can read and edit this file live. Their changes appear here instantly." size="md">
       {!s ? (
         <div className="skeleton skeleton-block" style={{ height: 120 }} />
       ) : (
@@ -35,7 +35,11 @@ export function AgentDialog({ open, onClose, fileId, fileName }: { open: boolean
             <CopyField value={s.codexCommand} multiline toastMessage="Command copied" />
           </div>
           <div className="field">
-            <div className="field-label">2. Teach your agents Flexma (installs the skill for Claude Code and Codex)</div>
+            <div className="field-label">…or OpenCode</div>
+            <CopyField value={s.opencodeCommand} multiline toastMessage="Command copied" />
+          </div>
+          <div className="field">
+            <div className="field-label">2. Teach your agents Flexma (installs the skill for Claude Code, Codex and OpenCode)</div>
             <CopyField value={s.skillInstallCommand} multiline toastMessage="Command copied" />
             {s.skillInstallFallback && (
               <p className="text-muted text-sm">

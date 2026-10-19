@@ -9,7 +9,7 @@ Flexma is a collaborative design canvas. You edit the **same live document** peo
 
 For Unity projects there is an optional companion skill, `unity-ui-to-flexma`, that exports a game's uGUI screens into Flexma as editable layers and keeps them in sync. If the user wants their Unity UI in Flexma and that skill isn't installed, point them to Flexma's AI Agents page for its install command (`curl -fsSL <flexma-url>/agents/install/unity-ui-to-flexma.sh | sh`).
 
-The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexma__<tool>` in Claude Code and `flexma.<tool>` in Codex. If no Flexma tools are available, tell the user to connect the server (see "Setup" at the end) instead of guessing.
+The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexma__<tool>` in Claude Code, `flexma.<tool>` in Codex and `flexma_<tool>` in OpenCode. If no Flexma tools are available, tell the user to connect the server (see "Setup" at the end) instead of guessing.
 
 ## Mental model
 
@@ -212,5 +212,6 @@ Flexma's MCP endpoint is `https://<your-flexma-host>/mcp` (Streamable HTTP, OAut
 
 - **Claude Code:** run `claude mcp add --scope user --transport http flexma https://<host>/mcp`, then `/mcp` to sign in through the browser.
 - **Codex:** run `codex mcp add flexma --url https://<host>/mcp`, then `codex mcp login flexma`. For non-interactive `codex exec`, also set `default_tools_approval_mode = "approve"` under `[mcp_servers.flexma]` in `~/.codex/config.toml`.
+- **OpenCode:** run `opencode mcp add flexma --url https://<host>/mcp`, then `opencode mcp auth flexma` to sign in through the browser.
 - **Headless:** create a token in Flexma → AI Agents and send `Authorization: Bearer <token>`.
 - **Skill:** reinstall it with `curl -fsSL https://<host>/agents/install.sh | sh`.

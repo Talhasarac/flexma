@@ -7,7 +7,7 @@ import { CopyField } from '../../components/CopyField';
 import { ErrorState } from '../../components/EmptyState';
 import { Tabs } from '../../components/Tabs';
 
-type AgentTab = 'claude' | 'codex' | 'other';
+type AgentTab = 'claude' | 'codex' | 'opencode' | 'other';
 
 // `$FLEXMA_TOKEN` (sh) or `$env:FLEXMA_TOKEN` (PowerShell).
 const PLACEHOLDER = /\$(?:env:)?\{?FLEXMA_TOKEN\}?/g;
@@ -45,6 +45,7 @@ function AgentTabs({ children }: { children: (tab: AgentTab) => ReactElement }) 
       tabs={[
         { id: 'claude', label: 'Claude Code' },
         { id: 'codex', label: 'Codex' },
+        { id: 'opencode', label: 'OpenCode' },
         { id: 'other', label: 'Other MCP clients' },
       ]}
     >
@@ -78,6 +79,16 @@ export function ConnectSection({ setup, os }: ConnectProps) {
               Or add it to <code>{o.codexConfigPath}</code> and run <code>codex mcp login flexma</code>:
             </p>
             <CopyField value={s.codexConfig} multiline toastMessage="Config copied" />
+          </div>
+        ) : tab === 'opencode' ? (
+          <div className="stack">
+            <p className="text-muted">Add Flexma and sign in through your browser (in {o.shell}):</p>
+            <CopyField value={o.opencodeCommand} multiline toastMessage="Command copied" />
+            <p className="text-muted">
+              Or add it to <code>{o.opencodeConfigPath}</code>. OpenCode asks you to sign in the first time it uses Flexma (or run{' '}
+              <code>opencode mcp auth flexma</code>):
+            </p>
+            <CopyField value={s.opencodeConfig} multiline toastMessage="Config copied" />
           </div>
         ) : (
           <div className="stack">
@@ -118,6 +129,19 @@ export function TokenConnectSection({ setup, os, token }: ConnectProps) {
               </p>
               <CopyField value={fillToken(s.codexTokenConfig, token)} multiline toastMessage="Config copied" />
             </div>
+          ) : tab === 'opencode' ? (
+            <div className="stack">
+              <p className="text-muted text-sm">OpenCode reads the token from the FLEXMA_TOKEN environment variable. Save it once:</p>
+              <CopyField value={fillToken(o.setTokenCommand, token)} multiline toastMessage="Command copied" />
+              <p className="text-muted text-sm">
+                {os === 'windows' ? 'Then open a new PowerShell window and run:' : 'Then open a new terminal and run:'}
+              </p>
+              <CopyField value={o.opencodeTokenCommand} multiline toastMessage="Command copied" />
+              <p className="text-muted text-sm">
+                Or put this in <code>{o.opencodeConfigPath}</code>:
+              </p>
+              <CopyField value={s.opencodeTokenConfig} multiline toastMessage="Config copied" />
+            </div>
           ) : (
             <div className="stack">
               <CopyField value={s.mcpUrl} label="MCP endpoint" toastMessage="URL copied" />
@@ -130,7 +154,7 @@ export function TokenConnectSection({ setup, os, token }: ConnectProps) {
   );
 }
 
-/** The Flexma skill for Claude Code and Codex. */
+/** The Flexma skill for Claude Code, Codex and OpenCode. */
 export function SkillSection({ setup, os }: ConnectProps) {
   if (!setup.data) return <SetupLoading setup={setup} />;
   const o = snippetsFor(setup.data, os);
@@ -144,7 +168,8 @@ export function SkillSection({ setup, os }: ConnectProps) {
         </p>
       )}
       <p className="text-muted text-sm">
-        Installs the <code>flexma</code> skill into <code>{o.skillDirs[0]}</code> and <code>{o.skillDirs[1]}</code>.
+        Installs the <code>flexma</code> skill into <code>{o.skillDirs[0]}</code>, <code>{o.skillDirs[1]}</code> and{' '}
+        <code>{o.skillDirs[2]}</code>.
       </p>
       <p className="text-muted">
         Unity projects: also install <code>unity-ui-to-flexma</code>, which exports a game's uGUI screens into Flexma and
