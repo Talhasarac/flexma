@@ -366,8 +366,15 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                 if crate::node::Node::PROPS.contains(&k.as_str()) {
                     out.insert(k.clone(), v.clone());
                 } else {
+                    // Models that can't place `children` sometimes invent `childrenName`,
+                    // `child`, `childNodes`… and list the children as siblings instead.
+                    let nesting = if k.to_ascii_lowercase().contains("child") {
+                        " To nest layers, put their specs in the parent's children array: {type:'frame', name:'Nav', children:[{type:'text', text:'Home'}]}."
+                    } else {
+                        ""
+                    };
                     return Err(format!(
-                        "unknown property '{k}'. Known: {} (plus shorthands fill, stroke, radius, text, gap, layout, justify, alignItems, shadow, w, h)",
+                        "unknown property '{k}'.{nesting} Known: {} (plus shorthands fill, stroke, radius, text, gap, layout, justify, alignItems, shadow, w, h, children)",
                         crate::node::Node::PROPS.join(", ")
                     ));
                 }
@@ -860,6 +867,8 @@ mod tests {
     #[test]
     fn rejects_unknown_props() {
         let r = normalize_props(NodeType::Rectangle, json!({ "colour": "#fff" }).as_object().unwrap());
-        assert!(r.is_err());
+        assert!(!r.unwrap_err().contains("To nest layers"));
+        let r = normalize_props(NodeType::Frame, json!({ "childrenName": "Brand" }).as_object().unwrap());
+        assert!(r.unwrap_err().contains("children array"));
     }
 }

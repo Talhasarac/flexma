@@ -81,8 +81,11 @@ fn tools() -> Value {
     let file_id = json!({ "type": "string", "description": "File id" });
     let node_spec = json!({
         "type": "object",
-        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|GRID|NONE), wrap (bool, needs a fixed width), rowGap, GRID: columns|rows, cellSize [w,h], startCorner; gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip (true|false|\"alpha\": clip to the fill's alpha, like a Unity Mask), hideFill (mask without drawing the fill), children[]. TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing, wrap (false: only newlines break), overflow (VISIBLE|CLIP|ELLIPSIS|TRUNCATE, for fixed boxes), autoSize ([min, max]: a fixed box shrinks its font to fit). LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT'|'STRETCH'|'TILE' (TILE repeats at tileScale), tint?:'#hex' (multiply), slice?: 9-slice insets in image px, filled?: {method: HORIZONTAL|VERTICAL|RADIAL_90|RADIAL_180|RADIAL_360, amount: 0..1, origin, clockwise} like Unity's Filled image, crop?: [x, y, w, h] in image px (a sprite in an atlas)}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors). Shorthand types: {type:'image', asset:'<id from upload_image>'} (sized from the image), {type:'icon', icon:'<name from search_icons>', size, color}, {type:'instance', component:'<name>'}. Shared styles: fillStyle / strokeStyle / textStyle: '<style name>' (see list_styles); a style wins over raw values given with it. key: a stable external id; a top-level spec whose key matches an existing node updates it (and its children, matched by key) in place. meta: any JSON object (up to 64 KB) for your own data, e.g. the source component or a button's action; find_nodes can search it.",
-        "properties": { "type": { "type": "string" }, "children": { "type": "array", "items": { "type": "object" } } },
+        "description": "Node spec. Required: type. Common: name, x, y, width|w, height|h (number, or \"fill\"/\"hug\" inside auto layout), fill (hex or paint or array), stroke, strokeWeight, radius (number or [tl,tr,br,bl]), opacity, rotation, visible, shadow {x,y,blur,spread,color}. FRAME: layout (VERTICAL|HORIZONTAL|GRID|NONE), wrap (bool, needs a fixed width), rowGap, GRID: columns|rows, cellSize [w,h], startCorner; gap, padding (number|[v,h]|[t,r,b,l]), justify (start|center|end|space-between), alignItems (start|center|end), clip (true|false|\"alpha\": clip to the fill's alpha, like a Unity Mask), hideFill (mask without drawing the fill), children (array of node specs nested inside this one). TEXT: text, size, weight (400|700|\"bold\"...), font, color, align (LEFT|CENTER|RIGHT), lineHeight (px), letterSpacing, wrap (false: only newlines break), overflow (VISIBLE|CLIP|ELLIPSIS|TRUNCATE, for fixed boxes), autoSize ([min, max]: a fixed box shrinks its font to fit). LINE: x1,y1,x2,y2 or width+rotation. VECTOR: path (SVG d). POLYGON/STAR: points, innerRadius. Image fill: {type:'IMAGE', asset:'<asset id>', fit:'FILL'|'FIT'|'STRETCH'|'TILE' (TILE repeats at tileScale), tint?:'#hex' (multiply), slice?: 9-slice insets in image px, filled?: {method: HORIZONTAL|VERTICAL|RADIAL_90|RADIAL_180|RADIAL_360, amount: 0..1, origin, clockwise} like Unity's Filled image, crop?: [x, y, w, h] in image px (a sprite in an atlas)}. constraints {horizontal, vertical}: MIN|MAX|CENTER|STRETCH|SCALE, how a child follows when its parent frame is resized (like Unity anchors). Shorthand types: {type:'image', asset:'<id from upload_image>'} (sized from the image), {type:'icon', icon:'<name from search_icons>', size, color}, {type:'instance', component:'<name>'}. Shared styles: fillStyle / strokeStyle / textStyle: '<style name>' (see list_styles); a style wins over raw values given with it. key: a stable external id; a top-level spec whose key matches an existing node updates it (and its children, matched by key) in place. meta: any JSON object (up to 64 KB) for your own data, e.g. the source component or a button's action; find_nodes can search it.",
+        // Only `type` is listed. Servers that constrain tool calls to the schema (llama.cpp)
+        // allow listed keys only in listed order, before any other key, so listing
+        // `children` would forbid it after `name` and a model would write `childrenName`.
+        "properties": { "type": { "type": "string" } },
         "required": ["type"],
         "additionalProperties": true
     });
@@ -2910,5 +2913,32 @@ mod arg_tests {
         assert!(unknown_args("get_screenshot", &json!({ "file_id": "f", "scale": 2 })).is_empty());
         assert!(unknown_args("export_png", &json!({ "file_id": "f", "node_ids": ["a"], "scale": 3, "background": false, "page_id": "p" })).is_empty());
         assert!(unknown_args("no_such_tool", &json!({ "x": 1 })).is_empty());
+    }
+
+    /// Schema-constrained decoding (llama.cpp) puts listed keys before extra ones, so an
+    /// optional listed key in an open object becomes unwritable once the model writes an
+    /// extra key first.
+    #[test]
+    fn open_objects_list_only_required_keys() {
+        fn walk(v: &Value, path: &str) {
+            match v {
+                Value::Object(o) => {
+                    if o.get("additionalProperties") == Some(&json!(true)) {
+                        let required: Vec<&str> = o.get("required").and_then(Value::as_array).map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                        for k in o.get("properties").and_then(Value::as_object).map(|p| p.keys().collect()).unwrap_or_else(Vec::new) {
+                            assert!(required.contains(&k.as_str()), "{path}: optional '{k}' listed in an open object");
+                        }
+                    }
+                    for (k, c) in o {
+                        walk(c, &format!("{path}.{k}"));
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|c| walk(c, path)),
+                _ => {}
+            }
+        }
+        for t in tools().as_array().unwrap() {
+            walk(&t["inputSchema"], t["name"].as_str().unwrap());
+        }
     }
 }
