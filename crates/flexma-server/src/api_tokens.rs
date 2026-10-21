@@ -162,13 +162,14 @@ pub const FLEXMA_SKILL: Skill = Skill {
     ],
 };
 
-/// Optional: exports a Unity project's uGUI screens into Flexma. Ships the
-/// editor scripts the agent copies into the project.
+/// Optional: exports a Unity project's uGUI and UI Toolkit screens into
+/// Flexma. Ships the editor scripts the agent copies into the project.
 pub const UNITY_SKILL: Skill = Skill {
     name: "unity-ui-to-flexma",
     files: &[
         ("SKILL.md", include_str!("../../../skills/unity-ui-to-flexma/SKILL.md")),
         ("scripts/FlexmaUIExporter.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUIExporter.cs")),
+        ("scripts/FlexmaUIToolkitExport.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUIToolkitExport.cs")),
         ("scripts/FlexmaUploader.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUploader.cs")),
         ("scripts/FlexmaClient.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaClient.cs")),
         ("scripts/FlexmaUIExporterWindow.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUIExporterWindow.cs")),
@@ -336,6 +337,7 @@ mod skill_tests {
         }
         let ps = install_ps1("https://f.example", &[&FLEXMA_SKILL, &UNITY_SKILL]);
         assert!(ps.contains("'unity-ui-to-flexma/scripts/FlexmaClient.cs'"));
+        assert!(ps.contains("'unity-ui-to-flexma/scripts/FlexmaUIToolkitExport.cs'"));
         // The default installer stays flexma-only.
         assert!(!install_sh("https://f.example", &[&FLEXMA_SKILL]).contains("unity-ui-to-flexma"));
     }

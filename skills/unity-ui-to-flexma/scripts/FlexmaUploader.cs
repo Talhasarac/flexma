@@ -307,6 +307,11 @@ public static class FlexmaUploader
             {
                 family = "Arimo";
             }
+            else if (family == "NotInter")
+            {
+                // Unity 6's default UI Toolkit font is Inter under another name.
+                family = "Inter";
+            }
             try
             {
                 client.CallTool("add_font", new JObject { ["file_id"] = settings.FileId, ["family"] = family });

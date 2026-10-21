@@ -33,8 +33,11 @@ using UnityEngine.UI;
 ///
 /// Project hooks: subscribe to PoseScreen (show a screen the way the game does, e.g. a phone moved full screen) and
 /// AddEffects (custom mesh effects as Flexma shadows/blurs) from an editor script in the project; see FlexmaProjectHooks.
+///
+/// UI Toolkit documents (UIDocument + UXML + USS) are exported by the other half of this class, FlexmaUIToolkitExport.cs,
+/// when Options.UIToolkit is on. Both write into the same pages, so a scene with canvases and documents is one page.
 /// </summary>
-public static class FlexmaUIExporter
+public static partial class FlexmaUIExporter
 {
     public sealed class Options
     {
@@ -54,6 +57,10 @@ public static class FlexmaUIExporter
         /// <summary>Prefabs used two or more times become components on a "Components" page, and their uses become
         /// instances whose differences are overrides addressed by the component layer's key.</summary>
         public bool Components = true;
+        /// <summary>Export uGUI canvases.</summary>
+        public bool Canvases = true;
+        /// <summary>Export UI Toolkit documents (UIDocument + UXML + USS) too; see FlexmaUIToolkitExport.cs. Off unless asked for.</summary>
+        public bool UIToolkit = false;
     }
 
     public sealed class Result
@@ -77,6 +84,8 @@ public static class FlexmaUIExporter
     public const string ImagesFile = "images.json";
     public const string FontsFile = "fonts.json";
     public const string ImagesFolder = "images";
+    /// <summary>PNGs of the UI Toolkit frames as Unity draws them, per scene, for comparing with Flexma screenshots.</summary>
+    public const string RendersFolder = "renders";
 
     public static string DefaultOutputFolder
     {
@@ -165,7 +174,7 @@ public static class FlexmaUIExporter
     private sealed class FontEntry { public string Key, Asset, Family, Style, Source; }
     private sealed class FrameEntry { public string Canvas, Name, Description; public float Width, Height; public JArray Nodes; public JObject Meta; }
 
-    private sealed class Exporter
+    private sealed partial class Exporter
     {
         static readonly Regex StartMethod = new Regex(@"void\s+(Awake|Start)\s*\(\s*\)\s*\{");
         static readonly Regex HideSelf = new Regex(@"(^|[^\w\.])(this\.)?gameObject\.SetActive\(\s*false\s*\)");
@@ -228,6 +237,11 @@ public static class FlexmaUIExporter
             {
                 File.Delete(f);
             }
+            string renders = Path.Combine(folder, RendersFolder);
+            if (Directory.Exists(renders))
+            {
+                Directory.Delete(renders, true);
+            }
 
             var opened = new List<Scene>();
             var previousActive = SceneManager.GetActiveScene();
@@ -247,7 +261,20 @@ public static class FlexmaUIExporter
 
                 Report("Scanning script references", 0.05f);
                 BuildReferenceMap();
-                FindSharedTextures();
+                if (opt.Canvases)
+                {
+                    FindSharedTextures();
+                }
+                bool documents = false;
+                if (opt.UIToolkit)
+                {
+                    string why = "UI Toolkit export needs Unity 2022.3 or newer";
+                    PrepareDocuments(ref documents, ref why);
+                    if (!documents)
+                    {
+                        result.Warnings.Add(why + "; UI Toolkit documents were skipped");
+                    }
+                }
 
                 temp = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
                 SceneManager.SetActiveScene(temp);
@@ -261,7 +288,11 @@ public static class FlexmaUIExporter
                         continue;
                     }
                     var page = new List<FrameEntry>();
-                    var canvases = RootCanvases(scene);
+                    var canvases = new List<Canvas>();
+                    if (opt.Canvases)
+                    {
+                        canvases = RootCanvases(scene);
+                    }
                     for (int ci = 0; ci < canvases.Count; ci++)
                     {
                         float t = 0.1f + 0.85f * (si + ci / (float)Mathf.Max(1, canvases.Count)) / opt.ScenePaths.Count;
@@ -270,6 +301,10 @@ public static class FlexmaUIExporter
                             throw new OperationCanceledException("Export cancelled");
                         }
                         ExportCanvas(scene, canvases[ci], page, temp);
+                    }
+                    if (documents)
+                    {
+                        ExportDocuments(scene, page, 0.1f + 0.85f * si / opt.ScenePaths.Count, 0.1f + 0.85f * (si + 1) / opt.ScenePaths.Count);
                     }
                     if (page.Count > 0)
                     {
@@ -300,6 +335,10 @@ public static class FlexmaUIExporter
             WriteOutput(folder);
             return result;
         }
+
+        // Implemented in FlexmaUIToolkitExport.cs (Unity 2022.3+); without it, documents are skipped with a warning.
+        partial void PrepareDocuments(ref bool ready, ref string why);
+        partial void ExportDocuments(Scene scene, List<FrameEntry> page, float progressStart, float progressEnd);
 
         bool Report(string status, float t)
         {
@@ -2178,7 +2217,8 @@ public static class FlexmaUIExporter
             }
             foreach (JObject child in children)
             {
-                var prefab = (string)child.SelectToken("meta.unity.prefab");
+                // A uGUI prefab, or a UXML template instantiated with <ui:Instance>.
+                var prefab = (string)child.SelectToken("meta.unity.prefab") ?? (string)child.SelectToken("meta.unity.template");
                 if ((prefab != null) && ((string)child["type"] == "frame"))
                 {
                     list.Add(new Occurrence { Node = child, Prefab = prefab, Shape = Shape(child, true) });

@@ -172,8 +172,8 @@ export function SkillSection({ setup, os }: ConnectProps) {
         <code>{o.skillDirs[2]}</code>.
       </p>
       <p className="text-muted">
-        Unity projects: also install <code>unity-ui-to-flexma</code>, which exports a game's uGUI screens into Flexma and
-        keeps them in sync.
+        Unity projects: also install <code>unity-ui-to-flexma</code>, which exports a game's uGUI and UI Toolkit screens
+        into Flexma and keeps them in sync.
       </p>
       <CopyField value={o.unitySkillInstallCommand} multiline toastMessage="Command copied" />
     </div>

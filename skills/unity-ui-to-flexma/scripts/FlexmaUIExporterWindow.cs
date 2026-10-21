@@ -6,13 +6,15 @@ using UnityEditor;
 using UnityEngine;
 
 /// <summary>
-/// Tools > Flexma > UI Exporter. Exports the uGUI canvases of the chosen scenes (FlexmaUIExporter) and
-/// uploads them to a Flexma file (FlexmaUploader). The API token is kept in EditorPrefs on this machine only;
-/// the file link, scenes and options are remembered per project.
+/// Tools > Flexma > UI Exporter. Exports the uGUI canvases (and, when switched on, the UI Toolkit documents) of the
+/// chosen scenes (FlexmaUIExporter) and uploads them to a Flexma file (FlexmaUploader). The API token is kept in
+/// EditorPrefs on this machine only; the file link, scenes and options are remembered per project.
 ///
-/// From code (an agent's execute-code tool): FlexmaUIExporterWindow.ExportAndUpload(true) with the saved settings.
+/// From code (an agent's execute-code tool): FlexmaUIExporterWindow.ExportAndUpload(true) with the saved settings, and
+/// FlexmaUIExporterWindow.Include(canvases, uiToolkit) to choose what is exported.
 /// Batch mode: Unity -batchmode -quit -projectPath . -executeMethod FlexmaUIExporterWindow.Batch
 ///   -flexmaFile https://host/file/&lt;id&gt; [-flexmaScenes Assets/A.unity,Assets/B.unity] [-flexmaExportOnly]
+///   [-flexmaUIToolkit] [-flexmaNoCanvases]
 ///   with the token in the FLEXMA_TOKEN environment variable.
 /// </summary>
 public sealed class FlexmaUIExporterWindow : EditorWindow
@@ -29,6 +31,8 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
         public bool AlphaMasks;
         public bool TextOverflow;
         public bool Components;
+        public bool Canvases;
+        public bool UIToolkit;
         public int MaxImageSize;
         public List<string> Scenes;
 
@@ -49,6 +53,8 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
                 AlphaMasks = EditorPrefs.GetBool(ProjectPrefix + "AlphaMasks", true),
                 TextOverflow = EditorPrefs.GetBool(ProjectPrefix + "TextOverflow", true),
                 Components = EditorPrefs.GetBool(ProjectPrefix + "Components", true),
+                Canvases = EditorPrefs.GetBool(ProjectPrefix + "Canvases", true),
+                UIToolkit = EditorPrefs.GetBool(ProjectPrefix + "UIToolkit", false),
                 MaxImageSize = EditorPrefs.GetInt(ProjectPrefix + "MaxImage", 2048)
             };
             string saved = EditorPrefs.GetString(ProjectPrefix + "Scenes", "");
@@ -72,6 +78,8 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
             EditorPrefs.SetBool(ProjectPrefix + "AlphaMasks", AlphaMasks);
             EditorPrefs.SetBool(ProjectPrefix + "TextOverflow", TextOverflow);
             EditorPrefs.SetBool(ProjectPrefix + "Components", Components);
+            EditorPrefs.SetBool(ProjectPrefix + "Canvases", Canvases);
+            EditorPrefs.SetBool(ProjectPrefix + "UIToolkit", UIToolkit);
             EditorPrefs.SetInt(ProjectPrefix + "MaxImage", MaxImageSize);
             EditorPrefs.SetString(ProjectPrefix + "Scenes", string.Join("|", Scenes));
         }
@@ -79,6 +87,11 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
         public bool CanUpload
         {
             get { return !string.IsNullOrEmpty(Token) && !string.IsNullOrEmpty(FlexmaUploader.ServerFrom(File)); }
+        }
+
+        public bool ExportsSomething
+        {
+            get { return Canvases || UIToolkit; }
         }
 
         public FlexmaUIExporter.Options ExportOptions()
@@ -90,7 +103,9 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
                 MaxImageSize = MaxImageSize,
                 AlphaMasks = AlphaMasks,
                 TextOverflow = TextOverflow,
-                Components = Components
+                Components = Components,
+                Canvases = Canvases,
+                UIToolkit = UIToolkit
             };
         }
 
@@ -162,10 +177,15 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
         }
 
         EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Include", EditorStyles.boldLabel);
+        prefs.Canvases = EditorGUILayout.Toggle(new GUIContent("uGUI canvases", "Canvas hierarchies (Image, TextMeshPro, layout groups)."), prefs.Canvases);
+        prefs.UIToolkit = EditorGUILayout.Toggle(new GUIContent("UI Toolkit documents", "UIDocuments (UXML + USS), laid out in a throwaway panel. Flexbox becomes auto layout where Flexma reproduces it exactly. Needs Unity 2022.3 or newer."), prefs.UIToolkit);
+
+        EditorGUILayout.Space();
         prefs.MaxImageSize = EditorGUILayout.IntPopup("Max image size", prefs.MaxImageSize, new[] { "1024", "2048", "4096" }, new[] { 1024, 2048, 4096 });
         prefs.AlphaMasks = EditorGUILayout.Toggle(new GUIContent("Alpha masks", "Clip a Mask's children by its sprite's shape (rounded screens, round minimaps) instead of its rectangle."), prefs.AlphaMasks);
         prefs.TextOverflow = EditorGUILayout.Toggle(new GUIContent("Text wrap & overflow", "Keep TMP's word wrapping and overflow mode (no-wrap, masking, ellipsis, truncate)."), prefs.TextOverflow);
-        prefs.Components = EditorGUILayout.Toggle(new GUIContent("Components", "Prefabs used more than once become components on a Components page, and their uses become instances that follow the master. Switching this rebuilds those layers in Flexma on the next upload."), prefs.Components);
+        prefs.Components = EditorGUILayout.Toggle(new GUIContent("Components", "Prefabs and UXML templates used more than once become components on a Components page, and their uses become instances that follow the master. Switching this rebuilds those layers in Flexma on the next upload."), prefs.Components);
         EditorGUILayout.LabelField("Export folder", FlexmaUIExporter.DefaultOutputFolder, EditorStyles.miniLabel);
 
         if (EditorGUI.EndChangeCheck())
@@ -175,17 +195,18 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
 
         EditorGUILayout.Space();
         EditorGUILayout.BeginHorizontal();
+        GUI.enabled = prefs.ExportsSomething;
         if (GUILayout.Button("Export only"))
         {
             RunExport(false);
         }
-        GUI.enabled = prefs.CanUpload;
+        GUI.enabled = prefs.CanUpload && prefs.ExportsSomething;
         if (GUILayout.Button("Export and upload"))
         {
             RunExport(true);
         }
         bool hasExport = File.Exists(Path.Combine(FlexmaUIExporter.DefaultOutputFolder, FlexmaUIExporter.PagesFile));
-        GUI.enabled = GUI.enabled && hasExport;
+        GUI.enabled = prefs.CanUpload && hasExport;
         if (GUILayout.Button("Upload last export"))
         {
             RunUpload();
@@ -249,6 +270,16 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
         }
     }
 
+    /// <summary>Chooses what the next exports include (saved for this project, like the window's Include toggles).</summary>
+    public static string Include(bool canvases, bool uiToolkit)
+    {
+        var p = Prefs.Load();
+        p.Canvases = canvases;
+        p.UIToolkit = uiToolkit;
+        p.Save();
+        return "Flexma exports include: " + (canvases ? "uGUI canvases" : "no canvases") + ", " + (uiToolkit ? "UI Toolkit documents" : "no UI Toolkit documents");
+    }
+
     /// <summary>Exports (and uploads) with the window's saved settings, without dialogs. Returns a summary; never prints the token.</summary>
     public static string ExportAndUpload(bool upload)
     {
@@ -283,6 +314,14 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
             if (!string.IsNullOrEmpty(scenesArg))
             {
                 p.Scenes = scenesArg.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+            }
+            if (args.Contains("-flexmaUIToolkit"))
+            {
+                p.UIToolkit = true;
+            }
+            if (args.Contains("-flexmaNoCanvases"))
+            {
+                p.Canvases = false;
             }
             string envToken = Environment.GetEnvironmentVariable("FLEXMA_TOKEN");
             if (!string.IsNullOrEmpty(envToken))
