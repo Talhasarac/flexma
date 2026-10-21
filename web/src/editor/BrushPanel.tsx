@@ -60,6 +60,10 @@ const PRESET_GROUPS: { label: string; presets: Preset[] }[] = [
         tip: 'scribble-1', size: 14, flow: 0.9, spacing: 0.12, angleJitter: 180, sizeJitter: 0.15, pressureSize: true, pressureFlow: true, smoothing: 0.2,
         grain: 'noise-1', grainScale: 0.5, grainStrength: 0.5, tiltSize: 0.6, tiltFlow: 0.4,
       }),
+      preset('Charcoal', {
+        tip: 'charcoal-1', size: 36, flow: 0.8, spacing: 0.08, angleJitter: 180, sizeJitter: 0.1, pressureSize: true, pressureFlow: true, smoothing: 0.2,
+        grain: 'paper-1', grainScale: 1, grainStrength: 0.9, tiltSize: 0.7, tiltFlow: 0.3,
+      }),
       preset('Cloud', {
         tip: 'cloud-1', size: 140, flow: 0.45, spacing: 0.22, angleJitter: 25, sizeJitter: 0.3, flowJitter: 0.3, scatter: 0.12, pressureSize: false, pressureFlow: true, smoothing: 0.3,
       }),
@@ -68,6 +72,11 @@ const PRESET_GROUPS: { label: string; presets: Preset[] }[] = [
   {
     label: 'Paint',
     presets: [
+      preset('Flat brush', {
+        // The bristles lie across the stroke and leave streaks along it.
+        tip: 'bristle-1', size: 50, flow: 0.9, spacing: 0.03, follow: 1, pressureSize: true, pressureFlow: false, smoothing: 0.4,
+        tint: 'colour-1', tintScale: 1.5, tintStrength: 0.15,
+      }),
       preset('Heavy roller', {
         tip: 'roller-1', size: 70, flow: 0.9, spacing: 0.04, follow: 1, pressureSize: false, pressureFlow: true, smoothing: 0.4,
         grain: 'drip-1', grainScale: 1, grainStrength: 0.55, tint: 'colour-1', tintScale: 2, tintStrength: 0.3,
@@ -82,7 +91,53 @@ const PRESET_GROUPS: { label: string; presets: Preset[] }[] = [
         tip: 'knife-1', angle: 90, size: 56, tiltAngle: true, flow: 0.45, spacing: 0.035, follow: 1, pressureSize: true, pressureFlow: true, smoothing: 0.4,
         grain: 'drip-1', grainScale: 0.8, grainStrength: 0.65, tint: 'colour-1', tintScale: 1.5, tintStrength: 0.35,
       }),
-      preset('Potato stamp', { tip: 'potato-1', tipColor: true, size: 90, flow: 1, spacing: 0.04, pressureSize: true, pressureFlow: false, smoothing: 0.3 }),
+      preset('Sponge', {
+        tip: 'sponge-1', size: 80, flow: 0.7, spacing: 0.3, angleJitter: 180, sizeJitter: 0.2, flowJitter: 0.3, scatter: 0.15, pressureSize: false, pressureFlow: true, smoothing: 0.2,
+        tint: 'colour-1', tintScale: 1, tintStrength: 0.15,
+      }),
+    ],
+  },
+  {
+    label: 'Effects',
+    presets: [
+      preset('Spray paint', {
+        tip: 'spray-1', size: 80, flow: 0.3, spacing: 0.12, angleJitter: 180, sizeJitter: 0.1, pressureSize: false, pressureFlow: true, smoothing: 0.2,
+      }),
+      preset('Splatter', {
+        tip: 'splatter-1', size: 110, flow: 1, spacing: 1.2, angleJitter: 180, sizeJitter: 0.5, scatter: 0.8, pressureSize: true, pressureFlow: false, smoothing: 0.1,
+      }),
+      preset('Sparkles', {
+        tip: 'sparkle-1', size: 70, flow: 1, spacing: 1.5, angleJitter: 10, sizeJitter: 0.7, scatter: 1.5, pressureSize: true, pressureFlow: false, smoothing: 0.1,
+      }),
+    ],
+  },
+  {
+    label: 'Nature',
+    presets: [
+      preset('Grass', {
+        // Tufts stay upright (no follow); the color varies across the layer.
+        tip: 'grass-1', size: 60, flow: 1, spacing: 0.25, angleJitter: 15, sizeJitter: 0.35, scatter: 0.25, pressureSize: true, pressureFlow: false, smoothing: 0.2,
+        tint: 'colour-1', tintScale: 1, tintStrength: 0.25,
+      }),
+      preset('Leaves', {
+        tip: 'leaf-1', size: 40, flow: 1, spacing: 0.6, angleJitter: 180, sizeJitter: 0.4, flowJitter: 0.15, scatter: 0.8, pressureSize: true, pressureFlow: false, smoothing: 0.2,
+        tint: 'colour-1', tintScale: 1, tintStrength: 0.3,
+      }),
+    ],
+  },
+  {
+    label: 'Tone',
+    presets: [
+      // Round brushes that paint only a print screen fixed to the layer, so
+      // overlapping strokes line up.
+      preset('Halftone', {
+        size: 60, hardness: 0.9, flow: 1, spacing: 0.1, pressureSize: false, pressureFlow: false, smoothing: 0.3,
+        grain: 'halftone-1', grainScale: 1, grainStrength: 1,
+      }),
+      preset('Hatching', {
+        size: 60, hardness: 0.9, flow: 1, spacing: 0.1, pressureSize: false, pressureFlow: true, smoothing: 0.3,
+        grain: 'hatch-1', grainScale: 1, grainStrength: 1,
+      }),
     ],
   },
   {
@@ -102,6 +157,11 @@ const PRESET_GROUPS: { label: string; presets: Preset[] }[] = [
       }),
       preset('Mixer knife', {
         tip: 'speckle-1', size: 60, flow: 0.9, spacing: 0.04, follow: 1, pressureSize: true, pressureFlow: false, smoothing: 0.4,
+        smudge: 0.8, mix: 0.2,
+      }),
+      preset('Mixer brush', {
+        // The flat brush, pulling the wet paint under it along.
+        tip: 'bristle-1', size: 50, flow: 0.9, spacing: 0.04, follow: 1, pressureSize: true, pressureFlow: false, smoothing: 0.4,
         smudge: 0.8, mix: 0.2,
       }),
     ],

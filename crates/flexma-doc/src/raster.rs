@@ -79,10 +79,12 @@ pub struct Brush {
 }
 
 /// Built-in brush tips: id → file under `/brushes/`. An image never changes
-/// once shipped (strokes replay against it); a new look gets a new id.
-pub const TIPS: &[&str] = &["chalk-1", "roller-1", "knife-1", "cloud-1", "scribble-1", "speckle-1", "potato-1"];
+/// once shipped (strokes replay against it); a new look gets a new id. A
+/// retired tip (`potato-1`) leaves this list, so new strokes can't use it,
+/// but keeps its file for the strokes already painted with it.
+pub const TIPS: &[&str] = &["chalk-1", "roller-1", "knife-1", "cloud-1", "scribble-1", "speckle-1", "spray-1", "splatter-1", "bristle-1", "charcoal-1", "sponge-1", "grass-1", "leaf-1", "sparkle-1"];
 /// Built-in grain and color textures (tiled across the layer).
-pub const TEXTURES: &[&str] = &["paper-1", "drip-1", "noise-1", "colour-1"];
+pub const TEXTURES: &[&str] = &["paper-1", "drip-1", "noise-1", "colour-1", "halftone-1", "hatch-1"];
 /// Largest smudge dab diameter: a smudge dab reads the layer under it.
 pub const MAX_SMUDGE_SIZE: f32 = 400.0;
 
@@ -156,6 +158,7 @@ impl Brush {
         let known = |v: &Option<String>, list: &[&str]| v.clone().filter(|id| list.contains(&id.as_str()));
         let smudge = f(self.smudge, 0.0, 1.0, 0.0);
         let max_size = if smudge > 0.0 { MAX_SMUDGE_SIZE } else { 2000.0 };
+        let tip = known(&self.tip, TIPS);
         Brush {
             size: f(self.size, 0.5, max_size, 12.0),
             hardness: f(self.hardness, 0.0, 1.0, 0.8),
@@ -166,8 +169,10 @@ impl Brush {
             pressure_size: self.pressure_size,
             pressure_flow: self.pressure_flow,
             smoothing: f(self.smoothing, 0.0, 0.95, 0.0),
-            tip: known(&self.tip, TIPS),
-            tip_color: self.tip_color,
+            // Tip colors without a tip draw nothing different, but would hide
+            // the color picker (a saved brush whose tip was retired).
+            tip_color: self.tip_color && tip.is_some(),
+            tip,
             angle: f(self.angle, -360.0, 360.0, 0.0),
             follow: f(self.follow, 0.0, 1.0, 0.0),
             size_jitter: f(self.size_jitter, 0.0, 1.0, 0.0),
@@ -552,6 +557,8 @@ mod tests {
         assert_eq!(b.tip, None);
         assert_eq!(b.grain.as_deref(), Some("paper-1"));
         assert_eq!(b.size, MAX_SMUDGE_SIZE);
+        let retired = Brush { tip: Some("potato-1".into()), tip_color: true, ..Brush::default() }.sanitized();
+        assert_eq!((retired.tip, retired.tip_color), (None, false));
     }
 
     #[test]
