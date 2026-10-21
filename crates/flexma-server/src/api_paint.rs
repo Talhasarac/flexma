@@ -107,7 +107,8 @@ pub async fn put_tile(
         return Err(AppError::not_found("paint layer"));
     }
     let (data_dir, fid, l2) = (st.cfg.data_dir.clone(), id.clone(), layer.clone());
-    let kept = st.db.call(move |c| paint::save_tile(c, &data_dir, &fid, &l2, tx, ty, kind, seq, &body)).await?;
+    let latest = i64::try_from(room.paint_seq()).unwrap_or(i64::MAX);
+    let kept = st.db.call(move |c| paint::save_tile(c, &data_dir, &fid, &l2, tx, ty, kind, seq, latest, &body)).await?;
     if kept {
         let k = if kind == Kind::Base { "base" } else { "view" };
         room.broadcast(json!({ "t": "tile", "layer": layer, "x": tx, "y": ty, "kind": k, "seq": seq })).await;

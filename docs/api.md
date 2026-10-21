@@ -3,7 +3,9 @@
 All endpoints are JSON over HTTP under `/api`. Browser sessions authenticate with
 the `flexma_session` cookie (HttpOnly, SameSite=Lax) set by login/signup.
 API tokens (`Authorization: Bearer fxm_...`) are accepted everywhere a session is,
-and are what AI agents use for MCP (`/mcp`).
+and are what AI agents use for MCP (`/mcp`). Tokens that MCP clients get through
+OAuth work on `/mcp` only. With cookie auth, state-changing requests and the
+multiplayer socket are refused when their `Origin` is another site.
 
 Errors: non-2xx status with body `{ "error": "human readable message" }`.
 Timestamps are RFC 3339 strings. Ids are opaque strings.
@@ -17,7 +19,7 @@ Timestamps are RFC 3339 strings. Ids are opaque strings.
 | POST | `/api/auth/login` | `{ email, password }` | `{ user }` (sets cookie) |
 | POST | `/api/auth/logout` | – | `{}` |
 | GET | `/api/me` | – | `{ user }` or 401 |
-| PATCH | `/api/me` | `{ name?, password?, currentPassword? }` | `{ user }` |
+| PATCH | `/api/me` | `{ name?, password?, currentPassword? }` | `{ user }`. A new password signs out every other session and revokes the user's API tokens and OAuth grants |
 
 `user = { id, email, name, isAdmin, color }` — `color` is a hex color used for avatars and multiplayer cursors.
 
@@ -194,5 +196,5 @@ Client → server:
 ## MCP
 
 `POST /mcp` — Model Context Protocol, Streamable HTTP transport (JSON responses),
-authenticated with `Authorization: Bearer <api token>`. See `skills/flexma/SKILL.md`
+authenticated with `Authorization: Bearer <api token>` (the session cookie isn't accepted). See `skills/flexma/SKILL.md`
 for the tool catalogue.

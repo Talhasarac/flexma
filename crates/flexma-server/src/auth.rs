@@ -27,6 +27,9 @@ pub struct AuthUser {
     /// Authenticated via API token (agents) rather than a browser session.
     #[serde(skip)]
     pub via_token: bool,
+    /// The token was issued to an MCP client through OAuth; only `/mcp` takes it.
+    #[serde(skip)]
+    pub via_oauth: bool,
     #[serde(skip)]
     pub token_name: Option<String>,
 }
@@ -103,6 +106,7 @@ fn user_from_row(r: &rusqlite::Row) -> rusqlite::Result<AuthUser> {
         is_admin: r.get::<_, i64>(3)? != 0,
         color: r.get(4)?,
         via_token: false,
+        via_oauth: false,
         token_name: None,
     })
 }
@@ -115,17 +119,18 @@ pub async fn authenticate(db: &Db, headers: &HeaderMap) -> AppResult<Option<Auth
             .call(move |c| {
                 let row = c
                     .query_row(
-                        "SELECT u.id, u.email, u.name, u.is_admin, u.color, t.id, t.name FROM api_tokens t
+                        "SELECT u.id, u.email, u.name, u.is_admin, u.color, t.id, t.name, t.oauth_client_id IS NOT NULL FROM api_tokens t
                          JOIN users u ON u.id = t.user_id
                          WHERE t.token_hash = ?1 AND (t.expires_at IS NULL OR t.expires_at > ?2)",
                         params![hash, now()],
-                        |r| Ok((user_from_row(r)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?)),
+                        |r| Ok((user_from_row(r)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, bool>(7)?)),
                     )
                     .optional()?;
                 Ok(match row {
-                    Some((mut u, tid, tname)) => {
+                    Some((mut u, tid, tname, oauth)) => {
                         c.execute("UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2", params![now(), tid])?;
                         u.via_token = true;
+                        u.via_oauth = oauth;
                         u.token_name = Some(tname);
                         Some(u)
                     }
@@ -151,18 +156,15 @@ pub async fn authenticate(db: &Db, headers: &HeaderMap) -> AppResult<Option<Auth
     Ok(None)
 }
 
-/// Reject cross-site state-changing requests made with cookie auth.
-fn check_origin(parts: &Parts) -> AppResult<()> {
-    if matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        return Ok(());
-    }
-    let Some(origin) = parts.headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+/// Reject a request a browser sent from another site (its `Origin` names a
+/// different host). Requests without an `Origin` don't come from a page.
+pub fn check_origin(headers: &HeaderMap) -> AppResult<()> {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return Ok(());
     };
-    let host = parts
-        .headers
+    let host = headers
         .get("x-forwarded-host")
-        .or_else(|| parts.headers.get(header::HOST))
+        .or_else(|| headers.get(header::HOST))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let origin_host = origin.split("://").nth(1).unwrap_or(origin);
@@ -173,16 +175,38 @@ fn check_origin(parts: &Parts) -> AppResult<()> {
     }
 }
 
+/// OAuth access tokens were granted for the MCP tools, so the rest of the API
+/// refuses them.
+pub fn refuse_oauth(user: &AuthUser) -> AppResult<()> {
+    if user.via_oauth {
+        return Err(AppError::forbidden("this token was issued to an MCP client and only works on /mcp"));
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let user = authenticate(&state.db, &parts.headers).await?.ok_or_else(AppError::unauthorized)?;
-        if !user.via_token {
-            check_origin(parts)?;
+        refuse_oauth(&user)?;
+        // Cookie auth: state-changing requests must come from this site.
+        if !user.via_token && !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+            check_origin(&parts.headers)?;
         }
         Ok(user)
     }
+}
+
+/// After a password change: end every session but `keep_session` (a token
+/// hash) and revoke the user's API tokens and OAuth grants, so a stolen
+/// cookie or token stops working.
+pub fn sign_out_everywhere(c: &rusqlite::Connection, user_id: &str, keep_session: Option<&str>) -> rusqlite::Result<()> {
+    c.execute("DELETE FROM sessions WHERE user_id = ?1 AND token_hash IS NOT ?2", params![user_id, keep_session])?;
+    c.execute("DELETE FROM oauth_codes WHERE user_id = ?1", params![user_id])?;
+    c.execute("DELETE FROM oauth_refresh_tokens WHERE user_id = ?1", params![user_id])?;
+    c.execute("DELETE FROM api_tokens WHERE user_id = ?1", params![user_id])?;
+    Ok(())
 }
 
 // ---------- roles & access ----------
@@ -274,4 +298,115 @@ pub fn new_api_token() -> (String, String) {
     let token = format!("{TOKEN_PREFIX}{}", random_string(40));
     let prefix = token[..TOKEN_PREFIX.len() + 6].to_string();
     (token, prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, HeaderValue::from_static(v));
+        }
+        h
+    }
+
+    #[test]
+    fn origin_must_match_the_host() {
+        assert!(check_origin(&headers(&[("host", "design.example.com"), ("origin", "https://design.example.com")])).is_ok());
+        assert!(check_origin(&headers(&[("host", "design.example.com"), ("origin", "https://evil.example.com")])).is_err());
+        // Behind a proxy the public host is in X-Forwarded-Host.
+        let proxied = [("host", "127.0.0.1:8080"), ("x-forwarded-host", "design.example.com"), ("origin", "https://design.example.com")];
+        assert!(check_origin(&headers(&proxied)).is_ok());
+        // No Origin: not sent by a page.
+        assert!(check_origin(&headers(&[("host", "design.example.com")])).is_ok());
+    }
+
+    async fn db(name: &str) -> (Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("flexma-auth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        db.call(|c| {
+            for u in ["u", "v"] {
+                c.execute(
+                    "INSERT INTO users (id, email, name, password_hash, color, created_at) VALUES (?1, ?1 || '@x', ?1, '-', '#000', 0)",
+                    params![u],
+                )?;
+                for s in ["a", "b"] {
+                    c.execute(
+                        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?1, ?2, 0, ?3)",
+                        params![sha256_hex(&format!("{u}-session-{s}")), u, now() + 3600],
+                    )?;
+                }
+                c.execute(
+                    "INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, created_at) VALUES (?1 || '-plain', ?1, 'CI', 'fx', ?2, 0)",
+                    params![u, sha256_hex(&format!("{u}-plain"))],
+                )?;
+                c.execute(
+                    "INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, created_at, expires_at, oauth_client_id)
+                     VALUES (?1 || '-oauth', ?1, 'Agent (OAuth)', 'fx', ?2, 0, ?3, 'client')",
+                    params![u, sha256_hex(&format!("{u}-oauth")), now() + 3600],
+                )?;
+                c.execute(
+                    "INSERT INTO oauth_refresh_tokens (token_hash, client_id, user_id, api_token_id, expires_at) VALUES (?1, 'client', ?2, ?2 || '-oauth', ?3)",
+                    params![sha256_hex(&format!("{u}-refresh")), u, now() + 3600],
+                )?;
+                c.execute(
+                    "INSERT INTO oauth_codes (code_hash, client_id, user_id, redirect_uri, code_challenge, expires_at) VALUES (?1, 'client', ?2, 'https://x', 'c', ?3)",
+                    params![sha256_hex(&format!("{u}-code")), u, now() + 600],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        (db, dir)
+    }
+
+    async fn bearer(db: &Db, token: &'static str) -> Option<AuthUser> {
+        authenticate(db, &headers(&[("authorization", token)])).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn oauth_tokens_only_work_on_mcp() {
+        let (db, dir) = db("oauth").await;
+        let plain = bearer(&db, "Bearer u-plain").await.unwrap();
+        assert!(plain.via_token && !plain.via_oauth);
+        assert!(refuse_oauth(&plain).is_ok());
+        let oauth = bearer(&db, "Bearer u-oauth").await.unwrap();
+        assert!(oauth.via_token && oauth.via_oauth);
+        assert!(refuse_oauth(&oauth).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_new_password_signs_out_everything_else() {
+        let (db, dir) = db("signout").await;
+        let keep = sha256_hex("u-session-a");
+        db.call(move |c| Ok(sign_out_everywhere(c, "u", Some(&keep))?)).await.unwrap();
+        let counts = |user: &'static str| {
+            db.call(move |c| {
+                let n = |table: &str| -> rusqlite::Result<i64> {
+                    c.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE user_id = ?1"), params![user], |r| r.get(0))
+                };
+                Ok([n("sessions")?, n("api_tokens")?, n("oauth_refresh_tokens")?, n("oauth_codes")?])
+            })
+        };
+        assert_eq!(counts("u").await.unwrap(), [1, 0, 0, 0]);
+        assert_eq!(counts("v").await.unwrap(), [2, 2, 1, 1], "other users keep theirs");
+        // The browser that changed it stays signed in; the other session doesn't.
+        let session = |s: &'static str| headers(&[("cookie", s)]);
+        assert!(authenticate(&db, &session("flexma_session=u-session-a")).await.unwrap().is_some());
+        assert!(authenticate(&db, &session("flexma_session=u-session-b")).await.unwrap().is_none());
+        assert!(bearer(&db, "Bearer u-plain").await.is_none());
+        assert!(bearer(&db, "Bearer v-plain").await.is_some());
+
+        // No session to keep (admin reset, CLI): every session goes.
+        db.call(|c| Ok(sign_out_everywhere(c, "v", None)?)).await.unwrap();
+        assert_eq!(counts("v").await.unwrap(), [0, 0, 0, 0]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

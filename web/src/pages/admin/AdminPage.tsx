@@ -101,7 +101,8 @@ export default function AdminPage() {
                       onClick={async () => {
                         const ok = await dialogs.confirm({
                           title: `Reset ${u.name}'s password?`,
-                          message: 'They will be signed out everywhere and need the temporary password to sign in.',
+                          message:
+                            'They will be signed out everywhere, their API tokens and connected AI agents stop working, and they need the temporary password to sign in.',
                           confirmLabel: 'Reset password',
                         });
                         if (!ok) return;

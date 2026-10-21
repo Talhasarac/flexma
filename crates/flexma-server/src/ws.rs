@@ -1,6 +1,6 @@
 //! Multiplayer WebSocket endpoint: `/api/files/:id/ws`.
 
-use crate::auth::{authenticate, file_access, Role};
+use crate::auth::{authenticate, check_origin, file_access, refuse_oauth, Role};
 use crate::error::{AppError, AppResult};
 use crate::rooms::{JoinInfo, Msg};
 use crate::state::AppState;
@@ -39,6 +39,12 @@ pub async fn handler(
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
     let user = authenticate(&st.db, &headers).await?.ok_or_else(AppError::unauthorized)?;
+    refuse_oauth(&user)?;
+    // The handshake is a GET, but the socket can edit: a page on another site
+    // must not open one with the signed-in person's cookie.
+    if !user.via_token {
+        check_origin(&headers)?;
+    }
     let uid = user.id.clone();
     let fid = file_id.clone();
     let (_, _, role) = st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer)).await?;

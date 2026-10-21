@@ -1,6 +1,6 @@
 //! Instance administration (admins only): users, instance settings and backups.
 
-use crate::auth::{hash_password, AuthUser};
+use crate::auth::{hash_password, sign_out_everywhere, AuthUser};
 use crate::db::{now, random_string, ts};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -106,11 +106,13 @@ pub async fn reset_password(State(st): State<AppState>, user: AuthUser, Path(id)
     let hash = hash_password(&temp)?;
     st.db
         .call(move |c| {
-            let n = c.execute("UPDATE users SET password_hash = ?1 WHERE id = ?2", params![hash, id])?;
+            let tx = c.transaction()?;
+            let n = tx.execute("UPDATE users SET password_hash = ?1 WHERE id = ?2", params![hash, id])?;
             if n == 0 {
                 return Err(AppError::not_found("user"));
             }
-            c.execute("DELETE FROM sessions WHERE user_id = ?1", params![id])?;
+            sign_out_everywhere(&tx, &id, None)?;
+            tx.commit()?;
             Ok(())
         })
         .await?;

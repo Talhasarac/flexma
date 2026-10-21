@@ -321,6 +321,7 @@ pub async fn authorize_post(State(st): State<AppState>, headers: HeaderMap, Form
                                 is_admin: r.get::<_, i64>(3)? != 0,
                                 color: r.get(4)?,
                                 via_token: false,
+                                via_oauth: false,
                                 token_name: None,
                             },
                             r.get(5)?,

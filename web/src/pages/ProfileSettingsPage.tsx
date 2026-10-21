@@ -121,7 +121,7 @@ function PasswordSection() {
       setCurrent('');
       setNext('');
       setConfirm('');
-      toast.success('Password changed');
+      toast.success('Password changed. Other sessions, API tokens and connected agents were signed out.');
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -130,7 +130,10 @@ function PasswordSection() {
   };
 
   return (
-    <SettingsSection title="Password" description="Use at least 8 characters.">
+    <SettingsSection
+      title="Password"
+      description="Use at least 8 characters. Changing it signs out your other sessions and revokes your API tokens and connected agents."
+    >
       <form className="settings-form stack" onSubmit={onSubmit}>
         {/* Helps password managers associate the change with the account. */}
         <input type="text" name="username" autoComplete="username" value={user.email} readOnly hidden />

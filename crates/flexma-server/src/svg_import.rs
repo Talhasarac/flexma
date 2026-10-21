@@ -37,6 +37,11 @@ pub fn import(svg: &str, opts: &ImportOptions) -> Result<Imported, String> {
     if svg.len() > MAX_SVG_BYTES {
         return Err(format!("the SVG is larger than {} MB", MAX_SVG_BYTES / 1024 / 1024));
     }
+    // usvg expands DTD entities with no limit on the total, so a few KB of
+    // entity references can grow to gigabytes. A plain DOCTYPE is fine.
+    if declares_entities(svg) {
+        return Err("SVGs that declare XML entities (<!ENTITY>) aren't supported; export the SVG again without them".into());
+    }
     // Never read files named by `<image href>` (see `render::svg_options`).
     let uopt = usvg::Options {
         fontdb: opts.fonts.clone().unwrap_or_else(base_fontdb),
@@ -232,6 +237,11 @@ impl Ctx {
     }
 }
 
+/// Whether the markup declares entities (in any letter case, since this is a guard).
+fn declares_entities(svg: &str) -> bool {
+    svg.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"<!entity"))
+}
+
 fn vector_spec(name: &str, d: &str, style: &Map<String, Value>, bounds: Option<[f64; 4]>) -> Value {
     let mut v = style.clone();
     v.insert("type".into(), json!("vector"));
@@ -351,6 +361,26 @@ mod tests {
         assert_eq!(out.layers, 1);
         assert_eq!(out.spec["width"], 48.0);
         assert_eq!(out.spec["children"][0]["strokeWeight"], 4.0);
+    }
+
+    /// Entity references can expand an 11 KB file to gigabytes, so entity
+    /// declarations are refused before parsing; a plain DOCTYPE still imports.
+    #[test]
+    fn refuses_entity_declarations() {
+        let laughs = format!(
+            r#"<!DOCTYPE svg [<!ENTITY a "{}"><!ENTITY b "{}">]><svg xmlns="http://www.w3.org/2000/svg"><text>{}</text></svg>"#,
+            "x".repeat(10_000),
+            "&a;".repeat(255),
+            "&b;".repeat(100)
+        );
+        assert!(import(&laughs, &opts(false)).err().is_some_and(|e| e.contains("entities")));
+        let lower = r#"<!doctype svg [<!entity a "x">]><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        assert!(import(lower, &opts(false)).is_err());
+
+        let doctype = r##"<?xml version="1.0"?>
+            <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#000000"/></svg>"##;
+        assert_eq!(import(doctype, &opts(false)).unwrap().layers, 1);
     }
 
     #[test]

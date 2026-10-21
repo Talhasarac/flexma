@@ -1,7 +1,7 @@
 //! Setup, signup, login, logout and profile.
 
 use crate::auth::{self, AuthUser};
-use crate::db::{new_id, now, random_color};
+use crate::db::{new_id, now, random_color, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::State;
@@ -127,7 +127,7 @@ pub async fn signup(State(st): State<AppState>, Json(req): Json<SignupReq>) -> A
                 )?;
             }
             tx.commit()?;
-            Ok(AuthUser { id, email, name, is_admin: first, color, via_token: false, token_name: None })
+            Ok(AuthUser { id, email, name, is_admin: first, color, via_token: false, via_oauth: false, token_name: None })
         })
         .await?;
     if user.is_admin {
@@ -164,6 +164,7 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> App
                             is_admin: r.get::<_, i64>(3)? != 0,
                             color: r.get(4)?,
                             via_token: false,
+                            via_oauth: false,
                             token_name: None,
                         },
                         r.get(5)?,
@@ -219,7 +220,7 @@ pub struct UpdateMe {
     color: Option<String>,
 }
 
-pub async fn update_me(State(st): State<AppState>, user: AuthUser, Json(req): Json<UpdateMe>) -> AppResult<Json<Value>> {
+pub async fn update_me(State(st): State<AppState>, headers: HeaderMap, user: AuthUser, Json(req): Json<UpdateMe>) -> AppResult<Json<Value>> {
     let mut u = user.clone();
     if let Some(n) = req.name.map(|s| s.trim().to_string()) {
         if n.is_empty() || n.len() > 80 {
@@ -249,13 +250,18 @@ pub async fn update_me(State(st): State<AppState>, user: AuthUser, Json(req): Js
         }
         new_hash = Some(auth::hash_password(&pw)?);
     }
+    // A new password signs out everything else; the browser making the change stays in.
+    let keep = if user.via_token { None } else { auth::cookie_value(&headers, auth::SESSION_COOKIE).map(|t| sha256_hex(&t)) };
     let u2 = u.clone();
     st.db
         .call(move |c| {
-            c.execute("UPDATE users SET name = ?1, color = ?2 WHERE id = ?3", params![u2.name, u2.color, u2.id])?;
+            let tx = c.transaction()?;
+            tx.execute("UPDATE users SET name = ?1, color = ?2 WHERE id = ?3", params![u2.name, u2.color, u2.id])?;
             if let Some(h) = new_hash {
-                c.execute("UPDATE users SET password_hash = ?1 WHERE id = ?2", params![h, u2.id])?;
+                tx.execute("UPDATE users SET password_hash = ?1 WHERE id = ?2", params![h, u2.id])?;
+                auth::sign_out_everywhere(&tx, &u2.id, keep.as_deref())?;
             }
+            tx.commit()?;
             Ok(())
         })
         .await?;

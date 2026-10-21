@@ -13,7 +13,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -201,6 +201,8 @@ enum Cmd {
 struct Stats {
     clients: AtomicUsize,
     last_active: AtomicI64,
+    /// The last stroke number handed out (`Room::paint_seq`).
+    paint_seq: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -247,6 +249,12 @@ impl RoomHandle {
         });
         self.tx.send(Cmd::Read { f }).await.map_err(|_| closed())?;
         rx.await.map_err(|_| closed())
+    }
+
+    /// The last stroke number the room handed out. A tile snapshot can't cover
+    /// strokes beyond it.
+    pub fn paint_seq(&self) -> u64 {
+        self.stats.paint_seq.load(Ordering::Relaxed)
     }
 
     /// Disconnect guests that joined through `token`.
@@ -429,7 +437,7 @@ impl Rooms {
             }
         }
         let (tx, rx) = mpsc::channel(4096);
-        let stats = Arc::new(Stats { clients: AtomicUsize::new(0), last_active: AtomicI64::new(now()) });
+        let stats = Arc::new(Stats { clients: AtomicUsize::new(0), last_active: AtomicI64::new(now()), paint_seq: AtomicU64::new(paint_seq) });
         let room = Room {
             file_id: file_id.to_string(),
             doc,
@@ -724,6 +732,7 @@ impl Room {
                 let stroke = flexma_doc::raster::Stroke { brush: stroke.brush.sanitized(), ..stroke };
                 self.paint_seq += 1;
                 let seq = self.paint_seq;
+                self.stats.paint_seq.store(seq, Ordering::Relaxed);
                 self.stroke_authors.insert(stroke.id.clone(), user_id.clone());
                 let out = json!({ "t": "stroke", "seq": seq, "stroke": stroke, "from": client_id, "user": user_id });
                 let _ = self.paint_writer.send(crate::paint::Write::Insert { file_id: self.file_id.clone(), seq, user_id, stroke: Box::new(stroke) });

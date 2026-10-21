@@ -242,8 +242,13 @@ pub fn state(c: &Connection, file_id: &str, layers: &HashMap<String, (f64, f64)>
 }
 
 /// Store an uploaded tile snapshot if it's newer than what's there. Returns
-/// whether it was kept.
-pub fn save_tile(c: &Connection, data_dir: &Path, file_id: &str, layer: &str, tx: i32, ty: i32, kind: Kind, seq: i64, png: &[u8]) -> AppResult<bool> {
+/// whether it was kept. `latest` is the room's last stroke number: a snapshot
+/// claiming strokes past it would outrank every honest upload for good and
+/// hide the strokes painted later, so it isn't kept.
+pub fn save_tile(c: &Connection, data_dir: &Path, file_id: &str, layer: &str, tx: i32, ty: i32, kind: Kind, seq: i64, latest: i64, png: &[u8]) -> AppResult<bool> {
+    if seq > latest {
+        return Ok(false);
+    }
     let current: Option<(Option<i64>, Option<i64>)> = rusqlite::OptionalExtension::optional(c.query_row(
         "SELECT base_seq, view_seq FROM paint_tiles WHERE file_id = ?1 AND layer_id = ?2 AND tx = ?3 AND ty = ?4",
         params![file_id, layer, tx, ty],
@@ -301,6 +306,31 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert!(t[0].2.ends_with("0_0.view.png"));
         assert!(t[1].2.ends_with("1_0.base.png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An upload claiming strokes the room hasn't numbered yet (say `i64::MAX`)
+    /// would win against every later snapshot, so it isn't kept.
+    #[tokio::test]
+    async fn snapshots_cant_run_ahead_of_the_room() {
+        let dir = std::env::temp_dir().join(format!("flexma-paint-seq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir.join("t.db")).unwrap();
+        let d = dir.clone();
+        let kept = db
+            .call(move |c| {
+                c.execute_batch(
+                    "INSERT INTO workspaces (id, name, created_at) VALUES ('w', 'W', 0);
+                     INSERT INTO projects (id, workspace_id, name, created_at) VALUES ('p', 'w', 'P', 0);
+                     INSERT INTO files (id, project_id, name, document, created_at, updated_at) VALUES ('f', 'p', 'F', '{}', 0, 0);",
+                )?;
+                let save = |seq| save_tile(c, &d, "f", "a:1", 0, 0, Kind::Base, seq, 5, b"png");
+                Ok([save(i64::MAX)?, save(6)?, save(5)?, save(4)?])
+            })
+            .await
+            .unwrap();
+        assert_eq!(kept, [false, false, true, false]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -426,8 +426,10 @@ pub async fn get_not_allowed() -> Response {
 }
 
 pub async fn handle(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // Bearer tokens only: the browser's session cookie would let any page on
+    // the same site call the tools as whoever is signed in.
     let user = match authenticate(&st.db, &headers).await {
-        Ok(Some(u)) => u,
+        Ok(Some(u)) if u.via_token => u,
         _ => {
             let meta = crate::oauth::resource_metadata_url(&st.base_url(&headers));
             return (
@@ -2867,6 +2869,7 @@ pub async fn upload_nodes_with_link(
                     is_admin: r.get::<_, i64>(3)? != 0,
                     color: r.get(4)?,
                     via_token: true,
+                    via_oauth: false,
                     token_name,
                 })
             })?)

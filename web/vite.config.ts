@@ -10,7 +10,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': { target: server, ws: true, changeOrigin: true },
+      // The server refuses sockets whose Origin isn't its own host.
+      '/api': { target: server, ws: true, changeOrigin: true, rewriteWsOrigin: true },
       '/mcp': { target: server, changeOrigin: true },
       '^/agents/(install\.sh|skills/.*)': { target: server, changeOrigin: true },
       '/.well-known': { target: server, changeOrigin: true },

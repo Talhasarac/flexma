@@ -285,13 +285,25 @@ async fn reset_password(db: &db::Db, email: &str) {
     }
     let hash = auth::hash_password(&pw).expect("hash");
     let email = email.to_lowercase();
-    let n = db
-        .call(move |c| Ok(c.execute("UPDATE users SET password_hash = ?1 WHERE email = ?2", rusqlite::params![hash, email])?))
+    let found = db
+        .call(move |c| {
+            let tx = c.transaction()?;
+            let id: Option<String> = rusqlite::OptionalExtension::optional(tx.query_row(
+                "SELECT id FROM users WHERE email = ?1",
+                rusqlite::params![email],
+                |r| r.get(0),
+            ))?;
+            let Some(id) = id else { return Ok(false) };
+            tx.execute("UPDATE users SET password_hash = ?1 WHERE id = ?2", rusqlite::params![hash, id])?;
+            auth::sign_out_everywhere(&tx, &id, None)?;
+            tx.commit()?;
+            Ok(true)
+        })
         .await
         .expect("db");
-    if n == 0 {
+    if !found {
         eprintln!("no user with that email");
         std::process::exit(1);
     }
-    eprintln!("password updated");
+    eprintln!("password updated; their sessions and API tokens were signed out");
 }
