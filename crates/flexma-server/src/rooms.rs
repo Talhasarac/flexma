@@ -4,7 +4,7 @@
 //! snapshots to SQLite. No locks around documents; everything goes through the
 //! actor's mailbox. Agents (MCP) edit through the same pipeline.
 
-use crate::auth::Role;
+use crate::auth::{file_access, Role};
 use crate::db::{now, random_string, Db};
 use crate::error::{AppError, AppResult};
 use flexma_doc::{components, layout};
@@ -27,6 +27,9 @@ const SAVE_EVERY: Duration = Duration::from_secs(2);
 const IDLE_CLOSE_SECS: i64 = 90;
 const AGENT_PRESENCE_TTL: Duration = Duration::from_secs(12);
 const AUTO_VERSION_SECS: i64 = 15 * 60;
+/// How often a room re-checks its sockets' access even when nothing says it
+/// changed (expired share links and sessions, a password reset from the CLI).
+const RECHECK_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,8 +51,74 @@ pub struct JoinInfo {
     pub name: String,
     pub color: String,
     pub role: Role,
-    /// Set for anonymous viewers who came in through a public share link.
-    pub share_token: Option<String>,
+    pub credential: Credential,
+}
+
+/// What a socket signed in with. The room re-checks it when access changes,
+/// so revoking it (or the person's access to the file) ends the socket too.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Credential {
+    /// Hash of the session cookie.
+    Session(String),
+    /// Hash of the API token.
+    Token(String),
+    /// A public share link (anonymous guests).
+    Share(String),
+}
+
+/// Re-checking a socket's access against the database.
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    Keep,
+    /// Still allowed in, with another role: close it so it joins again.
+    Rejoin,
+    /// No longer allowed in: tell it why and close it for good.
+    Revoke(&'static str),
+}
+
+const SIGNED_OUT: &str = "You were signed out. Sign in again to keep working on this file.";
+const NO_ACCESS: &str = "You no longer have access to this file.";
+const LINK_GONE: &str = "This share link is no longer active.";
+
+/// Whether `user_id`, signed in with `credential`, may still be in `file_id`'s
+/// room with `role`. Database errors keep the socket (the next check retries).
+pub fn verdict(c: &rusqlite::Connection, file_id: &str, user_id: &str, role: Role, credential: &Credential) -> Verdict {
+    let denied = |e: &AppError| matches!(e.status, axum::http::StatusCode::NOT_FOUND | axum::http::StatusCode::FORBIDDEN);
+    let signed_in = match credential {
+        Credential::Share(token) => {
+            return match crate::api_share::resolve(c, token) {
+                Ok((f, _)) if f == file_id => Verdict::Keep,
+                Ok(_) => Verdict::Revoke(LINK_GONE),
+                Err(e) if denied(&e) => Verdict::Revoke(LINK_GONE),
+                Err(_) => Verdict::Keep,
+            };
+        }
+        Credential::Session(hash) => c
+            .query_row(
+                "SELECT 1 FROM sessions WHERE token_hash = ?1 AND user_id = ?2 AND expires_at > ?3",
+                params![hash, user_id, now()],
+                |_| Ok(()),
+            )
+            .optional(),
+        Credential::Token(hash) => c
+            .query_row(
+                "SELECT 1 FROM api_tokens WHERE token_hash = ?1 AND user_id = ?2 AND (expires_at IS NULL OR expires_at > ?3)",
+                params![hash, user_id, now()],
+                |_| Ok(()),
+            )
+            .optional(),
+    };
+    match signed_in {
+        Ok(Some(())) => {}
+        Ok(None) => return Verdict::Revoke(SIGNED_OUT),
+        Err(_) => return Verdict::Keep,
+    }
+    match file_access(c, user_id, file_id, Role::Viewer) {
+        Ok((_, _, now_role)) if now_role == role => Verdict::Keep,
+        Ok(_) => Verdict::Rejoin,
+        Err(e) if denied(&e) => Verdict::Revoke(NO_ACCESS),
+        Err(_) => Verdict::Keep,
+    }
 }
 
 #[derive(Clone)]
@@ -193,6 +262,8 @@ enum Cmd {
     Paint { client_id: String, msg: Value },
     /// Disconnect guests who joined through a share link that was turned off.
     KickShare { token: String },
+    /// Re-check every socket's access (see `verdict`).
+    Recheck,
     /// Stop the actor. `discard` skips the final save (used when the stored
     /// document was replaced underneath, e.g. a version restore).
     Shutdown { notify: Option<String>, discard: bool },
@@ -297,6 +368,15 @@ impl RoomHandle {
 }
 
 impl Rooms {
+    /// Re-check the sockets in every open room. Call after changing who may
+    /// open what: roles, memberships, accounts, passwords, sessions, tokens.
+    pub fn recheck_all(&self) {
+        for h in self.rooms.lock().unwrap().values() {
+            // A full queue means a busy room; the periodic check covers it.
+            let _ = h.tx.try_send(Cmd::Recheck);
+        }
+    }
+
     /// Kick share-link guests from a file's room, if it is open.
     pub async fn kick_share_if_open(&self, file_id: &str, token: &str) {
         let h = self.rooms.lock().unwrap().get(file_id).cloned();
@@ -463,7 +543,7 @@ struct Client {
     out: mpsc::Sender<Msg>,
     peer: Peer,
     role: Role,
-    share_token: Option<String>,
+    credential: Credential,
 }
 
 struct Room {
@@ -492,6 +572,8 @@ impl Room {
     async fn run(mut self, mut rx: mpsc::Receiver<Cmd>) {
         let mut tick = tokio::time::interval(SAVE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK_EVERY, RECHECK_EVERY);
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 cmd = rx.recv() => match cmd {
@@ -522,6 +604,7 @@ impl Room {
                         }
                         let _ = reply.send(());
                     }
+                    Some(Cmd::Recheck) => self.recheck().await,
                     Some(cmd) => {
                         self.stats.last_active.store(now(), Ordering::Relaxed);
                         self.handle(cmd);
@@ -534,6 +617,7 @@ impl Room {
                         self.save().await;
                     }
                 }
+                _ = recheck.tick() => self.recheck().await,
             }
         }
         if self.dirty {
@@ -563,7 +647,7 @@ impl Room {
                     selection: vec![],
                     page: None,
                     is_agent: false,
-                    is_guest: info.share_token.is_some(),
+                    is_guest: matches!(info.credential, Credential::Share(_)),
                 };
                 let init = json!({
                     "t": "init",
@@ -577,7 +661,7 @@ impl Room {
                     return;
                 }
                 self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
-                self.clients.insert(client_id.clone(), Client { out, peer, role: info.role, share_token: info.share_token });
+                self.clients.insert(client_id.clone(), Client { out, peer, role: info.role, credential: info.credential });
                 self.stats.clients.store(self.clients.len(), Ordering::Relaxed);
                 let _ = reply.send(client_id);
             }
@@ -627,18 +711,48 @@ impl Room {
             Cmd::Broadcast { msg } => self.broadcast(msg, None),
             Cmd::Paint { client_id, msg } => self.paint_msg(&client_id, msg),
             Cmd::KickShare { token } => {
-                let gone: Vec<String> =
-                    self.clients.iter().filter(|(_, c)| c.share_token.as_deref() == Some(token.as_str())).map(|(id, _)| id.clone()).collect();
-                let bye = msg(json!({ "t": "error", "error": "This share link is no longer active.", "fatal": true }));
+                let link = Credential::Share(token);
+                let gone: Vec<String> = self.clients.iter().filter(|(_, c)| c.credential == link).map(|(id, _)| id.clone()).collect();
                 for id in gone {
-                    if let Some(c) = self.clients.remove(&id) {
-                        let _ = c.out.try_send(bye.clone());
-                    }
-                    self.broadcast(msg(json!({ "t": "leave", "clientId": id })), None);
+                    self.drop_client(&id, Some(LINK_GONE));
                 }
-                self.stats.clients.store(self.clients.len(), Ordering::Relaxed);
             }
-            Cmd::Shutdown { .. } | Cmd::Flush { .. } => {}
+            Cmd::Shutdown { .. } | Cmd::Flush { .. } | Cmd::Recheck => {}
+        }
+    }
+
+    /// Disconnect a socket. With `bye` the client is told why and stays
+    /// away; without, it reconnects and joins again with fresh access.
+    fn drop_client(&mut self, client_id: &str, bye: Option<&str>) {
+        let Some(c) = self.clients.remove(client_id) else { return };
+        if let Some(b) = bye {
+            let _ = c.out.try_send(msg(json!({ "t": "error", "error": b, "fatal": true })));
+        }
+        // Dropping `c.out` ends the socket's writer, which closes the socket.
+        drop(c);
+        self.stats.clients.store(self.clients.len(), Ordering::Relaxed);
+        self.broadcast(msg(json!({ "t": "leave", "clientId": client_id })), None);
+    }
+
+    /// Re-check every socket's sign-in and access against the database.
+    async fn recheck(&mut self) {
+        let who: Vec<(String, String, Role, Credential)> =
+            self.clients.iter().map(|(id, c)| (id.clone(), c.peer.user_id.clone(), c.role, c.credential.clone())).collect();
+        if who.is_empty() {
+            return;
+        }
+        let file_id = self.file_id.clone();
+        let verdicts = self
+            .db
+            .call(move |c| Ok(who.into_iter().map(|(id, user, role, cred)| (id, verdict(c, &file_id, &user, role, &cred))).collect::<Vec<_>>()))
+            .await;
+        let Ok(verdicts) = verdicts else { return };
+        for (id, v) in verdicts {
+            match v {
+                Verdict::Keep => {}
+                Verdict::Rejoin => self.drop_client(&id, None),
+                Verdict::Revoke(why) => self.drop_client(&id, Some(why)),
+            }
         }
     }
 
@@ -924,5 +1038,108 @@ impl Room {
             Ok(()) => self.dirty = false,
             Err(e) => tracing::error!("saving {} failed: {}", self.file_id, e.message),
         }
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use crate::db::sha256_hex;
+
+    const LINK: &str = "abcdefghijklmnopqrstuvwxyz012345";
+
+    /// Editor "u" (session "s", API token "t") in the workspace of file "f",
+    /// which has a public link.
+    async fn setup(name: &str) -> (Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("flexma-access-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let doc = Document::new_empty().to_json();
+        db.call(move |c| {
+            c.execute_batch(
+                "INSERT INTO users (id, email, name, password_hash, color, created_at) VALUES ('u', 'u@x', 'U', '-', '#000', 0);
+                 INSERT INTO workspaces (id, name, created_at) VALUES ('w', 'W', 0);
+                 INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('w', 'u', 'editor', 0);
+                 INSERT INTO projects (id, workspace_id, name, created_at) VALUES ('p', 'w', 'P', 0);",
+            )?;
+            c.execute("INSERT INTO files (id, project_id, name, document, created_at, updated_at) VALUES ('f', 'p', 'F', ?1, 0, 0)", params![doc])?;
+            c.execute("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?1, 'u', 0, ?2)", params![sha256_hex("s"), now() + 3600])?;
+            c.execute(
+                "INSERT INTO api_tokens (id, user_id, name, prefix, token_hash, created_at) VALUES ('t1', 'u', 'CI', 'fx', ?1, 0)",
+                params![sha256_hex("t")],
+            )?;
+            c.execute("INSERT INTO file_shares (file_id, token, created_at) VALUES ('f', ?1, 0)", params![LINK])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        (db, dir)
+    }
+
+    async fn sql(db: &Db, q: &'static str) {
+        db.call(move |c| Ok(c.execute_batch(q)?)).await.unwrap();
+    }
+
+    async fn check(db: &Db, role: Role, cred: Credential) -> Verdict {
+        db.call(move |c| Ok(verdict(c, "f", "u", role, &cred))).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn verdicts_follow_sign_in_and_access() {
+        let (db, dir) = setup("verdicts").await;
+        let session = || Credential::Session(sha256_hex("s"));
+        let token = || Credential::Token(sha256_hex("t"));
+        let link = || Credential::Share(LINK.into());
+        assert_eq!(check(&db, Role::Editor, session()).await, Verdict::Keep);
+        assert_eq!(check(&db, Role::Editor, token()).await, Verdict::Keep);
+        assert_eq!(check(&db, Role::Viewer, link()).await, Verdict::Keep);
+
+        sql(&db, "UPDATE workspace_members SET role = 'viewer'").await;
+        assert_eq!(check(&db, Role::Editor, session()).await, Verdict::Rejoin, "demoted");
+        sql(&db, "DELETE FROM api_tokens").await;
+        assert_eq!(check(&db, Role::Viewer, token()).await, Verdict::Revoke(SIGNED_OUT), "token revoked");
+        sql(&db, "DELETE FROM workspace_members").await;
+        assert_eq!(check(&db, Role::Viewer, session()).await, Verdict::Revoke(NO_ACCESS), "removed");
+        sql(&db, "DELETE FROM sessions").await;
+        assert_eq!(check(&db, Role::Viewer, session()).await, Verdict::Revoke(SIGNED_OUT), "signed out");
+        sql(&db, "UPDATE file_shares SET expires_at = 1").await;
+        assert_eq!(check(&db, Role::Viewer, link()).await, Verdict::Revoke(LINK_GONE), "link expired");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Join the room for "f" as "u"; returns the socket's outbound queue.
+    async fn join(rooms: &Rooms, role: Role) -> mpsc::Receiver<Msg> {
+        let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role, credential: Credential::Session(sha256_hex("s")) };
+        rooms.get("f").await.unwrap().join(info, out).await.unwrap();
+        assert!(rx.recv().await.unwrap().contains(r#""t":"init""#));
+        rx
+    }
+
+    /// The next message on the socket, or None once the room closed it.
+    async fn next(rx: &mut mpsc::Receiver<Msg>) -> Option<Msg> {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("the room answered")
+    }
+
+    #[tokio::test]
+    async fn rooms_close_sockets_whose_access_changed() {
+        let (db, dir) = setup("rooms").await;
+        let rooms = Rooms::new(db.clone());
+
+        // A new role: closed without a message, so the client reconnects.
+        let mut rx = join(&rooms, Role::Editor).await;
+        sql(&db, "UPDATE workspace_members SET role = 'viewer'").await;
+        rooms.recheck_all();
+        assert!(next(&mut rx).await.is_none());
+
+        // Signed out: told why, then closed.
+        let mut rx = join(&rooms, Role::Viewer).await;
+        sql(&db, "DELETE FROM sessions").await;
+        rooms.recheck_all();
+        let bye = next(&mut rx).await.unwrap();
+        assert!(bye.contains(r#""fatal":true"#) && bye.contains("signed out"), "{bye}");
+        assert!(next(&mut rx).await.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

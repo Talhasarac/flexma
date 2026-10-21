@@ -1,8 +1,9 @@
 //! Multiplayer WebSocket endpoint: `/api/files/:id/ws`.
 
-use crate::auth::{authenticate, check_origin, file_access, refuse_oauth, Role};
+use crate::auth::{authenticate, bearer_token, check_origin, cookie_value, file_access, refuse_oauth, Role, SESSION_COOKIE};
+use crate::db::sha256_hex;
 use crate::error::{AppError, AppResult};
-use crate::rooms::{JoinInfo, Msg};
+use crate::rooms::{Credential, JoinInfo, Msg};
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -45,12 +46,18 @@ pub async fn handler(
     if !user.via_token {
         check_origin(&headers)?;
     }
+    // The room re-checks this later, so revoking it ends the socket.
+    let credential = match (user.via_token, bearer_token(&headers), cookie_value(&headers, SESSION_COOKIE)) {
+        (true, Some(t), _) => Credential::Token(sha256_hex(&t)),
+        (false, _, Some(s)) => Credential::Session(sha256_hex(&s)),
+        _ => return Err(AppError::unauthorized()),
+    };
     let uid = user.id.clone();
     let fid = file_id.clone();
     let (_, _, role) = st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer)).await?;
     let room = st.rooms.get(&file_id).await?;
     Ok(ws.max_message_size(64 * 1024 * 1024).on_upgrade(move |socket| async move {
-        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, share_token: None };
+        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, credential };
         run(socket, room, info).await;
     }))
 }
@@ -70,7 +77,7 @@ pub async fn share_handler(
             name: "Guest".into(),
             color: "#8a8a8f".into(),
             role: Role::Viewer,
-            share_token: Some(token),
+            credential: Credential::Share(token),
         };
         run(socket, room, info).await;
     }))

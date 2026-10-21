@@ -203,6 +203,7 @@ pub async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult
                 Ok(())
             })
             .await?;
+        st.rooms.recheck_all();
     }
     Ok((AppendHeaders([(header::SET_COOKIE, auth::clear_cookie())]), Json(json!({}))))
 }
@@ -252,6 +253,7 @@ pub async fn update_me(State(st): State<AppState>, headers: HeaderMap, user: Aut
     }
     // A new password signs out everything else; the browser making the change stays in.
     let keep = if user.via_token { None } else { auth::cookie_value(&headers, auth::SESSION_COOKIE).map(|t| sha256_hex(&t)) };
+    let signs_out = new_hash.is_some();
     let u2 = u.clone();
     st.db
         .call(move |c| {
@@ -265,5 +267,8 @@ pub async fn update_me(State(st): State<AppState>, headers: HeaderMap, user: Aut
             Ok(())
         })
         .await?;
+    if signs_out {
+        st.rooms.recheck_all();
+    }
     Ok(Json(json!({ "user": user_json(&u) })))
 }

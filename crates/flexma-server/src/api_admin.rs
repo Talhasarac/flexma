@@ -116,6 +116,7 @@ pub async fn reset_password(State(st): State<AppState>, user: AuthUser, Path(id)
             Ok(())
         })
         .await?;
+    st.rooms.recheck_all();
     Ok(Json(json!({ "password": temp })))
 }
 
@@ -159,6 +160,7 @@ pub async fn delete_user(State(st): State<AppState>, user: AuthUser, Path(id): P
             Ok(())
         })
         .await?;
+    st.rooms.recheck_all();
     Ok(Json(json!({})))
 }
 

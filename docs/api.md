@@ -191,6 +191,11 @@ Client → server:
 - `{ t: "presence", cursor: [x, y] | null, selection: [ids], page: pageId }`
 
 `peer = { clientId, userId, name, color, cursor, selection, page, isAgent, isGuest }`
+
+Open sockets are re-checked whenever roles, memberships, accounts, passwords,
+sessions or tokens change, and every 60 seconds. A socket whose role changed is
+closed without a message, so the client reconnects with the new role. One whose
+sign-in, access or share link is gone gets a fatal `error` first.
 `op = { op: "create", node } | { op: "update", id, props } | { op: "delete", id }`
 
 ## MCP

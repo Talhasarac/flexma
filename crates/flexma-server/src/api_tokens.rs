@@ -71,6 +71,7 @@ pub async fn delete(State(st): State<AppState>, user: AuthUser, Path(id): Path<S
     if n == 0 {
         return Err(AppError::not_found("token"));
     }
+    st.rooms.recheck_all();
     Ok(Json(json!({})))
 }
 

@@ -205,6 +205,7 @@ pub async fn update_member(
             Ok(())
         })
         .await?;
+    st.rooms.recheck_all();
     Ok(Json(json!({})))
 }
 
@@ -229,6 +230,7 @@ pub async fn remove_member(
             Ok(())
         })
         .await?;
+    st.rooms.recheck_all();
     Ok(Json(json!({})))
 }
 
@@ -381,6 +383,8 @@ pub async fn accept_invite(State(st): State<AppState>, user: AuthUser, Path(toke
             Ok(json!({ "workspaceId": ws }))
         })
         .await?;
+    // A higher role: open sockets rejoin with it.
+    st.rooms.recheck_all();
     Ok(Json(v))
 }
 
