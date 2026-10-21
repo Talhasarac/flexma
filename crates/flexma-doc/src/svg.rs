@@ -142,7 +142,16 @@ fn visual_bounds(doc: &Document, n: &Node) -> Rect {
         };
         grow = grow.max(reach + n.font_size * 0.1);
     }
+    // An outside stroke lies wholly past the node's box. Centered strokes keep the box, as they always have.
+    if aligned_stroke(n) && n.has_visible_stroke() && n.stroke_align == crate::paint::StrokeAlign::Outside {
+        grow = grow.max(n.stroke_weight);
+    }
     if grow > 0.0 { b.inflate(grow.ceil()) } else { b }
+}
+
+/// Shapes whose stroke follows `strokeAlign`, as in the editor (its rounded-rectangle and ellipse shapes).
+fn aligned_stroke(n: &Node) -> bool {
+    matches!(n.kind, NodeType::Rectangle | NodeType::Frame | NodeType::Component | NodeType::Instance | NodeType::Ellipse)
 }
 
 /// The region a filled image shows (Unity's Filled type), as path data in a
@@ -731,6 +740,15 @@ impl Writer<'_> {
                         self.body.push_str(&fills);
                     }
                     if n.has_visible_stroke() {
+                        // Like the editor, rectangles, frames and ellipses put the stroke inside or outside
+                        // their edge: a stroke twice as wide, clipped to the shape or masked out of it.
+                        // Paths, polygons, stars and lines always center it.
+                        let align = if aligned_stroke(n) { n.stroke_align } else { crate::paint::StrokeAlign::Center };
+                        let width = match align {
+                            crate::paint::StrokeAlign::Center => n.stroke_weight,
+                            _ => n.stroke_weight * 2.0,
+                        };
+                        let mut markup = String::new();
                         let strokes = n.strokes.clone();
                         for p in strokes.iter() {
                             if let Some(attr) = self.paint_attr(p, n.width, n.height, "stroke") {
@@ -754,10 +772,29 @@ impl Writer<'_> {
                                     StrokeJoin::Miter => "",
                                 };
                                 let _ = write!(
-                                    self.body,
+                                    markup,
                                     r#"{shape} fill="none"{attr} stroke-width="{}"{dash}{cap}{join}/>"#,
-                                    fmt_num(n.stroke_weight)
+                                    fmt_num(width)
                                 );
+                            }
+                        }
+                        match align {
+                            _ if markup.is_empty() => {}
+                            crate::paint::StrokeAlign::Center => self.body.push_str(&markup),
+                            crate::paint::StrokeAlign::Inside => {
+                                let clip = self.id("sc");
+                                let _ = write!(self.defs, r#"<clipPath id="{clip}">{shape}/></clipPath>"#);
+                                let _ = write!(self.body, r#"<g clip-path="url(#{clip})">{markup}</g>"#);
+                            }
+                            crate::paint::StrokeAlign::Outside => {
+                                let mask = self.id("sm");
+                                let (x, y) = (fmt_num(-n.stroke_weight), fmt_num(-n.stroke_weight));
+                                let (w, h) = (fmt_num(n.width + n.stroke_weight * 2.0), fmt_num(n.height + n.stroke_weight * 2.0));
+                                let _ = write!(
+                                    self.defs,
+                                    r##"<mask id="{mask}" maskUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}"><rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#fff"/>{shape} fill="#000"/></mask>"##
+                                );
+                                let _ = write!(self.body, r#"<g mask="url(#{mask})">{markup}</g>"#);
                             }
                         }
                     }
@@ -945,5 +982,53 @@ mod tests {
         // Without the image size the image is stretched instead.
         let (plain, _) = export(&doc, &["0:1".into()], &SvgOptions { resolve_asset: &resolve, ..SvgOptions::default() }).unwrap();
         assert!(plain.contains(r#"preserveAspectRatio="none""#) && !plain.contains("<use"));
+    }
+
+    #[test]
+    fn strokes_follow_their_alignment() {
+        use crate::paint::StrokeAlign;
+        let mut doc = Document::new_empty();
+        let shapes = [
+            ("in:1", NodeType::Frame, StrokeAlign::Inside, 4.0, 0.0),
+            ("out:1", NodeType::Rectangle, StrokeAlign::Outside, 3.0, 8.0),
+            ("mid:1", NodeType::Rectangle, StrokeAlign::Center, 2.0, 0.0),
+            ("vec:1", NodeType::Vector, StrokeAlign::Inside, 5.0, 0.0),
+        ];
+        for (i, (id, kind, align, weight, radius)) in shapes.into_iter().enumerate() {
+            let mut n = Node::new(id, kind);
+            n.parent = Some("0:1".into());
+            n.x = i as f64 * 200.0;
+            n.width = 100.0;
+            n.height = 50.0;
+            n.corner_radius = radius;
+            n.path_data = "M0 0 L100 0 L100 50 Z".into();
+            n.stroke_align = align;
+            n.stroke_weight = weight;
+            n.set_prop("strokes", &serde_json::json!([{ "type": "SOLID", "color": "#ff0000" }])).unwrap();
+            doc.apply(&Op::Create { node: n }).unwrap();
+        }
+        let svg = |id: &str| export(&doc, &[id.into()], &SvgOptions::default()).unwrap();
+
+        // Inside: twice as wide, clipped to the shape; the export keeps the box.
+        let (s, b) = svg("in:1");
+        assert!(s.contains(r#"<clipPath id="sc1"><rect width="100" height="50"/></clipPath>"#), "{s}");
+        assert!(s.contains(r##"<g clip-path="url(#sc1)"><rect width="100" height="50" fill="none" stroke="#ff0000" stroke-width="8"/></g>"##), "{s}");
+        assert_eq!((b.width, b.height), (100.0, 50.0));
+
+        // Outside: twice as wide, with the (rounded) shape masked out; the export grows to show it.
+        let (s, b) = svg("out:1");
+        assert!(s.contains(r##"<mask id="sm1" maskUnits="userSpaceOnUse" x="-3" y="-3" width="106" height="56"><rect x="-3" y="-3" width="106" height="56" fill="#fff"/><rect width="100" height="50" rx="8" fill="#000"/></mask>"##), "{s}");
+        assert!(s.contains(r##"<g mask="url(#sm1)"><rect width="100" height="50" rx="8" fill="none" stroke="#ff0000" stroke-width="6"/></g>"##), "{s}");
+        assert_eq!((b.width, b.height), (106.0, 56.0));
+
+        // Center: as before.
+        let (s, b) = svg("mid:1");
+        assert!(s.contains(r##"<rect width="100" height="50" fill="none" stroke="#ff0000" stroke-width="2"/>"##), "{s}");
+        assert!(!s.contains("clip-path") && !s.contains("mask"), "{s}");
+        assert_eq!(b.width, 100.0);
+
+        // Paths center their stroke whatever the alignment, like the editor.
+        let (s, _) = svg("vec:1");
+        assert!(s.contains(r#"stroke-width="5""#) && !s.contains("clip-path") && !s.contains("mask"), "{s}");
     }
 }
