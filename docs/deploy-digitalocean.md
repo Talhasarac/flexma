@@ -150,8 +150,14 @@ The proxy must pass `Host` (or `X-Forwarded-Host`) and `X-Forwarded-Proto`, or y
 iptables rules, so it can share a small droplet with something like OpenVPN:
 
 - `flexma.service` runs Flexma as its own user on `127.0.0.1:8080`, capped at
-  350 MB of memory and first in line for the OOM killer, so it can't starve
-  the other services.
+  600 MB of memory and first in line for the OOM killer, so it can't starve
+  the other services. Give the server swap too (the swapfile from step 1, 2 GB
+  is enough to run) so Flexma moves cold memory there at the cap instead of
+  being killed, and keep the kernel from swapping busy services early:
+
+  ```bash
+  echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf && sudo sysctl -p /etc/sysctl.d/99-swappiness.conf
+  ```
 - `flexma.env.example` goes to `/etc/flexma/flexma.env`. Set `FLEXMA_PUBLIC_URL`, and
   keep `FLEXMA_MAX_EXPORT_PX=4096` on 1 GB servers.
 - `Caddyfile` serves HTTPS on port **8443** for when something else already owns 443

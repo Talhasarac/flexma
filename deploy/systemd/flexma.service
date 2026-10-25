@@ -15,10 +15,14 @@ StateDirectory=flexma
 Restart=always
 RestartSec=2
 
-# Be a good neighbour on a small server: cap memory, and make Flexma the
-# first thing the OOM killer picks instead of other services.
-MemoryHigh=280M
-MemoryMax=350M
+# Be a good neighbour on a small server: cap Flexma's RAM, and make it the
+# first thing the OOM killer picks instead of other services. Past the cap it
+# moves cold memory to swap (add a swapfile, see docs/deploy-digitalocean.md)
+# instead of being killed. No MemoryHigh: at a soft limit without swap the
+# kernel throttles the process until it stops answering, while staying
+# "active" so Restart= never fires.
+MemoryMax=600M
+MemorySwapMax=2G
 OOMScoreAdjust=500
 Nice=5
 
