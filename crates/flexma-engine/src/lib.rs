@@ -776,11 +776,17 @@ impl FlexmaEditor {
                 None => flexma_doc::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight),
             }
         };
+        let metrics = |n: &flexma_doc::Node| -> (f64, f64) {
+            match text.borrow_mut().as_mut() {
+                Some(t) => t.font_metrics(n),
+                None => (n.font_size * 0.8, n.font_size * 0.2),
+            }
+        };
         let base = self.ed.renderer.as_ref().map(|r| r.asset_base.clone()).unwrap_or_default();
         let resolve = move |id: &str| Some(format!("{base}{id}"));
         let renderer = self.ed.renderer.as_ref();
         let image_size = |id: &str| renderer.and_then(|r| r.image_size(id));
-        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), resolve_variant: &|_, _, _| None, linear: false, paint_tiles: &|_| Vec::new() };
+        let opts = flexma_doc::svg::SvgOptions { padding: 0.0, background: bg, resolve_asset: &resolve, image_size: &image_size, measure_text: Some(&measure), font_metrics: Some(&metrics), resolve_variant: &|_, _, _| None, linear: false, paint_tiles: &|_| Vec::new() };
         let out = flexma_doc::svg::export(&self.ed.doc, &ids, &opts).map(|(s, _)| s);
         self.ed.text = text.into_inner();
         out

@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-/// Always available: bundled with the web app and installed on the server.
+/// Always available: bundled with the web app and, as the same build, with the
+/// server (`render::base_fontdb`).
 pub const BUILTIN: &[&str] = &["Inter"];
 
 /// Fonts most computers have. Fine to use, but they may differ per device and

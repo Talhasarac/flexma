@@ -21,6 +21,10 @@ pub struct SvgOptions<'a> {
     pub image_size: &'a dyn Fn(&str) -> Option<(f64, f64)>,
     /// Text line breaking with real metrics if available.
     pub measure_text: Option<&'a dyn Fn(&Node, &str) -> f64>,
+    /// The font's (ascent, descent) in px at the node's size, which place the
+    /// baseline the way the editor and browsers do. Without it every font is
+    /// taken as 0.8em / 0.2em.
+    pub font_metrics: Option<&'a dyn Fn(&Node) -> (f64, f64)>,
     /// An image with its crop cut out and/or its tint multiplied in, as its
     /// own URL or data URI, if the host can make one. Otherwise crops are
     /// viewports into the whole image (where smoothing can pick up a sliver of
@@ -44,6 +48,7 @@ impl Default for SvgOptions<'_> {
             resolve_asset: &|_| None,
             image_size: &|_| None,
             measure_text: None,
+            font_metrics: None,
             resolve_variant: &|_, _, _| None,
             linear: false,
             paint_tiles: &|_| Vec::new(),
@@ -886,10 +891,15 @@ impl Writer<'_> {
             fmt_num(n.font_size),
             n.font_weight,
         );
+        let (asc, desc) = match self.opts.font_metrics {
+            Some(m) => m(n),
+            None => (n.font_size * 0.8, n.font_size * 0.2),
+        };
         let mut spans = String::new();
         for (i, line) in lines.iter().enumerate() {
-            // Baseline: center the em box in the line box, ascent ≈ 0.8em.
-            let baseline = y0 + lh * i as f64 + (lh - n.font_size) / 2.0 + n.font_size * 0.8;
+            // Baseline: the font's ascent + descent centred in the line box,
+            // like CSS and the editor (`flexma-engine` text.rs).
+            let baseline = y0 + lh * i as f64 + (lh - (asc + desc)) / 2.0 + asc;
             let _ = write!(
                 spans,
                 r#"<tspan x="{}" y="{}" xml:space="preserve">{}</tspan>"#,

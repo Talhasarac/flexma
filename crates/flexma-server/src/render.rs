@@ -44,7 +44,8 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, allowed: &HashSet<String>,
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&mode, id, c, t, linear);
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
+    let metrics = |n: &flexma_doc::Node| measurer.metrics(n);
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear, Some((data_dir, allowed))).ok().map(|(png, _, _)| png)
 }
@@ -134,12 +135,14 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
     let variant = |id: &str, c: Option<&ImageCrop>, t: Option<Color>| image_variant(&assets, id, c, t, linear);
     let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
     let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
+    let metrics = |n: &flexma_doc::Node| measurer.as_ref().map(|m| m.metrics(n)).unwrap_or((n.font_size * 0.8, n.font_size * 0.2));
     let opts = SvgOptions {
         padding: 0.0,
         background,
         resolve_asset: &resolve,
         image_size: &size,
         measure_text: if measurer.is_some() { Some(&measure) } else { None },
+        font_metrics: if measurer.is_some() { Some(&metrics) } else { None },
         resolve_variant: &variant,
         linear,
         paint_tiles: &|l| paint.tiles(l, inline),
@@ -177,17 +180,46 @@ pub fn encode_linear(pm: &mut resvg::tiny_skia::Pixmap) {
 
 /// Text widths from the fonts the renderer will draw with: the node's family
 /// (or the SVG's fallbacks: Inter, Helvetica, Arial, sans-serif) at its
-/// weight and style, by glyph advances.
+/// weight and style, shaped like resvg draws them (kerning, ligatures).
 pub struct TextMeasurer {
     db: Arc<FontDb>,
     faces: std::cell::RefCell<HashMap<(String, u16, bool), Option<resvg::usvg::fontdb::ID>>>,
-    /// Advance per character in em.
-    advances: std::cell::RefCell<HashMap<(resvg::usvg::fontdb::ID, char), f32>>,
+    /// Shaped width per string in em.
+    widths: std::cell::RefCell<HashMap<(resvg::usvg::fontdb::ID, String), f32>>,
+    /// (ascent, descent) per face in em.
+    metrics: std::cell::RefCell<HashMap<resvg::usvg::fontdb::ID, (f32, f32)>>,
 }
 
 impl TextMeasurer {
     pub fn new(db: Arc<FontDb>) -> TextMeasurer {
-        TextMeasurer { db, faces: Default::default(), advances: Default::default() }
+        TextMeasurer { db, faces: Default::default(), widths: Default::default(), metrics: Default::default() }
+    }
+
+    /// The face's (ascent, descent) in px at the node's size, from the table
+    /// browsers use: OS/2 typo when USE_TYPO_METRICS is set, otherwise hhea
+    /// (ttf-parser falls back to typo, then win, when hhea is empty). Rounded
+    /// to whole px like Chrome, whose values the editor places text with.
+    pub fn metrics(&self, n: &flexma_doc::Node) -> (f64, f64) {
+        let em = self.face(n).and_then(|id| {
+            if let Some(m) = self.metrics.borrow().get(&id) {
+                return Some(*m);
+            }
+            let m = self
+                .db
+                .with_face_data(id, |data, index| {
+                    let face = ttf_parser::Face::parse(data, index).ok()?;
+                    let upem = face.units_per_em().max(1) as f32;
+                    let (asc, desc) = (face.ascender() as f32 / upem, -(face.descender() as f32) / upem);
+                    (asc > 0.0 && asc + desc > 0.0).then_some((asc, desc))
+                })
+                .flatten()?;
+            self.metrics.borrow_mut().insert(id, m);
+            Some(m)
+        });
+        match em {
+            Some((asc, desc)) => ((asc as f64 * n.font_size).round(), (desc as f64 * n.font_size).round()),
+            None => (n.font_size * 0.8, n.font_size * 0.2),
+        }
     }
 
     fn face(&self, n: &flexma_doc::Node) -> Option<resvg::usvg::fontdb::ID> {
@@ -211,40 +243,44 @@ impl TextMeasurer {
         let Some(id) = self.face(n) else {
             return flexma_doc::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);
         };
-        let missing: Vec<char> = {
-            let adv = self.advances.borrow();
-            let mut m: Vec<char> = s.chars().filter(|c| !adv.contains_key(&(id, *c))).collect();
-            m.sort_unstable();
-            m.dedup();
-            m
-        };
-        if !missing.is_empty() {
-            let found: Vec<(char, f32)> = self
-                .db
-                .with_face_data(id, |data, index| {
-                    let face = ttf_parser::Face::parse(data, index).ok()?;
-                    let upem = face.units_per_em().max(1) as f32;
-                    Some(
-                        missing
-                            .iter()
-                            .map(|&c| {
-                                let a = face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).map(|a| a as f32 / upem);
-                                // Missing glyphs fall back to another font; guess like the estimate.
-                                (c, a.unwrap_or_else(|| (flexma_doc::text::estimate_width(&c.to_string(), 1.0, 0.0, 400)) as f32))
-                            })
-                            .collect(),
-                    )
-                })
-                .flatten()
-                .unwrap_or_default();
-            let mut adv = self.advances.borrow_mut();
-            for (c, a) in found {
-                adv.insert((id, c), a);
+        let key = (id, s.to_string());
+        let cached = self.widths.borrow().get(&key).copied();
+        let em = match cached {
+            Some(w) => w,
+            None => {
+                let w = self.db.with_face_data(id, |data, index| shaped_width(data, index, s)).flatten();
+                let w = w.unwrap_or_else(|| flexma_doc::text::estimate_width(s, 1.0, 0.0, n.font_weight) as f32);
+                let mut widths = self.widths.borrow_mut();
+                if widths.len() > 20_000 {
+                    widths.clear();
+                }
+                widths.insert(key, w);
+                w
             }
-        }
-        let adv = self.advances.borrow();
-        s.chars().map(|c| adv.get(&(id, c)).copied().unwrap_or(0.5) as f64 * n.font_size + n.letter_spacing).sum()
+        };
+        em as f64 * n.font_size + n.letter_spacing * s.chars().count() as f64
     }
+}
+
+/// Width of `s` in em, shaped with the face like resvg (default features, so
+/// kerning and ligatures). Characters the face lacks are drawn from another
+/// font; they're guessed like the estimate.
+fn shaped_width(data: &[u8], index: u32, s: &str) -> Option<f32> {
+    let face = rustybuzz::Face::from_slice(data, index)?;
+    let upem = face.units_per_em().max(1) as f32;
+    let mut buf = rustybuzz::UnicodeBuffer::new();
+    buf.push_str(s);
+    let out = rustybuzz::shape(&face, &[], buf);
+    let mut w = 0.0;
+    for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
+        w += if info.glyph_id == 0 {
+            let c = s.get(info.cluster as usize..).and_then(|t| t.chars().next()).unwrap_or(' ');
+            flexma_doc::text::estimate_width(c.encode_utf8(&mut [0; 4]), 1.0, 0.0, 400) as f32
+        } else {
+            pos.x_advance as f32 / upem
+        };
+    }
+    Some(w)
 }
 
 /// An inlined image with its crop cut out (whole pixels) and/or its tint
@@ -456,11 +492,38 @@ pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// System fonts (plus `FLEXMA_FONTS_DIR`), shared by every workspace.
+/// The editor's Inter (see `assets/fonts/inter/README.md`).
+static INTER: [&[u8]; 18] = [
+    include_bytes!("../assets/fonts/inter/Inter-100.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-100-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-200.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-200-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-300.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-300-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-400.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-400-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-500.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-500-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-600.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-600-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-700.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-700-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-800.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-800-Italic.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-900.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-900-Italic.ttf"),
+];
+
+/// The bundled Inter, then system fonts (plus `FLEXMA_FONTS_DIR`), shared by
+/// every workspace. Inter goes first so it wins over an installed Inter of
+/// another version, whose widths would wrap lines differently from the editor.
 pub fn base_fontdb() -> Arc<FontDb> {
     static DB: OnceLock<Arc<FontDb>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = FontDb::new();
+        for data in INTER {
+            db.load_font_source(resvg::usvg::fontdb::Source::Binary(Arc::new(data)));
+        }
         db.load_system_fonts();
         if let Ok(dir) = std::env::var("FLEXMA_FONTS_DIR") {
             db.load_fonts_dir(dir);
@@ -1139,6 +1202,44 @@ mod measure_tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(flexma_doc::text::estimate_width(&n.characters, 24.0, 0.0, 400) > 200.0, "the estimate alone would wrap");
     }
+
+    /// The baseline comes from the font's own ascent and descent, centred in
+    /// the line box like the editor, not a 0.8em guess shared by every font.
+    #[test]
+    fn baseline_follows_the_font_metrics() {
+        let db = base_fontdb();
+        let mut doc = Document::new_empty();
+        let mut n = Node::new("t:1", NodeType::Text);
+        n.parent = Some("0:1".into());
+        (n.font_family, n.font_size, n.line_height, n.width, n.height) = ("Arial".into(), 20.0, Some(24.0), 200.0, 24.0);
+        n.text_auto_resize = flexma_doc::TextAutoResize::None;
+        n.characters = "H".into();
+        let m = TextMeasurer::new(db.clone());
+        let Some(id) = m.face(&n) else { return };
+        let is_arial = db.face(id).is_some_and(|f| f.families.iter().any(|(name, _)| name.contains("Arial") || name.contains("Liberation Sans")));
+        if !is_arial {
+            return; // No Arial-metric font on this machine.
+        }
+        // Arial's hhea: 1854 / 434 of 2048 units, 18.1 / 4.2 px at 20px.
+        let (asc, desc) = m.metrics(&n);
+        assert_eq!((asc, desc), (18.0, 4.0));
+        doc.apply(&flexma_doc::Op::Create { node: n }).unwrap();
+        let paint = PaintSource { data_dir: Path::new("/nonexistent"), file_id: "f", share_token: None };
+        let (svg, _) = export_svg(&doc, &["t:1".to_string()], None, AssetMode::Url, Some(&db), &paint).unwrap();
+        let expected = (24.0 - (asc + desc)) / 2.0 + asc;
+        assert!(svg.contains(&format!(r#"y="{}""#, flexma_doc::geom::fmt_num(expected))), "baseline {expected} in {svg}");
+    }
+
+    /// Text is shaped (kerning) with the editor's Inter, so lines break where
+    /// the editor breaks them. Chrome measures this at 308.92 px.
+    #[test]
+    fn inter_widths_match_the_editor() {
+        let m = TextMeasurer::new(base_fontdb());
+        let mut n = Node::new("t", NodeType::Text);
+        (n.font_size, n.font_weight) = (14.0, 400);
+        let w = m.measure(&n, "AVATAR Toyota Wave. Tuesday, LTA yield 7.4%");
+        assert!((w - 308.92).abs() < 0.01, "{w}");
+    }
 }
 
 #[cfg(test)]
@@ -1425,3 +1526,4 @@ mod asset_scope_tests {
         assert_eq!(off, 0, "pixels differ from a single render");
     }
 }
+

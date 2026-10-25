@@ -26,7 +26,7 @@ RUN npm run build
 # ---- Runtime ----
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl fonts-inter fonts-dejavu-core \
+ && apt-get install -y --no-install-recommends ca-certificates curl fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home /data flexma \
  && mkdir -p /data && chown flexma /data

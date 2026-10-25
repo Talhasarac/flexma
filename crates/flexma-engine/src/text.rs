@@ -160,12 +160,15 @@ impl TextEngine {
     }
 
     /// (ascent, descent) of the font at the node's size.
-    fn font_metrics(&mut self, n: &Node) -> (f64, f64) {
+    pub fn font_metrics(&mut self, n: &Node) -> (f64, f64) {
         let font = font_css(n, n.font_size);
         if let Some(m) = self.metrics.get(&font) {
             return *m;
         }
         self.set_font(&font, n.letter_spacing);
+        // The font box is measured from the current baseline, and labels
+        // leave it at "middle" (see `rasterize_label`).
+        self.ctx.set_text_baseline("alphabetic");
         let m = self
             .ctx
             .measure_text("Hg")
