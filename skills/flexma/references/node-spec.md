@@ -37,7 +37,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 Type defaults:
 
 - `RECTANGLE`, `ELLIPSE`, `POLYGON`, `STAR`, `VECTOR`: light gray fill (`#d9d9d9`)
-- `FRAME`: white fill, `clipsContent: true`
+- `FRAME`: `clipsContent: true`; a white fill on the top level of a page, none when nested in another layer (give it `fill` for a background)
 - `TEXT`: black fill
 - `LINE`: 1px black stroke
 

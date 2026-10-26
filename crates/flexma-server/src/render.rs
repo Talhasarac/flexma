@@ -239,6 +239,26 @@ impl TextMeasurer {
         id
     }
 
+    /// Whether the node's own font family is here (not a fallback).
+    pub fn has_font(&self, n: &flexma_doc::Node) -> bool {
+        self.face(n).and_then(|id| self.db.face(id)).is_some_and(|f| f.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(&n.font_family)))
+    }
+
+    /// The box a text node should have for its auto-resize mode, like the
+    /// editor's `measure_box` (flexma-engine text.rs).
+    pub fn measure_box(&self, n: &flexma_doc::Node) -> (f64, f64) {
+        let lines = flexma_doc::text::layout_lines(n, &mut |s| self.measure(n, s));
+        let h = (lines.len().max(1) as f64 * n.effective_line_height()).ceil();
+        match n.text_auto_resize {
+            flexma_doc::TextAutoResize::WidthAndHeight => {
+                let w = lines.iter().map(|l| self.measure(n, l)).fold(0.0, f64::max);
+                (w.ceil().max(1.0), h)
+            }
+            flexma_doc::TextAutoResize::Height => (n.width, h),
+            flexma_doc::TextAutoResize::None => (n.width, n.height),
+        }
+    }
+
     pub fn measure(&self, n: &flexma_doc::Node, s: &str) -> f64 {
         let Some(id) = self.face(n) else {
             return flexma_doc::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);

@@ -618,6 +618,11 @@ fn build_one(
         NodeType::Frame | NodeType::Component => {
             node.width = 100.0;
             node.height = 100.0;
+            // Only artboards start white; a frame inside another layer is
+            // for layout or grouping, so it starts transparent.
+            if parent_kind != NodeType::Page {
+                node.fills.clear();
+            }
         }
         NodeType::Instance => {
             let ckey = obj.get("component").or_else(|| obj.get("componentId")).or_else(|| obj.get("of")).and_then(Value::as_str).unwrap_or_default();
@@ -769,6 +774,32 @@ mod tests {
         assert!(card.width >= 232.0, "{}", card.width);
         let body = doc.children(&top[0])[2].clone();
         assert_eq!(doc.get(&body).unwrap().width, card.width - 32.0);
+    }
+
+    /// A frame on the page starts white; one inside a frame is transparent
+    /// unless the spec gives it a fill.
+    #[test]
+    fn only_top_level_frames_start_white() {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("t:{n}")
+        };
+        let spec = json!([{
+            "type": "frame", "name": "Card", "fill": "#2a2d33", "layout": "vertical",
+            "children": [
+                { "type": "frame", "name": "Buttons", "layout": "horizontal", "padding": [6, 0, 0, 0] },
+                { "type": "frame", "name": "Given", "fill": "#ff0000" }
+            ]
+        }, { "type": "frame", "name": "Artboard" }]);
+        let (ops, _) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        let fills = |name: &str| doc.nodes().find(|n| n.name == name).unwrap().fills.iter().map(|p| p.approx_color().to_hex()).collect::<Vec<_>>();
+        assert_eq!(fills("Buttons"), Vec::<String>::new());
+        assert_eq!(fills("Given"), ["#ff0000"]);
+        assert_eq!(fills("Artboard"), ["#ffffff"]);
     }
 
     #[test]

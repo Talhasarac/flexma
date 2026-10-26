@@ -554,6 +554,14 @@ impl Ctx {
         }
     }
 
+    /// The fonts of a file's workspace, for measuring text (`None` if the
+    /// lookup fails: text then keeps its estimate until a browser opens it).
+    async fn fonts(&self, file_id: &str) -> Option<std::sync::Arc<render::FontDb>> {
+        let fid = file_id.to_string();
+        let ws = self.st.db.call(move |c| crate::fonts::file_workspace(c, &fid)).await.ok()?;
+        Some(crate::fonts::fontdb_for(&self.st, &ws).await)
+    }
+
     async fn room(&self, file_id: &str, min: Role) -> Result<RoomHandle, String> {
         let uid = self.user.id.clone();
         let fid = file_id.to_string();
@@ -825,7 +833,7 @@ impl Ctx {
         crate::icons::expand_all(&mut specs)?;
         self.size_images(fid, &mut specs).await?;
         let prefix = format!("a{}", random_string(5));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let parent = match parent {
                 Some(p) => p,
                 None => tx.doc.pages().first().cloned().ok_or("file has no pages")?,
@@ -890,7 +898,7 @@ impl Ctx {
         let room = self.room(&fid, Role::Editor).await?;
         let note = self.font_note(&fid, args).await;
         let prefix = format!("a{}", random_string(5));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut unknown: std::collections::BTreeSet<String> = Default::default();
             let mut n = 0u32;
             let mut gen = || {
@@ -1042,7 +1050,7 @@ impl Ctx {
         }
         let room = self.room(&fid, Role::Editor).await?;
         let prefix = format!("a{}", random_string(5));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut out = Vec::new();
             let mut ops = Vec::new();
             let mut n = 0u32;
@@ -1112,7 +1120,7 @@ impl Ctx {
         let fid = s(args, "file_id")?.to_string();
         let keys = ids(args, "styles")?;
         let room = self.room(&fid, Role::Editor).await?;
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut ops = Vec::new();
             let mut names = Vec::new();
             let mut detached = 0;
@@ -1195,7 +1203,7 @@ impl Ctx {
         let updates = args.get("updates").and_then(Value::as_array).cloned().ok_or("missing required array 'updates'")?;
         let room = self.room(&fid, Role::Editor).await?;
         let note = self.font_note(&fid, args).await;
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut ops = Vec::new();
             // Children that follow a resized frame by their constraints.
             let mut follow = Vec::new();
@@ -1266,7 +1274,7 @@ impl Ctx {
         let fid = s(args, "file_id")?.to_string();
         let targets = ids(args, "node_ids")?;
         let room = self.room(&fid, Role::Editor).await?;
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let ops: Vec<Op> = targets.iter().filter(|id| tx.doc.contains(id)).map(|id| Op::Delete { id: id.clone() }).collect();
             let n = ops.len();
             let errs = tx.apply_all(ops);
@@ -1288,7 +1296,7 @@ impl Ctx {
         let index = args.get("index").and_then(Value::as_u64).map(|v| v as usize);
         let keep = args.get("keep_position").and_then(Value::as_bool).unwrap_or(true);
         let room = self.room(&fid, Role::Editor).await?;
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let pn = tx.doc.get(&parent).ok_or_else(|| format!("parent '{parent}' not found"))?;
             if !pn.kind.is_container() || pn.kind == NodeType::Document {
                 return Err(format!("'{parent}' cannot contain nodes"));
@@ -1345,7 +1353,7 @@ impl Ctx {
         let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(0.0);
         let room = self.room(&fid, Role::Editor).await?;
         let prefix = format!("a{}", random_string(5));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut counter = 0u32;
             let mut out = String::from("Duplicated:\n");
             let mut tops = Vec::new();
@@ -1456,7 +1464,7 @@ impl Ctx {
         let linear = args.get("linearBlending").and_then(Value::as_bool).unwrap_or(false);
         let room = self.room(&fid, Role::Editor).await?;
         let id = format!("a{}:1", random_string(6));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut page = Node::new(id.clone(), NodeType::Page);
             page.name = name;
             page.linear_blending = linear;
@@ -2065,7 +2073,7 @@ impl Ctx {
         let name = opt_s(args, "name").map(str::to_string);
         let room = self.room(&fid, Role::Editor).await?;
         let new_id = format!("a{}:1", random_string(6));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut ops = flexma_doc::components::convert_to_component_ops(tx.doc, &node, &new_id)?;
             if let (Some(name), Some(Op::Create { node: c })) = (name, ops.first_mut()) {
                 c.name = name;
@@ -2088,7 +2096,7 @@ impl Ctx {
         let node = s(args, "node_id")?.to_string();
         let room = self.room(&fid, Role::Editor).await?;
         let prefix = format!("a{}", random_string(5));
-        room.mutate(self.agent(), move |tx| {
+        room.mutate(self.agent(), self.fonts(&fid).await, move |tx| {
             let mut n = 0u32;
             let mut gen = || {
                 n += 1;
@@ -2304,8 +2312,9 @@ fn place_on_page(doc: &Document, parent: &str, specs: &mut [Value]) {
     }
 }
 
-/// After text edits, re-estimate the box (the first browser that renders it
-/// will measure it exactly and clear `needsMeasure`).
+/// After text edits, re-estimate the box and mark it `needsMeasure`: the
+/// room then measures it with the workspace's fonts (`Tx::measure_text`), or
+/// the first browser that renders it does.
 fn re_estimate_text(node: &Node, props: &mut Map<String, Value>) {
     const AFFECTS: &[&str] = &[
         "characters", "fontSize", "fontFamily", "fontWeight", "letterSpacing", "lineHeight", "textAutoResize", "width",
@@ -2398,12 +2407,15 @@ fn node_line(doc: &Document, n: &Node) -> String {
         s.push_str(&format!(" r {}", fmt_num(n.corner_radius)));
     }
     if n.layout_mode != flexma_doc::LayoutMode::None {
-        s.push_str(&format!(
-            " layout {:?} gap {} pad {}",
-            n.layout_mode,
-            fmt_num(n.item_spacing),
-            fmt_num(n.padding.top)
-        ));
+        let p = &n.padding;
+        // One number when every side matches, else top,right,bottom,left
+        // (the order `padding: [t, r, b, l]` takes).
+        let pad = if p.top == p.right && p.top == p.bottom && p.top == p.left {
+            fmt_num(p.top)
+        } else {
+            [p.top, p.right, p.bottom, p.left].map(fmt_num).join(",")
+        };
+        s.push_str(&format!(" layout {:?} gap {} pad {pad}", n.layout_mode, fmt_num(n.item_spacing)));
     }
     if n.kind == NodeType::Text {
         let t: String = n.characters.chars().take(80).collect();
@@ -2943,5 +2955,17 @@ mod arg_tests {
         for t in tools().as_array().unwrap() {
             walk(&t["inputSchema"], t["name"].as_str().unwrap());
         }
+    }
+
+    /// The outline shows every side when the paddings differ.
+    #[test]
+    fn outline_padding() {
+        let doc = Document::new_empty();
+        let mut n = Node::new("f:1", NodeType::Frame);
+        n.layout_mode = flexma_doc::LayoutMode::Horizontal;
+        n.padding.top = 6.0;
+        assert!(node_line(&doc, &n).contains(" pad 6,0,0,0"), "{}", node_line(&doc, &n));
+        n.padding = flexma_doc::Padding { top: 8.0, right: 8.0, bottom: 8.0, left: 8.0 };
+        assert!(node_line(&doc, &n).ends_with(" pad 8") || node_line(&doc, &n).contains(" pad 8 "), "{}", node_line(&doc, &n));
     }
 }

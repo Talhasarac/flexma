@@ -7,6 +7,7 @@
 use crate::auth::{file_access, Role};
 use crate::db::{now, random_string, Db};
 use crate::error::{AppError, AppResult};
+use crate::render::{FontDb, TextMeasurer};
 use flexma_doc::{components, layout};
 use flexma_doc::{Document, NodeId, Op};
 use rusqlite::{params, OptionalExtension};
@@ -158,11 +159,13 @@ pub struct Tx<'a> {
     removed: Vec<NodeId>,
     touched: Vec<NodeId>,
     undo: Vec<UndoStep>,
+    /// The workspace's fonts, to measure text boxes that are still estimates.
+    measurer: Option<TextMeasurer>,
 }
 
 impl<'a> Tx<'a> {
     fn new(doc: &'a mut Document) -> Self {
-        Tx { doc, applied: vec![], changed: vec![], removed: vec![], touched: vec![], undo: vec![] }
+        Tx { doc, applied: vec![], changed: vec![], removed: vec![], touched: vec![], undo: vec![], measurer: None }
     }
 
     /// Remember how to reverse `op` (call before applying it).
@@ -231,8 +234,14 @@ impl<'a> Tx<'a> {
         errs
     }
 
-    /// Re-expand affected instances and run auto layout (so results can report final geometry).
+    /// Re-expand affected instances, measure text and run auto layout (so
+    /// results can report final geometry).
     pub fn relayout(&mut self) {
+        self.sync_and_layout();
+        self.measure_text();
+    }
+
+    fn sync_and_layout(&mut self) {
         let synced = components::sync_instances(self.doc, &self.changed, &self.removed);
         let mut changed = std::mem::take(&mut self.changed);
         changed.extend(synced);
@@ -241,6 +250,46 @@ impl<'a> Tx<'a> {
         self.removed.clear();
         layout::relayout(self.doc, &changed);
         self.changed = changed;
+    }
+
+    /// Give text boxes that are still estimates (`needsMeasure`) their real
+    /// size from the workspace's fonts, like the first browser to open the
+    /// file would, then lay out again. Text whose font the server lacks keeps
+    /// `needsMeasure`, so a browser still measures it.
+    fn measure_text(&mut self) {
+        let Some(m) = self.measurer.take() else { return };
+        // A wrapped box's height follows the width layout gives it, which can
+        // follow other boxes: a few rounds settle it.
+        for _ in 0..3 {
+            let ids: std::collections::BTreeSet<&NodeId> = self.changed.iter().collect();
+            let mut ops = Vec::new();
+            for id in ids {
+                let Some(n) = self.doc.get(id) else { continue };
+                if n.kind != flexma_doc::NodeType::Text || !n.needs_measure {
+                    continue;
+                }
+                let (w, h) = m.measure_box(n);
+                let mut props = serde_json::Map::new();
+                if (w - n.width).abs() > 0.01 {
+                    props.insert("width".into(), json!(w));
+                }
+                if (h - n.height).abs() > 0.01 {
+                    props.insert("height".into(), json!(h));
+                }
+                if m.has_font(n) {
+                    props.insert("needsMeasure".into(), json!(false));
+                }
+                if !props.is_empty() {
+                    ops.push(Op::Update { id: id.clone(), props });
+                }
+            }
+            if ops.is_empty() {
+                break;
+            }
+            self.apply_all(ops);
+            self.sync_and_layout();
+        }
+        self.measurer = Some(m);
     }
 }
 
@@ -252,7 +301,7 @@ enum Cmd {
     Leave { client_id: String },
     ClientOps { client_id: String, batch: u64, ops: Vec<Op> },
     Presence { client_id: String, cursor: Option<[f64; 2]>, selection: Vec<String>, page: Option<String> },
-    Mutate { agent: AgentInfo, f: MutateFn, reply: oneshot::Sender<Result<Value, String>> },
+    Mutate { agent: AgentInfo, fonts: Option<Arc<FontDb>>, f: MutateFn, reply: oneshot::Sender<Result<Value, String>> },
     UndoAgent { agent: AgentInfo, steps: usize, reply: oneshot::Sender<Result<Value, String>> },
     Read { f: ReadFn },
     Flush { reply: oneshot::Sender<()> },
@@ -357,12 +406,14 @@ impl RoomHandle {
         rx.await.map_err(|_| closed())
     }
 
-    pub async fn mutate<F>(&self, agent: AgentInfo, f: F) -> AppResult<Result<Value, String>>
+    /// Run an agent's edit. With the workspace's `fonts`, text boxes the edit
+    /// leaves as estimates get measured (see `Tx::measure_text`).
+    pub async fn mutate<F>(&self, agent: AgentInfo, fonts: Option<Arc<FontDb>>, f: F) -> AppResult<Result<Value, String>>
     where
         F: FnOnce(&mut Tx) -> Result<Value, String> + Send + 'static,
     {
         let (reply, rx) = oneshot::channel();
-        self.tx.send(Cmd::Mutate { agent, f: Box::new(f), reply }).await.map_err(|_| closed())?;
+        self.tx.send(Cmd::Mutate { agent, fonts, f: Box::new(f), reply }).await.map_err(|_| closed())?;
         rx.await.map_err(|_| closed())
     }
 }
@@ -680,8 +731,9 @@ impl Room {
                 let m = msg(json!({ "t": "presence", "peer": c.peer }));
                 self.broadcast(m, Some(&client_id));
             }
-            Cmd::Mutate { agent, f, reply } => {
+            Cmd::Mutate { agent, fonts, f, reply } => {
                 let mut tx = Tx::new(&mut self.doc);
+                tx.measurer = fonts.map(TextMeasurer::new);
                 let result = f(&mut tx);
                 tx.relayout();
                 tx.settle_undo();
@@ -1141,5 +1193,32 @@ mod access_tests {
         assert!(bye.contains(r#""fatal":true"#) && bye.contains("signed out"), "{bye}");
         assert!(next(&mut rx).await.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod measure_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType};
+
+    /// Agent edits leave text boxes as estimates; the room measures them with
+    /// the workspace's fonts before results are reported.
+    #[test]
+    fn agent_text_gets_measured() {
+        let mut doc = Document::new_empty();
+        let mut t = Node::new("t:1", NodeType::Text);
+        t.parent = Some("0:1".into());
+        (t.characters, t.font_size, t.width, t.height, t.needs_measure) = ("AVATAR Toyota Wave. Tuesday, LTA yield 7.4%".into(), 14.0, 400.0, 17.0, true);
+        let mut missing = t.clone();
+        (missing.id, missing.font_family) = ("t:2".into(), "No Such Font".into());
+        let mut tx = Tx::new(&mut doc);
+        tx.measurer = Some(TextMeasurer::new(crate::render::base_fontdb()));
+        tx.apply_all(vec![Op::Create { node: t }, Op::Create { node: missing }]);
+        tx.relayout();
+        let n = doc.get("t:1").unwrap();
+        // 308.92 px in Chrome (see render::measure_tests).
+        assert_eq!((n.width, n.needs_measure), (309.0, false));
+        let m = doc.get("t:2").unwrap();
+        assert!(m.needs_measure, "a browser still measures text in a font the server lacks");
     }
 }

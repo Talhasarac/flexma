@@ -190,7 +190,7 @@ Then call `get_screenshot` with the returned frame id and adjust.
 ## Gotchas
 
 - Errors name the bad property and list the valid ones. Fix the spec and retry; don't drop the property silently.
-- Text boxes are sized by estimate on the server. The first browser that renders them re-measures them exactly, so screenshots can differ by a few pixels from what people see.
+- Text boxes are measured on the server with the workspace's fonts, the way the editor measures them, so tool results and screenshots show their real size. Text in a font the workspace doesn't have (Arial, Georgia, …) is sized with Inter until a browser opens the file and measures it.
 - `x`/`y` on children of an auto-layout frame are ignored. To pin a child, set `absolute: true`.
 - Resizing a frame or instance moves children that have `constraints` (like Unity anchors). Children with the default `MIN`/`MIN` stay where they are.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
