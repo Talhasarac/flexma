@@ -573,6 +573,18 @@ impl FlexmaEditor {
         }
     }
 
+    /// The world area on screen, `[x, y, w, h]` (sent to peers, who can follow it).
+    pub fn view_rect(&self) -> Vec<f64> {
+        let r = self.ed.cam.visible_world(self.ed.css_w, self.ed.css_h);
+        vec![r.x, r.y, r.width, r.height]
+    }
+
+    /// Show a world area, fitted and centered (following someone's view).
+    pub fn show_rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
+        self.ed.cam.fit(&flexma_doc::Rect::new(x, y, w, h), self.ed.css_w, self.ed.css_h, 0.0, crate::camera::MAX_ZOOM);
+        self.ed.camera_changed();
+    }
+
     /// Pan so a world point is centered.
     pub fn center_on(&mut self, x: f64, y: f64) {
         self.ed.cam.x = self.ed.css_w / 2.0 - x * self.ed.cam.zoom;

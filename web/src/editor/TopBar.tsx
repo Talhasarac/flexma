@@ -1,5 +1,5 @@
 // Editor top bar: navigation, file name, presence, sync status, zoom and menus.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronDown, CloudOff, Eye, Loader2, Menu as MenuIcon, Redo2, Share2, Sparkles, Undo2 } from 'lucide-react';
 import { Avatar } from '../components/Avatar';
@@ -7,7 +7,7 @@ import { useMenu } from '../components/Menu';
 import { useToast } from '../components/Toast';
 import { useDialogs } from '../components/Dialogs';
 import { api, type FileInfo } from '../lib/api';
-import { usePeers, useSaving, useStatus, useUi, type EditorStore } from './store';
+import { useFollowing, usePeers, useSaving, useStatus, useUi, type EditorStore } from './store';
 import { AgentDialog } from './AgentDialog';
 import { ShareDialog } from '../components/ShareDialog';
 import { VersionsDialog } from './VersionsDialog';
@@ -126,11 +126,11 @@ export function TopBar({ store, file, onRenamed }: Props) {
   );
 }
 
-/** Avatars of everyone else in the file (agents as chips, link guests grouped). */
+/** Avatars of everyone else in the file (agents as chips, link guests
+ * grouped). Clicking a person follows their view. */
 export function Presence({ store, self }: { store: EditorStore; self: { name: string; color: string } | null }) {
   const peers = usePeers(store);
-  const ui = useUi(store);
-  const e = store.engine;
+  const following = useFollowing(store);
   const agents = peers.filter((p) => p.isAgent);
   const guests = peers.filter((p) => p.isGuest && !p.isAgent);
   const humans = peers.filter((p) => !p.isAgent && !p.isGuest);
@@ -141,21 +141,22 @@ export function Presence({ store, self }: { store: EditorStore; self: { name: st
           <Sparkles size={11} /> {p.name.split(' · ')[0]}
         </span>
       ))}
-      {humans.slice(0, 5).map((p) => (
-        <button
-          type="button"
-          key={p.clientId}
-          className="presence-avatar"
-          title={`${p.name} — click to jump to their view`}
-          onClick={() => {
-            if (p.page && p.page !== ui.page) e.set_page(p.page);
-            if (p.selection[0]) e.focus_node(p.selection[0]);
-            store.poll();
-          }}
-        >
-          <Avatar name={p.name} color={p.color} size={26} />
-        </button>
-      ))}
+      {humans.slice(0, 5).map((p) => {
+        const on = following === p.userId;
+        return (
+          <button
+            type="button"
+            key={p.clientId}
+            className={`presence-avatar${on ? ' following' : ''}`}
+            style={on ? { boxShadow: `0 0 0 2px ${p.color}` } : undefined}
+            title={on ? `Stop following ${p.name}` : `Follow ${p.name}: see what they see`}
+            aria-pressed={on}
+            onClick={() => store.follow(on ? null : p.userId)}
+          >
+            <Avatar name={p.name} color={p.color} size={26} />
+          </button>
+        );
+      })}
       {humans.length > 5 && <span className="presence-more">+{humans.length - 5}</span>}
       {guests.length > 0 && (
         <span className="presence-guests" title={`${guests.length} ${guests.length === 1 ? 'person is' : 'people are'} viewing through the public link`}>
@@ -163,6 +164,33 @@ export function Presence({ store, self }: { store: EditorStore; self: { name: st
         </span>
       )}
       {self && <Avatar name={self.name} color={self.color} size={26} title={`${self.name} (you)`} />}
+    </div>
+  );
+}
+
+/** While following someone: a frame in their color around the canvas, with
+ * their name and a way out (Stop or Esc; panning or zooming also stops). */
+export function FollowFrame({ store }: { store: EditorStore }) {
+  const following = useFollowing(store);
+  const peers = usePeers(store);
+  const p = following ? peers.find((x) => x.userId === following && !x.isAgent) : undefined;
+  useEffect(() => {
+    if (!following) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') store.follow(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [following, store]);
+  if (!p) return null;
+  return (
+    <div className="follow-frame" style={{ borderColor: p.color }}>
+      <div className="follow-label" style={{ background: p.color }}>
+        Following {p.name}
+        <button type="button" onClick={() => store.follow(null)} title="Stop following (Esc)">
+          Stop
+        </button>
+      </div>
     </div>
   );
 }

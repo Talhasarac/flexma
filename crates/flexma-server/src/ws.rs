@@ -29,6 +29,10 @@ enum ClientMsg {
         selection: Vec<String>,
         #[serde(default)]
         page: Option<String>,
+        #[serde(default)]
+        viewport: Option<[f64; 4]>,
+        #[serde(default)]
+        following: Option<String>,
     },
     Ping,
 }
@@ -152,10 +156,12 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
                     .collect();
                 room.client_ops(client_id.clone(), batch, ops).await
             }
-            Ok(ClientMsg::Presence { cursor, selection, page }) => {
+            Ok(ClientMsg::Presence { cursor, selection, page, viewport, following }) => {
                 let mut selection = selection;
                 selection.truncate(500);
-                room.presence(client_id.clone(), cursor, selection, page).await
+                let viewport = viewport.filter(|v| v[2] > 0.0 && v[3] > 0.0);
+                let following = following.filter(|u| u.len() <= 64);
+                room.presence(client_id.clone(), crate::rooms::PresenceUpdate { cursor, selection, page, viewport, following }).await
             }
             Ok(ClientMsg::Ping) => {}
             Err(e) => tracing::debug!("bad client message: {e}"),

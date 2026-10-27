@@ -277,6 +277,10 @@ export interface Peer {
   cursor: [number, number] | null;
   selection: string[];
   page: string | null;
+  /** The world area on their screen, `[x, y, w, h]` (for following them). */
+  viewport?: [number, number, number, number] | null;
+  /** The user whose view they follow. */
+  following?: string | null;
   isAgent: boolean;
   /** Viewing through a public share link (not signed in). */
   isGuest?: boolean;

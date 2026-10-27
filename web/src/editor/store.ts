@@ -53,6 +53,13 @@ export class EditorStore {
   private lastPresence = 0;
   private presenceDirty = false;
   private cursorWorld: [number, number] | null = null;
+  /** The view last sent with presence (rounded), to send again when it moves. */
+  private sentView = '';
+  /** The user whose view this tab follows. */
+  following: string | null = null;
+  /** The page and camera following last set; any other change means the
+   * user moved on their own, which stops following. */
+  private followed: { page: string; camera: string; rect: string; size: string } | null = null;
   private loadedOnce = false;
   onFatal: ((message: string) => void) | null = null;
   onReject: ((message: string) => void) | null = null;
@@ -152,6 +159,9 @@ export class EditorStore {
   poll() {
     const e = this.engine;
     let changed = false;
+    if (this.followed && (e.current_page() !== this.followed.page || cameraKey(e) !== this.followed.camera)) {
+      this.follow(null);
+    }
     const sv = e.structure_version();
     if (sv !== this.v.structure) {
       this.v.structure = sv;
@@ -212,6 +222,7 @@ export class EditorStore {
   getPages = () => this.pages;
   getUi = () => this.ui;
   getPeers = () => this.peers;
+  getFollowing = () => this.following;
   getComments = () => this.comments;
   getCommentMode = () => this.commentMode;
   getOpenThread = () => this.openThread;
@@ -377,7 +388,46 @@ export class EditorStore {
     }
     this.peers = [...shown.values()];
     this.engine.set_peers(JSON.stringify(this.peers));
+    if (this.following) {
+      if (this.peers.some((p) => p.userId === this.following && !p.isAgent)) this.applyFollow();
+      else this.follow(null);
+    }
     this.notify();
+  }
+
+  /** Follow a person's view (their page and what's on their screen) until
+   * this user pans, zooms or changes page. `null` stops. */
+  follow(userId: string | null) {
+    this.following = userId;
+    this.followed = null;
+    this.presenceDirty = true;
+    if (userId) this.applyFollow();
+    this.notify();
+  }
+
+  private applyFollow() {
+    const p = this.peers.find((x) => x.userId === this.following && !x.isAgent);
+    if (!p) return;
+    const e = this.engine;
+    // Two people following each other would keep fitting each other's view.
+    if (p.following === this.userId && this.userId) return;
+    const pageChanged = !!p.page && p.page !== e.current_page();
+    if (pageChanged) e.set_page(p.page!);
+    const view = Array.from(e.view_rect());
+    const zoom = e.zoom();
+    const size = `${Math.round(view[2] * zoom)}x${Math.round(view[3] * zoom)}`;
+    const v = p.viewport;
+    if (v && v[2] > 0 && v[3] > 0) {
+      const rect = v.join(',');
+      if (pageChanged || !this.followed || this.followed.rect !== rect || this.followed.size !== size) e.show_rect(v[0], v[1], v[2], v[3]);
+      this.followed = { page: e.current_page(), camera: cameraKey(e), rect, size };
+    } else {
+      // An older client that doesn't send its view: keep its cursor centered.
+      if (p.cursor) e.center_on(p.cursor[0], p.cursor[1]);
+      else if (p.selection[0] && pageChanged) e.focus_node(p.selection[0]);
+      this.followed = { page: e.current_page(), camera: cameraKey(e), rect: '', size };
+    }
+    this.poll();
   }
 
   /** Send queued ops (throttled) and presence. Called every animation frame. */
@@ -399,15 +449,21 @@ export class EditorStore {
       }
     }
     this.uploadPaintSnapshots();
+    const view = Array.from(this.engine.view_rect(), (n) => Math.round(n * 100) / 100);
+    const viewKey = view.join(',');
+    if (viewKey !== this.sentView) this.presenceDirty = true;
     if (this.presenceDirty && (force || now - this.lastPresence >= PRESENCE_INTERVAL_MS)) {
       this.presenceDirty = false;
       this.lastPresence = now;
+      this.sentView = viewKey;
       ws.send(
         JSON.stringify({
           t: 'presence',
           cursor: this.cursorWorld,
           selection: JSON.parse(this.engine.selection_ids()) as string[],
           page: this.engine.current_page(),
+          viewport: view,
+          following: this.following,
         }),
       );
     }
@@ -484,6 +540,11 @@ export class EditorStore {
   }
 }
 
+/** The camera as a string, to tell whether it moved. */
+function cameraKey(e: FlexmaEditor) {
+  return Array.from(e.camera(), (n) => n.toFixed(4)).join(',');
+}
+
 /**
  * Whether a peer's new presence means someone is using that tab. The first
  * update after joining doesn't count (reconnecting background tabs send one),
@@ -518,6 +579,9 @@ export function useUi(s: EditorStore) {
 }
 export function usePeers(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getPeers);
+}
+export function useFollowing(s: EditorStore) {
+  return useSyncExternalStore(s.subscribe, s.getFollowing);
 }
 export function useComments(s: EditorStore) {
   return useSyncExternalStore(s.subscribe, s.getComments);

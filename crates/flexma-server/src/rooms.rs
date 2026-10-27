@@ -42,9 +42,23 @@ pub struct Peer {
     pub cursor: Option<[f64; 2]>,
     pub selection: Vec<String>,
     pub page: Option<String>,
+    /// The world area on the person's screen, `[x, y, w, h]`, so others can
+    /// follow their view.
+    pub viewport: Option<[f64; 4]>,
+    /// The user whose view this person follows.
+    pub following: Option<String>,
     pub is_agent: bool,
     /// Anonymous viewer via a public share link.
     pub is_guest: bool,
+}
+
+/// What a client reports about itself (see `Peer`).
+pub struct PresenceUpdate {
+    pub cursor: Option<[f64; 2]>,
+    pub selection: Vec<String>,
+    pub page: Option<String>,
+    pub viewport: Option<[f64; 4]>,
+    pub following: Option<String>,
 }
 
 pub struct JoinInfo {
@@ -300,7 +314,7 @@ enum Cmd {
     Join { info: JoinInfo, out: mpsc::Sender<Msg>, reply: oneshot::Sender<String> },
     Leave { client_id: String },
     ClientOps { client_id: String, batch: u64, ops: Vec<Op> },
-    Presence { client_id: String, cursor: Option<[f64; 2]>, selection: Vec<String>, page: Option<String> },
+    Presence { client_id: String, update: PresenceUpdate },
     Mutate { agent: AgentInfo, fonts: Option<Arc<FontDb>>, f: MutateFn, reply: oneshot::Sender<Result<Value, String>> },
     UndoAgent { agent: AgentInfo, steps: usize, reply: oneshot::Sender<Result<Value, String>> },
     Read { f: ReadFn },
@@ -353,8 +367,8 @@ impl RoomHandle {
         let _ = self.tx.send(Cmd::ClientOps { client_id, batch, ops }).await;
     }
 
-    pub async fn presence(&self, client_id: String, cursor: Option<[f64; 2]>, selection: Vec<String>, page: Option<String>) {
-        let _ = self.tx.send(Cmd::Presence { client_id, cursor, selection, page }).await;
+    pub async fn presence(&self, client_id: String, update: PresenceUpdate) {
+        let _ = self.tx.send(Cmd::Presence { client_id, update }).await;
     }
 
     /// Run a read-only closure against the live document.
@@ -697,6 +711,8 @@ impl Room {
                     cursor: None,
                     selection: vec![],
                     page: None,
+                    viewport: None,
+                    following: None,
                     is_agent: false,
                     is_guest: matches!(info.credential, Credential::Share(_)),
                 };
@@ -723,11 +739,13 @@ impl Room {
                 }
             }
             Cmd::ClientOps { client_id, batch, ops } => self.client_ops(client_id, batch, ops),
-            Cmd::Presence { client_id, cursor, selection, page } => {
+            Cmd::Presence { client_id, update } => {
                 let Some(c) = self.clients.get_mut(&client_id) else { return };
-                c.peer.cursor = cursor;
-                c.peer.selection = selection;
-                c.peer.page = page;
+                c.peer.cursor = update.cursor;
+                c.peer.selection = update.selection;
+                c.peer.page = update.page;
+                c.peer.viewport = update.viewport;
+                c.peer.following = update.following;
                 let m = msg(json!({ "t": "presence", "peer": c.peer }));
                 self.broadcast(m, Some(&client_id));
             }
@@ -963,6 +981,8 @@ impl Room {
             cursor,
             selection: sel,
             page,
+            viewport: None,
+            following: None,
             is_agent: true,
             is_guest: false,
         };
