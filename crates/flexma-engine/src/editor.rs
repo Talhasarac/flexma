@@ -273,6 +273,12 @@ impl Editor {
         }
         changed.extend(styled);
         let mut laid = layout::relayout(&mut self.doc, &changed);
+        // Text that layout rewrapped at a new width.
+        for id in &laid {
+            if self.doc.get(id).is_some_and(|n| n.kind == NodeType::Text && n.needs_measure) {
+                self.needs_measure.insert(id.clone());
+            }
+        }
         laid.extend(synced);
         laid
     }

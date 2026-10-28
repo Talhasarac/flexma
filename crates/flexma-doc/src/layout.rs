@@ -244,17 +244,18 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
             };
             let mut h = h.max(0.0);
             let w = w.max(0.0);
-            if let Some(cn) = doc.get(c) {
-                // Text whose box is still an estimate gets re-estimated at its new width.
-                if cn.kind == NodeType::Text
-                    && cn.needs_measure
-                    && cn.text_auto_resize == crate::paint::TextAutoResize::Height
-                    && cn.width != w
-                {
-                    let mut probe = cn.clone();
-                    probe.width = w;
-                    h = crate::text::estimate_layout(&probe).2;
-                }
+            // Wrapped text given a new width wraps differently: estimate its
+            // height and flag it, so the room (for agent edits) or an editor
+            // measures it exactly. Its old height would leave the box, and
+            // hugging parents, at the old line count.
+            let rewrapped = doc.get(c).is_some_and(|cn| {
+                cn.kind == NodeType::Text && cn.text_auto_resize == crate::paint::TextAutoResize::Height && (cn.width - w).abs() > 0.01
+            });
+            if rewrapped {
+                let mut probe = doc.get(c).unwrap().clone();
+                probe.width = w;
+                h = crate::text::estimate_layout(&probe).2;
+                doc.set_needs_measure(c);
             }
             if doc.set_geometry(c, x, y, w, h) {
                 out.push(c.clone());
@@ -470,6 +471,30 @@ mod tests {
         relayout(&mut doc, &["r:0".to_string()]);
         let r0 = doc.get("r:0").unwrap();
         assert_eq!(r0.width, 200.0 - 10.0 - 10.0 - 30.0);
+    }
+
+    /// Measured wrapping text that layout narrows is re-estimated and flagged
+    /// for measuring, so it and its hugging parent grow to the new line count.
+    #[test]
+    fn narrowed_text_rewraps() {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.layout_mode, f.width, f.layout_sizing_vertical) = (LayoutMode::Vertical, 400.0, SizingMode::Hug);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut t = Node::new("t:1", NodeType::Text);
+        t.parent = Some("f:1".into());
+        t.characters = "A paragraph that wraps onto more lines when its column gets narrower".into();
+        (t.font_size, t.line_height, t.width, t.height) = (14.0, Some(20.0), 400.0, 40.0);
+        (t.text_auto_resize, t.layout_sizing_horizontal) = (crate::paint::TextAutoResize::Height, SizingMode::Fill);
+        doc.apply(&Op::Create { node: t }).unwrap();
+        relayout_all(&mut doc);
+        assert!(!doc.get("t:1").unwrap().needs_measure, "same width: kept as measured");
+        doc.apply(&Op::update1("f:1", "width", serde_json::json!(150))).unwrap();
+        relayout(&mut doc, &["f:1".to_string()]);
+        let t = doc.get("t:1").unwrap();
+        assert!(t.needs_measure && t.height > 60.0, "{} {}", t.needs_measure, t.height);
+        assert_eq!(doc.get("f:1").unwrap().height, t.height);
     }
 
     fn build(spec: serde_json::Value) -> (Document, Vec<NodeId>) {

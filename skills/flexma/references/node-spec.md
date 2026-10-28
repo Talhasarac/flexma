@@ -80,7 +80,7 @@ Type defaults:
 | `gap` / `itemSpacing` | number | Space between children. |
 | `padding` | number \| [v, h] \| [t, r, b, l] \| {top,right,bottom,left} | |
 | `justify` / `primaryAxisAlign` | `start`, `center`, `end`, `space-between` | Along the layout direction. |
-| `alignItems` / `counterAxisAlign` | `start`, `center`, `end` | Across the layout direction. |
+| `alignItems` / `counterAxisAlign` | `start`, `center`, `end` | Across the layout direction. For CSS `align-items: stretch`, give the children `height: "fill"` in a row (`width: "fill"` in a column): they match the tallest (widest) sibling that hugs its content, e.g. table cells or a blockquote bar beside wrapped text. |
 | `clip` / `clipsContent` | bool, `"alpha"`, `"shape"` | Clip children to the frame (default true). `"alpha"` clips to the alpha of the frame's fills instead: see Alpha masks. `overflow: "hidden"` / `"visible"` also works. |
 | `clipAlpha` | bool | The same as `clip: "alpha"` (turns clipping on). |
 | `hideFill` | bool | Don't draw the fills. They still shape an alpha mask. |

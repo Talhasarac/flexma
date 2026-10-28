@@ -294,6 +294,13 @@ impl Document {
         }
     }
 
+    /// Flag a text box for exact measuring (derived state, like layout).
+    pub fn set_needs_measure(&mut self, id: &str) {
+        if let Some(n) = self.nodes.get_mut(id) {
+            n.needs_measure = true;
+        }
+    }
+
     // ---- low-level mutation (no validation). Used by ops.rs. ----
 
     pub(crate) fn insert_unchecked(&mut self, node: Node) {

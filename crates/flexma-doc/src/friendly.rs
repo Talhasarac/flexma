@@ -461,6 +461,22 @@ pub fn find_component(doc: &Document, key: &str) -> Option<NodeId> {
 
 /// Build an INSTANCE node from a friendly spec: `{type:"instance", component:"Button",
 /// text:"Buy", overrides:{"Label":{text:"Buy", color:"#fff"}}}`.
+/// One `overrides` entry of an instance of component `cid`: the layer (its
+/// id, key or name) as an override key, and its props as written in a node
+/// spec (friendly names, style names) in canonical form.
+pub fn normalize_override(doc: &Document, cid: &str, layer: &str, props: &Value) -> Result<(String, Map<String, Value>), String> {
+    let comp = doc.get(cid).map(|c| c.name.as_str()).unwrap_or_default();
+    let key = crate::components::resolve_override_key(doc, cid, layer).ok_or_else(|| format!("override target '{layer}' is not a layer in component '{comp}'"))?;
+    let target_kind = if key.is_empty() { NodeType::Instance } else { doc.get(&key).map(|n| n.kind).unwrap_or(NodeType::Rectangle) };
+    let mut raw = props.as_object().ok_or_else(|| format!("override for '{layer}' must be an object"))?.clone();
+    crate::styles::resolve_refs(doc, &mut raw)?;
+    let mut norm = normalize_props(target_kind, &raw)?;
+    if target_kind == NodeType::Text && norm.contains_key("characters") {
+        norm.insert("needsMeasure".into(), Value::Bool(true));
+    }
+    Ok((key, norm))
+}
+
 fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> Result<(), String> {
     let ckey = obj
         .get("component")
@@ -500,14 +516,7 @@ fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> 
     }
     if let Some(Value::Object(ov)) = obj.get("overrides") {
         for (k, v) in ov {
-            let key = crate::components::resolve_override_key(doc, &cid, k)
-                .ok_or_else(|| format!("override target '{k}' is not a layer in component '{}'", comp.name))?;
-            let target_kind = if key.is_empty() { NodeType::Instance } else { doc.get(&key).map(|n| n.kind).unwrap_or(NodeType::Rectangle) };
-            let props = v.as_object().ok_or_else(|| format!("override for '{k}' must be an object"))?;
-            let mut norm = normalize_props(target_kind, props)?;
-            if target_kind == NodeType::Text && norm.contains_key("characters") {
-                norm.insert("needsMeasure".into(), Value::Bool(true));
-            }
+            let (key, norm) = normalize_override(doc, &cid, k, v)?;
             let entry = overrides.entry(key).or_insert_with(|| Value::Object(Map::new()));
             if let Value::Object(e) = entry {
                 e.extend(norm);
@@ -893,6 +902,32 @@ mod tests {
         let early = json!([{ "type": "instance", "component": "Badge" }, { "type": "component", "name": "Badge" }]);
         let err = build_create_ops(&doc, "0:1", early.as_array().unwrap(), None, &mut || "x:1".into()).unwrap_err();
         assert!(err.contains("must come before"), "{err}");
+    }
+
+    /// Overrides take what node specs take, style names included.
+    #[test]
+    fn overrides_take_spec_props() {
+        let mut doc = Document::new_empty();
+        let mut h1 = Node::new("s:1", NodeType::Style);
+        (h1.parent, h1.name, h1.style_type, h1.font_size) = (Some(crate::ROOT_ID.into()), "Heading/H1".into(), crate::paint::StyleType::Text, 40.0);
+        doc.apply(&Op::Create { node: h1 }).unwrap();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("o:{n}")
+        };
+        let spec = json!([
+            { "type": "component", "name": "Card", "layout": "vertical", "width": 300, "children": [{ "type": "text", "name": "Title", "text": "Hi" }] },
+            { "type": "instance", "component": "Card", "overrides": { "Title": { "textStyle": "Heading/H1", "width": "fill", "text": "Hello" } } }
+        ]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        let inst = doc.get(&top[1]).unwrap();
+        let title = inst.overrides.values().next().and_then(Value::as_object).unwrap();
+        assert_eq!(title.get("textStyleId"), Some(&json!("s:1")));
+        assert_eq!(title.get("layoutSizingHorizontal"), Some(&json!("FILL")));
+        assert_eq!(title.get("characters"), Some(&json!("Hello")));
     }
 
     #[test]

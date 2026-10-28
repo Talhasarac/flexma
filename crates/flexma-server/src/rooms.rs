@@ -262,7 +262,9 @@ impl<'a> Tx<'a> {
         let styled = flexma_doc::styles::sync_styles(self.doc, &changed);
         changed.extend(styled);
         self.removed.clear();
-        layout::relayout(self.doc, &changed);
+        // Laid-out nodes too: text that layout rewrapped needs measuring.
+        let laid = layout::relayout(self.doc, &changed);
+        changed.extend(laid);
         self.changed = changed;
     }
 

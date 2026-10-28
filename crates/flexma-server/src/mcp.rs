@@ -1234,6 +1234,23 @@ impl Ctx {
                         }
                     }
                 }
+                // Overrides as in create_nodes, merged per layer (null clears a layer's).
+                if let (Some(Value::Object(ov)), Some(cid)) = (raw.get("overrides").cloned(), node.component_id.clone().filter(|_| node.kind == NodeType::Instance)) {
+                    let mut merged = node.overrides.clone();
+                    for (layer, v) in ov {
+                        if v.is_null() {
+                            if let Some(key) = flexma_doc::components::resolve_override_key(tx.doc, &cid, &layer) {
+                                merged.remove(&key);
+                            }
+                            continue;
+                        }
+                        let (key, norm) = flexma_doc::friendly::normalize_override(tx.doc, &cid, &layer, &v).map_err(|e| format!("{id}: {e}"))?;
+                        if let Value::Object(e) = merged.entry(key).or_insert_with(|| json!({})) {
+                            e.extend(norm);
+                        }
+                    }
+                    raw.insert("overrides".into(), Value::Object(merged));
+                }
                 flexma_doc::styles::resolve_refs(tx.doc, &mut raw).map_err(|e| format!("{id}: {e}"))?;
                 if raw.contains_key("parent") || raw.contains_key("index") {
                     return Err("use move_nodes to change a node's parent or order".into());
@@ -1831,8 +1848,8 @@ impl Ctx {
         let url = format!("{}/api/node-uploads/{token}", self.base);
         Ok(text_result(format!(
             "Upload link ready. It takes {files} JSON batch{} over the next 15 minutes. Write the node specs to a file (a JSON array, exactly like create_nodes' nodes, or {{\"nodes\": [...]}}), then run once per batch:\n\n\
-             curl -sS -H 'Content-Type: application/json' --data-binary @nodes.json {url}\n\n\
-             Each upload creates its nodes in one step (undo_agent_changes reverts a batch) and prints the top-level ids. \
+             curl -sS --fail-with-body -H 'Content-Type: application/json' --data-binary @nodes.json {url}\n\n\
+             Each upload creates its nodes in one step (undo_agent_changes reverts a batch) and prints the top-level ids. An expired or used-up link fails with an error (curl exits non-zero), so check the exit status. \
              Icons, images and styles work as in create_nodes. Up to {MAX_UPLOAD_NODES} nodes per batch; split bigger trees by screen. Don't share this link.",
             if files == 1 { "" } else { "es" }
         )))
