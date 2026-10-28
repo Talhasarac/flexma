@@ -177,10 +177,10 @@ There is no limit on the number of tokens or concurrent MCP connections.
 
 ## Multiplayer socket (`/api/files/:id/ws`)
 
-JSON text frames.
+JSON text frames, plus the document as one binary frame when asked for.
 
 Server → client:
-- `{ t: "init", clientId, version, role, doc: DocSnapshot, peers: [peer] }`
+- `{ t: "init", clientId, version, role, doc: DocSnapshot, peers: [peer] }`. With `?doc=zlib` on the socket URL, `init` has `docFrame: "zlib"` instead of `doc`, and the next frame is binary: the `DocSnapshot` JSON compressed with zlib (about a tenth of its size). The editor asks for it.
 - `{ t: "ops", from: clientId, batch: n, ops: [op] }` — `from` equal to your clientId means it is the ack of your batch `n`
 - `{ t: "reject", batch: n, error }` (followed by corrective `ops` from `"server"`)
 - `{ t: "presence", peer }`, `{ t: "leave", clientId }`

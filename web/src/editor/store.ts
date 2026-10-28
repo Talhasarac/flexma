@@ -61,6 +61,10 @@ export class EditorStore {
    * user moved on their own, which stops following. */
   private followed: { page: string; camera: string; rect: string; size: string } | null = null;
   private loadedOnce = false;
+  /** An `init` whose document follows as a compressed binary frame. */
+  private pendingInit: ServerMessage | null = null;
+  /** Messages that arrive before that frame (normally none). */
+  private held: string[] = [];
   onFatal: ((message: string) => void) | null = null;
   onReject: ((message: string) => void) | null = null;
   onReload: (() => void) | null = null;
@@ -261,12 +265,22 @@ export class EditorStore {
     if (!this.flushTimer) this.flushTimer = window.setInterval(() => this.flush(), 50);
     this.status = 'connecting';
     this.notify();
-    const ws = new WebSocket(url);
+    // The document comes as its own zlib frame, about a tenth of its JSON,
+    // and the engine unpacks it without the page parsing it first.
+    const ws = new WebSocket(url + (url.includes('?') ? '&' : '?') + 'doc=zlib');
+    ws.binaryType = 'arraybuffer';
     this.socket = ws;
-    ws.onmessage = (ev) => this.handleMessage(typeof ev.data === 'string' ? ev.data : '');
+    this.pendingInit = null;
+    this.held = [];
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) this.handleDoc(new Uint8Array(ev.data));
+      else if (typeof ev.data === 'string') this.handleMessage(ev.data);
+    };
     ws.onclose = () => {
       if (this.socket !== ws) return;
       this.socket = null;
+      this.pendingInit = null;
+      this.held = [];
       this.status = 'offline';
       this.activeAt.clear();
       this.setPeers([]);
@@ -288,7 +302,46 @@ export class EditorStore {
     this.socket = null;
   }
 
+  /** Start the session an `init` describes; `load` loads its document. */
+  private start(msg: ServerMessage, load: (canEdit: boolean) => void) {
+    this.retry = 0;
+    this.clientId = String(msg.clientId);
+    this.role = String(msg.role);
+    load(this.role !== 'viewer');
+    void this.loadPaint();
+    this.activeAt.clear();
+    this.setPeers(((msg.peers as Peer[]) ?? []).filter((p) => p.clientId !== this.clientId));
+    this.status = 'online';
+    this.presenceDirty = true;
+    void this.refreshComments();
+    void this.fonts.refresh();
+    if (!this.loadedOnce) {
+      this.loadedOnce = true;
+      this.engine.zoom_to_fit_initial();
+      this.onLoaded?.();
+    }
+    this.v.structure = -1;
+    this.v.selection = -1;
+    this.v.ui = -1;
+    this.poll();
+  }
+
+  /** The document frame after an `init` with `docFrame: "zlib"`. */
+  private handleDoc(data: Uint8Array) {
+    const init = this.pendingInit;
+    if (!init) return;
+    this.pendingInit = null;
+    this.start(init, (canEdit) => this.engine.load_zlib(data, String(init.clientId), canEdit));
+    const held = this.held;
+    this.held = [];
+    for (const raw of held) this.handleMessage(raw);
+  }
+
   private handleMessage(raw: string) {
+    if (this.pendingInit) {
+      this.held.push(raw);
+      return;
+    }
     let msg: ServerMessage;
     try {
       msg = JSON.parse(raw) as ServerMessage;
@@ -297,26 +350,11 @@ export class EditorStore {
     }
     switch (msg.t) {
       case 'init': {
-        this.retry = 0;
-        this.clientId = String(msg.clientId);
-        this.role = String(msg.role);
-        this.engine.load(JSON.stringify(msg.doc), this.clientId, this.role !== 'viewer');
-        void this.loadPaint();
-        this.activeAt.clear();
-        this.setPeers(((msg.peers as Peer[]) ?? []).filter((p) => p.clientId !== this.clientId));
-        this.status = 'online';
-        this.presenceDirty = true;
-        void this.refreshComments();
-        void this.fonts.refresh();
-        if (!this.loadedOnce) {
-          this.loadedOnce = true;
-          this.engine.zoom_to_fit_initial();
-          this.onLoaded?.();
+        if (msg.docFrame === 'zlib') {
+          this.pendingInit = msg;
+          return;
         }
-        this.v.structure = -1;
-        this.v.selection = -1;
-        this.v.ui = -1;
-        this.poll();
+        this.start(msg, (canEdit) => this.engine.load(JSON.stringify(msg.doc), String(msg.clientId), canEdit));
         break;
       }
       case 'ops': {

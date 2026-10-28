@@ -80,6 +80,14 @@ impl FlexmaEditor {
         self.ed.load(doc_json, client_id, can_edit).map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Load the document from the zlib frame the server sends after `init`
+    /// (`?doc=zlib`), without the page parsing a big JSON string first.
+    pub fn load_zlib(&mut self, data: &[u8], client_id: &str, can_edit: bool) -> Result<(), JsValue> {
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|e| JsValue::from_str(&format!("couldn't unpack the document: {e:?}")))?;
+        let json = String::from_utf8(raw).map_err(|_| JsValue::from_str("the document isn't UTF-8"))?;
+        self.load(&json, client_id, can_edit)
+    }
+
     pub fn set_asset_base(&mut self, base: &str) {
         if let Some(r) = self.ed.renderer.as_mut() {
             r.asset_base = base.to_string();

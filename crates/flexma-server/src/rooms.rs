@@ -19,7 +19,30 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
-pub type Msg = Arc<str>;
+/// What a socket's writer sends: a JSON text frame, or a file's document as
+/// one zlib-compressed binary frame (compressed by the writer, not the room).
+#[derive(Clone, Debug)]
+pub enum Msg {
+    Text(Arc<str>),
+    Doc(Arc<str>),
+}
+
+impl std::ops::Deref for Msg {
+    type Target = str;
+
+    /// The frame's JSON (for `Doc`, the document before compression).
+    fn deref(&self) -> &str {
+        match self {
+            Msg::Text(t) | Msg::Doc(t) => t,
+        }
+    }
+}
+
+impl std::fmt::Display for Msg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
 
 /// Bounded per-client outbound queue. A client that falls this far behind is
 /// disconnected and will resync from a fresh snapshot on reconnect.
@@ -67,6 +90,9 @@ pub struct JoinInfo {
     pub color: String,
     pub role: Role,
     pub credential: Credential,
+    /// The client takes the document as its own zlib frame after `init`
+    /// (`?doc=zlib`); older clients get it inside `init`.
+    pub doc_frame: bool,
 }
 
 /// What a socket signed in with. The room re-checks it when access changes,
@@ -404,7 +430,7 @@ impl RoomHandle {
     }
 
     pub async fn broadcast(&self, msg: Value) {
-        let _ = self.tx.send(Cmd::Broadcast { msg: Arc::from(msg.to_string()) }).await;
+        let _ = self.tx.send(Cmd::Broadcast { msg: Msg::Text(Arc::from(msg.to_string())) }).await;
     }
 
     /// Persist the document now.
@@ -632,7 +658,7 @@ struct Room {
 }
 
 fn msg(v: Value) -> Msg {
-    Arc::from(v.to_string())
+    Msg::Text(Arc::from(v.to_string()))
 }
 
 impl Room {
@@ -718,15 +744,23 @@ impl Room {
                     is_agent: false,
                     is_guest: matches!(info.credential, Credential::Share(_)),
                 };
-                let init = json!({
+                let mut init = json!({
                     "t": "init",
                     "clientId": client_id,
                     "version": self.version,
                     "role": info.role.as_str(),
-                    "doc": self.doc.snapshot(),
                     "peers": self.peers(),
                 });
-                if out.try_send(msg(init)).is_err() {
+                // The document is most of what a client downloads on open: as
+                // its own frame it goes compressed (about a tenth of the size).
+                let doc = if info.doc_frame {
+                    init["docFrame"] = json!("zlib");
+                    Some(Msg::Doc(Arc::from(self.doc.to_json())))
+                } else {
+                    init["doc"] = json!(self.doc.snapshot());
+                    None
+                };
+                if out.try_send(msg(init)).is_err() || doc.is_some_and(|d| out.try_send(d).is_err()) {
                     return;
                 }
                 self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
@@ -1192,10 +1226,35 @@ mod access_tests {
     /// Join the room for "f" as "u"; returns the socket's outbound queue.
     async fn join(rooms: &Rooms, role: Role) -> mpsc::Receiver<Msg> {
         let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
-        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role, credential: Credential::Session(sha256_hex("s")) };
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role, credential: Credential::Session(sha256_hex("s")), doc_frame: false };
         rooms.get("f").await.unwrap().join(info, out).await.unwrap();
         assert!(rx.recv().await.unwrap().contains(r#""t":"init""#));
         rx
+    }
+
+    /// With `?doc=zlib`, `init` leaves the document out and it follows as
+    /// its own frame, which the socket writer compresses.
+    #[tokio::test]
+    async fn the_document_can_follow_init_as_its_own_frame() {
+        let (db, dir) = setup("docframe").await;
+        let rooms = Rooms::new(db.clone());
+        let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: true };
+        rooms.get("f").await.unwrap().join(info, out).await.unwrap();
+        let init: Value = serde_json::from_str(&next(&mut rx).await.unwrap()).unwrap();
+        assert_eq!(init["t"], "init");
+        assert_eq!(init["docFrame"], "zlib");
+        assert!(init.get("doc").is_none());
+        let Some(Msg::Doc(json)) = next(&mut rx).await else { panic!("the document frame") };
+        let doc = Document::from_json(&json).unwrap();
+        assert!(!doc.pages().is_empty());
+        // What the writer sends unpacks to the same JSON.
+        let packed = crate::ws::zlib(json.as_bytes());
+        assert!(packed.len() < json.len());
+        let mut back = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::ZlibDecoder::new(&packed[..]), &mut back).unwrap();
+        assert_eq!(back, &*json);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The next message on the socket, or None once the room closed it.

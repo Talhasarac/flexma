@@ -6,7 +6,7 @@ use crate::error::{AppError, AppResult};
 use crate::rooms::{Credential, JoinInfo, Msg};
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use flexma_doc::Op;
@@ -37,9 +37,31 @@ enum ClientMsg {
     Ping,
 }
 
+#[derive(Deserialize)]
+pub struct SocketQuery {
+    /// `zlib`: send the document as its own compressed frame after `init`.
+    #[serde(default)]
+    doc: Option<String>,
+}
+
+impl SocketQuery {
+    fn doc_frame(&self) -> bool {
+        self.doc.as_deref() == Some("zlib")
+    }
+}
+
+/// zlib-compress a document for its binary frame (JSON shrinks about 10×).
+pub(crate) fn zlib(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::with_capacity(data.len() / 8), flate2::Compression::new(6));
+    let _ = z.write_all(data);
+    z.finish().unwrap_or_default()
+}
+
 pub async fn handler(
     State(st): State<AppState>,
     Path(file_id): Path<String>,
+    Query(q): Query<SocketQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
@@ -61,7 +83,7 @@ pub async fn handler(
     let (_, _, role) = st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer)).await?;
     let room = st.rooms.get(&file_id).await?;
     Ok(ws.max_message_size(64 * 1024 * 1024).on_upgrade(move |socket| async move {
-        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, credential };
+        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, credential, doc_frame: q.doc_frame() };
         run(socket, room, info).await;
     }))
 }
@@ -70,6 +92,7 @@ pub async fn handler(
 pub async fn share_handler(
     State(st): State<AppState>,
     Path(token): Path<String>,
+    Query(q): Query<SocketQuery>,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
     let t = token.clone();
@@ -82,6 +105,7 @@ pub async fn share_handler(
             color: "#8a8a8f".into(),
             role: Role::Viewer,
             credential: Credential::Share(token),
+            doc_frame: q.doc_frame(),
         };
         run(socket, room, info).await;
     }))
@@ -107,8 +131,15 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
         loop {
             tokio::select! {
                 m = out_rx.recv() => match m {
-                    Some(m) => {
-                        if sink.send(Message::Text(m.to_string().into())).await.is_err() {
+                    Some(Msg::Text(t)) => {
+                        if sink.send(Message::Text(t.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Msg::Doc(json)) => {
+                        // Tens of milliseconds for a big file: not on the async workers.
+                        let Ok(bytes) = tokio::task::spawn_blocking(move || zlib(json.as_bytes())).await else { break };
+                        if sink.send(Message::Binary(bytes.into())).await.is_err() {
                             break;
                         }
                     }
@@ -173,3 +204,4 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
     room.leave(client_id);
     writer.abort();
 }
+
