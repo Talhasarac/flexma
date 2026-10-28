@@ -586,6 +586,22 @@ fn image_resolver(images: Images<'_>) -> resvg::usvg::ImageHrefStringResolverFn<
 /// thumbnails, version previews and agent screenshots alike).
 pub static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
+/// Runs `f` on the blocking pool as the one render allowed at a time, and
+/// gives memory back afterwards. A render can't be stopped, so its turn lasts
+/// until it ends, even when the request that asked for it has gone (a
+/// timed-out screenshot); otherwise slow renders would pile up on the CPU.
+pub async fn run_render<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    let turn = RENDERS.acquire().await.map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        let out = f();
+        release_memory();
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Give memory freed by a render back to the system (glibc keeps it
 /// otherwise, and a long-running server creeps up to its memory limit).
 pub fn release_memory() {
@@ -1730,6 +1746,24 @@ mod asset_scope_tests {
         let p = pm.pixel(w / 2, h / 2).unwrap();
         assert_eq!((p.red(), p.green(), p.blue()), (0, 0, 255), "the tinted image is drawn");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A render whose request timed out keeps the one render turn until it
+    /// ends, so the next render waits instead of running beside it.
+    #[tokio::test]
+    async fn abandoned_renders_keep_their_turn() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(run_render(move || {
+            started_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }));
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap()).await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(RENDERS.try_acquire().is_err(), "the abandoned render still holds the turn");
+        let t = std::time::Instant::now();
+        run_render(|| ()).await.unwrap();
+        assert!(t.elapsed() >= std::time::Duration::from_millis(200), "waited for it: {:?}", t.elapsed());
     }
 
     /// CSS's `box-shadow: 0 0 0 9999px` overlay (here the 159984 px one a

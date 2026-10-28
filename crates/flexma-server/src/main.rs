@@ -248,14 +248,48 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await.expect("cannot bind address");
     tracing::info!("Flexma listening on http://{}", cfg.addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
-        .await
-        .expect("server error");
+    let stopping = Arc::new(tokio::sync::Notify::new());
+    let stop = stopping.clone();
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        stop_signal().await;
+        tracing::info!("shutting down");
+        stop.notify_one();
+    });
+    tokio::select! {
+        r = serve => r.expect("server error"),
+        // Open WebSockets (editors, the tunnel) would keep the graceful drain
+        // waiting until systemd kills the process, before files are saved.
+        _ = async {
+            stopping.notified().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        } => tracing::info!("closing open connections"),
+    }
     rooms.shutdown_all().await;
+    tracing::info!("files saved");
+    // Don't wait for a render still running on the blocking pool.
+    std::process::exit(0);
+}
+
+/// Ctrl-C, or SIGTERM (what `systemctl stop` and `docker stop` send).
+async fn stop_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
 }
 
 /// Long-lived caching for Vite's content-hashed bundles; never cache the HTML shell.

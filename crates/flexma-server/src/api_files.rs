@@ -323,15 +323,12 @@ pub async fn render_thumbnail(st: &AppState, file_id: &str, workspace_id: &str, 
     let allowed = st.db.call(move |c| workspace_asset_ids(c, &ws)).await?;
     let data_dir = st.cfg.data_dir.clone();
     let fid = file_id.to_string();
-    let _permit = render::RENDERS.acquire().await.map_err(AppError::internal)?;
-    tokio::task::spawn_blocking(move || {
+    render::run_render(move || {
         let paint = render::PaintSource { data_dir: &data_dir, file_id: &fid, share_token: None };
-        let png = render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, &allowed, fonts, &paint));
-        render::release_memory();
-        png
+        render::load_document(&doc_json).and_then(|d| render::thumbnail_png(&d, &data_dir, &allowed, fonts, &paint))
     })
-        .await
-        .map_err(AppError::internal)
+    .await
+    .map_err(AppError::internal)
 }
 
 pub fn thumbnail_image(png: Option<Vec<u8>>) -> Response {
@@ -457,13 +454,7 @@ pub async fn export_png_response(st: &AppState, id: &str, q: ExportQuery, max_di
         })
         .await?
         .map_err(AppError::bad_request)?;
-    let _permit = render::RENDERS.acquire().await.map_err(AppError::internal)?;
-    let (png, _, _) = tokio::task::spawn_blocking(move || {
-        let png = render::svg_to_png(&svg, scale, max_dim, fonts, linear, Some((&images.0, &images.1)));
-        drop(svg);
-        render::release_memory();
-        png
-    })
+    let (png, _, _) = render::run_render(move || render::svg_to_png(&svg, scale, max_dim, fonts, linear, Some((&images.0, &images.1))))
         .await
         .map_err(AppError::internal)?
         .map_err(AppError::bad_request)?;
@@ -515,8 +506,7 @@ async fn store_upload(st: &AppState, ws: &str, file_id: &str, user_id: &str, mim
         return Err(AppError::bad_request("SVGs that declare XML entities (<!ENTITY>) aren't supported; export the SVG again without them"));
     }
     let fonts = crate::fonts::fontdb_for(st, ws).await;
-    let _permit = render::RENDERS.acquire().await.map_err(AppError::internal)?;
-    let (png, w, h) = tokio::task::spawn_blocking(move || render::rasterize_svg(&svg, fonts))
+    let (png, w, h) = render::run_render(move || render::rasterize_svg(&svg, fonts))
         .await
         .map_err(AppError::internal)?
         .map_err(|e| AppError::bad_request(format!("couldn't draw the SVG: {e}")))?;

@@ -1594,14 +1594,7 @@ impl Ctx {
             })
             .await
             .map_err(err_msg)??;
-        let _permit = render::RENDERS.acquire().await.map_err(|e| e.to_string())?;
-        let (png, w, h) = tokio::task::spawn_blocking(move || {
-            let png = render::svg_to_png_on(&svg, scale, 1600, fonts, linear, checker, Some((&images.0, &images.1)));
-            render::release_memory();
-            png
-        })
-            .await
-            .map_err(|e| e.to_string())??;
+        let (png, w, h) = render::run_render(move || render::svg_to_png_on(&svg, scale, 1600, fonts, linear, checker, Some((&images.0, &images.1)))).await??;
         use base64::Engine;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         Ok(json!({
@@ -1657,14 +1650,7 @@ impl Ctx {
             .await
             .map_err(err_msg)??;
         let labelled: Vec<(String, String, bool, bool)> = tiles.iter().map(|(id, name, svg, linear, checker)| (format!("{name} [{id}]"), svg.clone(), *linear, *checker)).collect();
-        let _permit = render::RENDERS.acquire().await.map_err(|e| e.to_string())?;
-        let (png, w, h, rects) = tokio::task::spawn_blocking(move || {
-            let png = render::contact_sheet(&labelled, scale, 2400, fonts, Some((&images.0, &images.1)));
-            render::release_memory();
-            png
-        })
-            .await
-            .map_err(|e| e.to_string())??;
+        let (png, w, h, rects) = render::run_render(move || render::contact_sheet(&labelled, scale, 2400, fonts, Some((&images.0, &images.1)))).await??;
         use base64::Engine;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         let mut text = format!("Contact sheet {w}×{h} px, {} node(s), each under its name:\n", tiles.len());

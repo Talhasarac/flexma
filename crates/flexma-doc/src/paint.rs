@@ -489,23 +489,34 @@ impl<'de> Deserialize<'de> for Constraints {
     }
 }
 
+/// Effect offsets, blurs, spreads and radii stay within this many px. Real
+/// designs stay far below it; bigger values (CSS's `0 0 0 9999em` overlay
+/// trick) only cost renders time and memory.
+pub const MAX_EFFECT_PX: f32 = 16384.0;
+
+fn effect_px<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    let v = f32::deserialize(d)?;
+    Ok(if v.is_finite() { v.clamp(-MAX_EFFECT_PX, MAX_EFFECT_PX) } else { 0.0 })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Effect {
     DropShadow {
         color: Color,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "effect_px")]
         x: f32,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "effect_px")]
         y: f32,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "effect_px")]
         blur: f32,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "effect_px")]
         spread: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]
         visible: bool,
     },
     LayerBlur {
+        #[serde(deserialize_with = "effect_px")]
         radius: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]
         visible: bool,
@@ -513,6 +524,7 @@ pub enum Effect {
     /// Blurs what's behind the layer, inside its shape (CSS backdrop-filter:
     /// blur, frosted glass). Its fill, usually semi-transparent, goes on top.
     BackgroundBlur {
+        #[serde(deserialize_with = "effect_px")]
         radius: f32,
         #[serde(default = "yes", skip_serializing_if = "is_true")]
         visible: bool,
@@ -756,6 +768,23 @@ impl<'de> Deserialize<'de> for Padding {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Absurd effect sizes (a website import's 159984 px spread) are capped
+    /// when parsed; ordinary values keep their exact value.
+    #[test]
+    fn effect_sizes_are_capped() {
+        let fx: Vec<Effect> = serde_json::from_value(serde_json::json!([
+            { "type": "DROP_SHADOW", "color": "#00000080", "x": 1.1, "y": -2.5, "blur": 1.8, "spread": 159984 },
+            { "type": "DROP_SHADOW", "color": "#000000", "x": -1e9, "spread": -40000 },
+            { "type": "LAYER_BLUR", "radius": 1e7 },
+            { "type": "BACKGROUND_BLUR", "radius": 16 }
+        ]))
+        .unwrap();
+        assert_eq!(fx[0], Effect::DropShadow { color: Color::parse("#00000080").unwrap(), x: 1.1, y: -2.5, blur: 1.8, spread: MAX_EFFECT_PX, visible: true });
+        assert!(matches!(fx[1], Effect::DropShadow { x, spread, .. } if x == -MAX_EFFECT_PX && spread == -MAX_EFFECT_PX));
+        assert!(matches!(fx[2], Effect::LayerBlur { radius, .. } if radius == MAX_EFFECT_PX));
+        assert!(matches!(fx[3], Effect::BackgroundBlur { radius, .. } if radius == 16.0));
+    }
 
     #[test]
     fn image_paint_with_tint_and_slice() {
