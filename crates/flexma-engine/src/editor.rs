@@ -344,6 +344,8 @@ impl Editor {
         for op in ops {
             let inv = self.doc.inverse_of(&op);
             match self.doc.apply(&op) {
+                // It set values the node already had: nothing to sync or undo.
+                Ok(e) if e.changed.is_empty() && e.removed.is_empty() && !e.structure => {}
                 Ok(e) => {
                     self.history.record(inv);
                     self.sync.push(op);
@@ -368,9 +370,13 @@ impl Editor {
         let ops = components::route_ops(&self.doc, flexma_doc::styles::route_ops(&self.doc, ops));
         let mut eff = OpEffect::default();
         for op in ops {
-            if let Ok(e) = self.doc.apply(&op) {
-                self.sync.push(op);
-                eff.merge(e);
+            match self.doc.apply(&op) {
+                Ok(e) if e.changed.is_empty() && e.removed.is_empty() && !e.structure => {}
+                Ok(e) => {
+                    self.sync.push(op);
+                    eff.merge(e);
+                }
+                Err(_) => {}
             }
         }
         let laid = self.derive(&mut eff);

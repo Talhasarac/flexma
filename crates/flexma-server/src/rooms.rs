@@ -853,13 +853,16 @@ impl Room {
                 Err(e) => rejected.push((op, e)),
             }
         }
+        // Ops that set values the nodes already have change nothing; a
+        // client re-sending them (an old editor's measuring loop) costs no save.
+        let any = !changed.is_empty() || !removed.is_empty();
         let synced = components::sync_instances(&mut self.doc, &changed, &removed);
         changed.extend(synced);
         let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
         changed.extend(styled);
         layout::relayout(&mut self.doc, &changed);
         self.doc.clear_fresh();
-        if !accepted.is_empty() {
+        if any {
             self.version += 1;
             self.dirty = true;
         }

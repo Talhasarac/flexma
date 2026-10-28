@@ -134,6 +134,11 @@ impl Document {
                 if structure && !crate::fractional::is_valid_key(&next.index) {
                     next.index = self.index_at_end(next.parent.as_deref().unwrap_or(ROOT_ID));
                 }
+                // Setting values a node already has changes nothing: no re-sync,
+                // relayout or save (a measurement that agrees, sent again).
+                if next == *current {
+                    return Ok(OpEffect::default());
+                }
                 let mut changed = vec![id.clone()];
                 if structure {
                     changed.extend(current.parent.clone());
