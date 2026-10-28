@@ -437,21 +437,35 @@ fn shaped_width(data: &[u8], index: u32, s: &str) -> Option<f32> {
 /// An inlined image with its crop cut out (whole pixels) and/or its tint
 /// multiplied in. Server renders use these instead of viewports and filters:
 /// smoothing never reaches past a sprite, and resvg can't drop a tint on a
-/// large or sliced layer. Returns a `flexma-variant:` href; the PNG stays in
-/// a cache bounded by size (see `image_resolver`).
+/// large or sliced layer. Returns a `flexma-variant:` href that names all it
+/// takes to make the PNG, which the resolver does when it rasterizes (see
+/// `variant_png`).
 fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: Option<Color>, linear: bool) -> Option<String> {
-    let AssetMode::Inline(dir, allowed) = assets else { return None };
+    let AssetMode::Inline(..) = assets else { return None };
     // Checked before the cache, which every workspace shares.
     let (fw, fh) = assets.image_size(id)?;
     let (x, y, w, h) = match crop {
         Some(c) => (c.x.round(), c.y.round(), c.width.round().max(1.0), c.height.round().max(1.0)),
         None => (0.0, 0.0, fw, fh),
     };
-    let key = format!("{id}/{x}/{y}/{w}/{h}/{}/{linear}", tint.map(|t| t.to_hex()).unwrap_or_default());
-    let href = format!("flexma-variant:{id}:{:016x}", fnv(&key));
-    if variants().lock().ok()?.get(&href).is_some() {
-        return Some(href);
+    let tint = tint.map(|t| t.to_hex().trim_start_matches('#').to_string()).unwrap_or_default();
+    Some(format!("flexma-variant:{id}:{x}:{y}:{w}:{h}:{fw}:{fh}:{tint}:{}", u8::from(linear)))
+}
+
+/// The PNG a `flexma-variant:` href names, from the cache or made now. It
+/// is made from the href alone, so a variant the size-bounded cache dropped
+/// between writing an SVG and rasterizing it (other renders filled it) is
+/// made again instead of going missing.
+fn variant_png(dir: &Path, allowed: &HashSet<String>, href: &str) -> Option<Arc<Vec<u8>>> {
+    if let Some(png) = variants().lock().ok()?.get(href) {
+        return Some(png);
     }
+    let parts: Vec<&str> = href.strip_prefix("flexma-variant:")?.split(':').collect();
+    let [id, x, y, w, h, fw, fh, tint, linear] = parts[..] else { return None };
+    let num = |v: &str| v.parse::<f64>().ok().filter(|n| n.is_finite());
+    let (x, y, w, h, fw, fh) = (num(x)?, num(y)?, num(w)?, num(h)?, num(fw)?, num(fh)?);
+    let tint = if tint.is_empty() { None } else { Some(Color::parse(&format!("#{tint}"))?) };
+    let linear = linear == "1";
     // Render the region 1:1 with nearest sampling: an exact pixel copy.
     let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}"><image href="flexma-asset:{id}" width="{fw}" height="{fh}" image-rendering="optimizeSpeed"/></svg>"#
@@ -486,9 +500,9 @@ fn image_variant(assets: &AssetMode, id: &str, crop: Option<&ImageCrop>, tint: O
     }
     let png = Arc::new(pm.encode_png().ok()?);
     if let Ok(mut cache) = variants().lock() {
-        cache.insert(href.clone(), png);
+        cache.insert(href.to_string(), png.clone());
     }
-    Some(href)
+    Some(png)
 }
 
 /// Rendered image variants (PNG), by href. Bounded by total size: when full
@@ -522,15 +536,11 @@ fn variants() -> &'static std::sync::Mutex<Variants> {
     V.get_or_init(|| std::sync::Mutex::new(Variants { by_href: HashMap::new(), bytes: 0 }))
 }
 
-fn fnv(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
-}
-
 /// The uploaded images a render may load: the data dir and the ids allowed.
 pub type Images<'a> = Option<(&'a Path, &'a HashSet<String>)>;
 
 /// Resolves the image hrefs server renders write: `flexma-asset:<id>` reads
-/// the uploaded file, `flexma-variant:<id>:<key>` a cached variant of it,
+/// the uploaded file, `flexma-variant:<id>:<params>` a variant of it (see `variant_png`),
 /// both only for allowed ids. Nothing else loads (no paths from disk, no
 /// other schemes).
 fn image_resolver(images: Images<'_>) -> resvg::usvg::ImageHrefStringResolverFn<'_> {
@@ -557,7 +567,7 @@ fn image_resolver(images: Images<'_>) -> resvg::usvg::ImageHrefStringResolverFn<
             if !allows(id) {
                 return None;
             }
-            variants().lock().ok()?.get(href)?
+            variant_png(dir, allowed, href)?
         } else {
             return None;
         };
@@ -1682,6 +1692,43 @@ mod asset_scope_tests {
         };
         assert_eq!(red(&both), [true, true]);
         assert_eq!(red(&allowed), [true, false]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A variant the shared cache dropped between writing an SVG and
+    /// rasterizing it (other renders filled the cache meanwhile) is made
+    /// again. Big contact sheets used to lose their first screens' tinted
+    /// and linear-blended images this way.
+    #[test]
+    fn variants_survive_a_cache_reset() {
+        let dir = std::env::temp_dir().join(format!("flexma-variant-reset-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        let mut pm = resvg::tiny_skia::Pixmap::new(4, 4).unwrap();
+        pm.fill(resvg::tiny_skia::Color::WHITE);
+        std::fs::write(dir.join("assets").join("white123"), pm.encode_png().unwrap()).unwrap();
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height) = (10.0, 10.0);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut r = Node::new("r:1", NodeType::Rectangle);
+        r.parent = Some("f:1".into());
+        (r.width, r.height) = (10.0, 10.0);
+        let tint = Some(Color::rgba(0.0, 0.0, 1.0, 1.0));
+        r.fills = vec![Paint::Image { asset: "white123".into(), fit: ImageFit::Stretch, tint, slice: None, filled: None, crop: None, tile_scale: 1.0, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: r }).unwrap();
+        let allowed: HashSet<String> = ["white123".to_string()].into_iter().collect();
+        let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
+        let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &allowed), None, &paint).unwrap();
+        assert!(svg.contains("flexma-variant:white123:"));
+        if let Ok(mut cache) = variants().lock() {
+            cache.by_href.clear();
+            cache.bytes = 0;
+        }
+        let (png, w, h) = svg_to_png(&svg, 1.0, 100, base_fontdb(), false, Some((&dir, &allowed))).unwrap();
+        let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let p = pm.pixel(w / 2, h / 2).unwrap();
+        assert_eq!((p.red(), p.green(), p.blue()), (0, 0, 255), "the tinted image is drawn");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
