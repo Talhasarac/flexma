@@ -162,8 +162,8 @@ fn visual_bounds(doc: &Document, n: &Node) -> Rect {
     let mut grow = 0.0f64;
     for e in &n.effects {
         match e {
-            Effect::DropShadow { x, y, blur, spread, visible, .. } if *visible => {
-                grow = grow.max((*blur as f64) + (*spread as f64).max(0.0) + (*x as f64).abs().max((*y as f64).abs()));
+            Effect::DropShadow { x, y, blur, spread, .. } if shadow_shows(e) => {
+                grow = grow.max((*blur as f64) + (*spread as f64).clamp(0.0, MAX_SPREAD) + (*x as f64).abs().max((*y as f64).abs()));
             }
             Effect::LayerBlur { radius, visible } if *visible => grow = grow.max(*radius as f64),
             _ => {}
@@ -188,6 +188,36 @@ fn visual_bounds(doc: &Document, n: &Node) -> Rect {
 /// Shapes whose stroke follows `strokeAlign`, as in the editor (its rounded-rectangle and ellipse shapes).
 fn aligned_stroke(n: &Node) -> bool {
     matches!(n.kind, NodeType::Rectangle | NodeType::Frame | NodeType::Component | NodeType::Instance | NodeType::Ellipse)
+}
+
+/// A drop shadow that draws something. The editor skips transparent ones
+/// too (CSS imports bring many, e.g. Tailwind's `0 0 #0000`).
+fn shadow_shows(e: &Effect) -> bool {
+    matches!(e, Effect::DropShadow { visible: true, color, .. } if color.a > 0.0)
+}
+
+/// Spread past this only reaches what parent frames clip away (CSS's
+/// `0 0 0 9999px` overlay trick); shadows draw and export this far at most.
+const MAX_SPREAD: f64 = 4096.0;
+
+/// Spread drawn with `feMorphology` (layers that aren't boxes, like text).
+/// resvg's morphology costs the region's area times the radius squared, so
+/// a big radius would run for hours.
+const MAX_MORPH_SPREAD: f32 = 16.0;
+
+/// Boxes with a spread shadow draw their shadows as the grown box shape,
+/// like the editor, instead of growing their content's alpha (see
+/// `MAX_MORPH_SPREAD`). An image's shadow follows its silhouette, so images
+/// keep the filter.
+fn box_shadows(n: &Node) -> bool {
+    if !aligned_stroke(n) {
+        return false;
+    }
+    let vis: Vec<&Paint> = n.fills.iter().filter(|p| p.is_visible()).collect();
+    if !n.hide_fill && !vis.is_empty() && vis.iter().all(|p| matches!(p, Paint::Image { .. })) {
+        return false;
+    }
+    n.effects.iter().any(|e| shadow_shows(e) && matches!(e, Effect::DropShadow { spread, .. } if spread.abs() > 0.01))
 }
 
 /// The region a filled image shows (Unity's Filled type), as path data in a
@@ -675,12 +705,59 @@ impl Writer<'_> {
         }
     }
 
+    /// A box's drop shadows as its shape grown by `spread`, offset, blurred
+    /// and colored, the first one lowest. The editor draws them the same way
+    /// (a blurred SDF of the grown box), also under see-through fills.
+    fn box_shadows_markup(&mut self, n: &Node) -> String {
+        let mut out = String::new();
+        for e in &n.effects {
+            let Effect::DropShadow { color, x, y, blur, spread, .. } = e else { continue };
+            if !shadow_shows(e) {
+                continue;
+            }
+            let s = (*spread as f64).min(MAX_SPREAD);
+            let (dx, dy) = (*x as f64 - s, *y as f64 - s);
+            let (w, h) = (n.width + 2.0 * s, n.height + 2.0 * s);
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            let shape = if n.kind == NodeType::Ellipse {
+                format!(r#"<ellipse cx="{}" cy="{}" rx="{}" ry="{}""#, fmt_num(dx + w / 2.0), fmt_num(dy + h / 2.0), fmt_num(w / 2.0), fmt_num(h / 2.0))
+            } else {
+                let max = w.min(h) / 2.0;
+                let r = n.radii().map(|r| (r + s).clamp(0.0, max));
+                format!(r#"<path transform="translate({} {})" d="{}""#, fmt_num(dx), fmt_num(dy), rounded_rect_path(w, h, r))
+            };
+            let mut filter = String::new();
+            if *blur > 0.0 {
+                // Blur 0 is a hard copy, as in the filter path.
+                let id = self.id("bs");
+                let m = *blur as f64 * 1.5 + 2.0;
+                let _ = write!(
+                    self.defs,
+                    r#"<filter id="{id}" filterUnits="userSpaceOnUse" x="{}" y="{}" width="{}" height="{}" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{}"/></filter>"#,
+                    fmt_num(dx - m),
+                    fmt_num(dy - m),
+                    fmt_num(w + 2.0 * m),
+                    fmt_num(h + 2.0 * m),
+                    fmt_num(*blur as f64 / 2.0)
+                );
+                filter = format!(r#" filter="url(#{id})""#);
+            }
+            let _ = write!(out, r#"{shape} fill="{}" fill-opacity="{}"{filter}/>"#, self.col(*color).to_hex_rgb(), fmt_num(color.a as f64));
+        }
+        out
+    }
+
     fn effects_filter(&mut self, n: &Node) -> Option<String> {
+        let shapes = box_shadows(n);
         let effects: Vec<&Effect> = n
             .effects
             .iter()
             .filter(|e| match e {
-                Effect::DropShadow { visible, .. } | Effect::LayerBlur { visible, .. } => *visible,
+                // Box shadows are shapes inside the layer (see `box_shadows_markup`).
+                Effect::DropShadow { .. } => !shapes && shadow_shows(e),
+                Effect::LayerBlur { visible, .. } => *visible,
                 // Drawn before the layer (see `backdrop`), not a filter on it.
                 Effect::BackgroundBlur { .. } => false,
             })
@@ -694,7 +771,7 @@ impl Writer<'_> {
         let reach = effects
             .iter()
             .map(|e| match e {
-                Effect::DropShadow { x, y, blur, spread, .. } => x.abs().max(y.abs()) as f64 + *blur as f64 * 1.5 + spread.max(0.0) as f64,
+                Effect::DropShadow { x, y, blur, spread, .. } => x.abs().max(y.abs()) as f64 + *blur as f64 * 1.5 + spread.clamp(0.0, MAX_MORPH_SPREAD) as f64,
                 Effect::LayerBlur { radius, .. } => *radius as f64 * 1.5,
                 Effect::BackgroundBlur { .. } => 0.0,
             })
@@ -720,7 +797,8 @@ impl Writer<'_> {
                     let mut input = "SourceAlpha".to_string();
                     if spread.abs() > 0.01 {
                         let op = if *spread > 0.0 { "dilate" } else { "erode" };
-                        let _ = write!(self.defs, r#"<feMorphology in="SourceAlpha" operator="{op}" radius="{}" result="s{i}m"/>"#, fmt_num(spread.abs() as f64));
+                        let r = spread.abs().min(MAX_MORPH_SPREAD) as f64;
+                        let _ = write!(self.defs, r#"<feMorphology in="SourceAlpha" operator="{op}" radius="{}" result="s{i}m"/>"#, fmt_num(r));
                         input = format!("s{i}m");
                     }
                     // Blur 0 is a hard copy (Unity's Shadow); some viewers
@@ -816,6 +894,10 @@ impl Writer<'_> {
         }
         let _ = write!(g, r#" data-name="{}">"#, escape(&n.name));
         self.body.push_str(&g);
+        if box_shadows(n) {
+            let shadows = self.box_shadows_markup(n);
+            self.body.push_str(&shadows);
+        }
 
         match n.kind {
             NodeType::Text => self.text(n),
@@ -1085,6 +1167,39 @@ impl Writer<'_> {
 mod tests {
     use super::*;
     use crate::ops::Op;
+
+    fn shadow(spread: f32, alpha: f32) -> Effect {
+        Effect::DropShadow { color: Color::rgba(0.0, 0.0, 0.0, alpha), x: 0.0, y: 0.0, blur: 0.0, spread, visible: true }
+    }
+
+    /// Spread on a box is its grown shape, like the editor, so CSS's
+    /// `0 0 0 9999px` overlay trick costs nothing; other layers keep the
+    /// filter with a capped radius, and transparent shadows draw nothing.
+    #[test]
+    fn spread_shadows_stay_cheap() {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height, f.corner_radius) = (320.0, 320.0, 4.0);
+        f.fills = vec![];
+        f.effects = vec![shadow(159984.0, 0.5), shadow(0.0, 0.0)];
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut t = Node::new("t:1", NodeType::Text);
+        t.parent = Some("0:1".into());
+        t.characters = "Hi".into();
+        t.effects = vec![shadow(500.0, 1.0)];
+        doc.apply(&Op::Create { node: t }).unwrap();
+        let (svg, _) = export(&doc, &["f:1".to_string()], &SvgOptions::default()).unwrap();
+        assert!(!svg.contains("feMorphology"), "{svg}");
+        assert!(svg.contains(r#"<path transform="translate(-4096 -4096)""#), "{svg}");
+        assert_eq!(svg.matches("fill-opacity=\"0.5\"").count(), 1, "the transparent shadow is skipped: {svg}");
+        let (svg, _) = export(&doc, &["t:1".to_string()], &SvgOptions::default()).unwrap();
+        assert!(svg.contains(r#"<feMorphology in="SourceAlpha" operator="dilate" radius="16""#), "{svg}");
+        // A transparent shadow alone makes no filter.
+        doc.apply(&Op::Update { id: "f:1".into(), props: [("effects".to_string(), serde_json::json!([{ "type": "DROP_SHADOW", "color": "#00000000", "x": 0, "y": 0, "blur": 0, "spread": 0 }]))].into_iter().collect() }).unwrap();
+        let (svg, _) = export(&doc, &["f:1".to_string()], &SvgOptions::default()).unwrap();
+        assert!(!svg.contains("<filter"), "{svg}");
+    }
 
     #[test]
     fn exports_basic_shapes() {

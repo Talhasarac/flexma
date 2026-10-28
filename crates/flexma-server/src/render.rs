@@ -1732,6 +1732,34 @@ mod asset_scope_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// CSS's `box-shadow: 0 0 0 9999px` overlay (here the 159984 px one a
+    /// website import brought) used to run resvg's morphology for hours.
+    /// Now it renders at once, darkening the frame around the box.
+    #[test]
+    fn huge_spread_shadows_render_fast() {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height) = (400.0, 400.0);
+        f.fills = vec![Paint::Solid { color: Color::WHITE, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut b = Node::new("b:1", NodeType::Frame);
+        b.parent = Some("f:1".into());
+        (b.x, b.y, b.width, b.height) = (150.0, 150.0, 100.0, 100.0);
+        b.fills = vec![];
+        b.effects = vec![flexma_doc::Effect::DropShadow { color: Color::rgba(0.0, 0.0, 0.0, 0.5), x: 0.0, y: 0.0, blur: 0.0, spread: 159984.0, visible: true }];
+        doc.apply(&Op::Create { node: b }).unwrap();
+        let dir = std::env::temp_dir().join(format!("flexma-spread-{}", std::process::id()));
+        let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
+        let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &HashSet::new()), None, &paint).unwrap();
+        let t = std::time::Instant::now();
+        let (png, w, _) = svg_to_png(&svg, 2.0, 2000, base_fontdb(), false, None).unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let p = pm.pixel(w / 20, w / 20).unwrap();
+        assert!((120..=136).contains(&p.red()), "half-dark white at the frame's corner: {p:?}");
+    }
+
     /// A render taller than one strip comes out the same as a single pass:
     /// clipped, translucent and blurred groups across strip edges, and the
     /// checkerboard.
@@ -1809,4 +1837,3 @@ mod fallback_tests {
         assert!(colored > 50, "emoji drawn in color ({colored} colored pixels)");
     }
 }
-
