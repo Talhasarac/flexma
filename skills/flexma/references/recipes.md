@@ -114,13 +114,16 @@ Read the structure with `get_file_tree` and the exact values with `get_nodes`, t
 | `gap` | `gap` |
 | `padding` | `padding` |
 | `justify` | `justify-content` |
-| `alignItems` | `align-items` |
+| `alignItems` | `align-items` (`stretch` too) |
 | `width: "fill"` | `flex: 1` along the layout direction, `align-self: stretch` across it |
 | hug | `width: fit-content` |
 | `cornerRadius` | `border-radius` |
 | drop shadow | `box-shadow: x y blur spread color` |
 | `strokeAlign: INSIDE` | `box-shadow: inset 0 0 0 <w> <color>`, or `border` with `box-sizing: border-box` |
 | text props | font-* and `line-height` (px) |
+| text `textRuns` (from `spans`) | inline `<span>`, `<strong>`, `<a>` inside one paragraph |
+| `BACKGROUND_BLUR` | `backdrop-filter: blur(<radius>px)` |
+| `absolute` + constraints | `position: absolute` with `top`/`right`/`bottom`/`left` |
 
 Use `export_svg` for icons and illustrations.
 
@@ -133,6 +136,28 @@ Recreate components top-down:
 3. Add the leaves: text, rectangles, vectors.
 
 Name layers after the components (for example `Button / Primary`). Then compare against the original with `get_screenshot`.
+
+From a website (HTML/CSS, Tailwind):
+
+| CSS / Tailwind | Flexma |
+|---|---|
+| `display: flex` / `flex-col` | `layout: "HORIZONTAL"` / `"VERTICAL"` |
+| `gap-*`, `p-*` | `gap`, `padding` |
+| `items-stretch`, equal-height cards in a row | `alignItems: "stretch"` |
+| `flex-1`, `w-full` | `width: "fill"` (in a row), `height: "fill"` (in a column) |
+| `absolute inset-0` | `absolute: true`, `width: "fill"`, `height: "fill"` |
+| `absolute top-2 right-2` | `absolute: true`, `x`/`y`, `constraints: { horizontal: "MAX", vertical: "MIN" }` |
+| `rotate-3` on an absolute layer | `rotation: 3` (it doesn't change auto layout, like a CSS transform) |
+| `backdrop-blur-md` + `bg-white/60` | `backgroundBlur: 12`, `fill: "#ffffff99"` |
+| `<a>`, `<strong>`, colored `<span>` in a sentence | `spans` on one text layer |
+| `.btn` with modifiers (`.btn-primary`, `aria-selected`) | One component with variants (`variant: { Kind: "Primary" }`) |
+| A card with an optional badge or a slot for an icon | Component `properties` (boolean, text, instance swap), set per instance with `props` |
+| Repeated markup (`map()` over data) | A component plus `fill_with_data` |
+| `<img src="logo.svg">` | `upload_image` the SVG (a crisp PNG), or `import_svg` for editable layers |
+| Shared CSS classes for type (`.h1 { color }`) | Text styles with a `color` |
+
+- Download the site's images and SVGs first, then upload them.
+- Re-importing a page after the code changed: use the same top-level `key` and `"prune": true`, so sections that were removed or restructured don't stay behind.
 
 ## Unity UI to design
 

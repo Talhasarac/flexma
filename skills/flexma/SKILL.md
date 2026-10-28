@@ -54,12 +54,12 @@ Anything that repeats (buttons, inputs, cards, nav items, list rows, avatars) sh
    - Put components together on a page named "Components" when building a system.
 2. **Use it.** `create_nodes` with `{type: "instance", component: "Button", text: "Buy now"}`.
    - `text` overrides the component's first text layer.
-   - For anything else, use `overrides: { "<layer name or id>": { color: "#fff", text: "…", visible: false } }`.
+   - For anything else, use `overrides: { "<layer name or id>": { color: "#fff", text: "…", visible: false } }`. Overrides take the same props as specs, style names included (`fillStyle: "Brand/Primary"`, `textStyle: "Body/Strong"`).
    - Swap a nested instance (an icon) for another component: `overrides: { "Icon": { component: "Icons/Star" } }`. One nav item component then serves every icon.
    - States (selected, active, size) are variants: components sharing a name with a `variant` object; instances choose with `variant: { Selected: "true" }`. Named knobs (show a badge, a title, an icon) are component `properties` that instances set with `props`. See the node spec.
    - Instance-level styling like `fill` or `stroke` is also an override.
    - Instances look the component up by name or id. It can be made in the same `create_nodes` / `upload_nodes` batch, as long as it comes before its instances (e.g. a "Components" frame first, then the screens).
-3. **Customize one instance.** `update_nodes` works on an instance's inner layers through their ids from `get_file_tree` (they look like `instanceId~layerId`). These edits become overrides on that instance. Deleting an inner layer hides it.
+3. **Customize one instance.** `update_nodes` works on an instance's inner layers through their ids from `get_file_tree` (they look like `instanceId~layerId`). These edits become overrides on that instance. Deleting an inner layer hides it. On the instance itself, `update_nodes` also takes `overrides`, `variant`, `props` and `component` (swap to another component).
 4. **Change all instances.** Edit the main component's layers. Overrides survive.
 5. **Discover existing ones.** Call `list_components` before building UI in an existing file, and reuse what's there. Call `detach_instance` only when a copy truly needs to diverge.
 
@@ -69,6 +69,7 @@ Shared color and text styles keep a design consistent: change a style once and e
 
 - **See them:** `list_styles`. Prefer existing styles over raw values.
 - **Make them:** `create_styles` with `{type:"color", name:"Brand/Primary", color:"#6d5dfc"}` or `{type:"text", name:"Heading/H1", font:"Inter", size:40, weight:800, lineHeight:48}`. Group with `/`. The same name again updates the style.
+  - A text style can carry a color too (`color:"#111111"` or `fillStyle:"Text/Primary"`), so one style gives a heading its whole look. Text using it takes that color unless the spec gives its own.
 - **Use them:** `fillStyle`, `strokeStyle` or `textStyle` (a style's name or id) in `create_nodes` / `update_nodes`. `null` detaches. Setting `fill` (or a font prop) directly on a styled layer detaches that style too.
 - **Change them:** `update_styles` with `{style:"Brand/Primary", color:"#e11d48"}` (add `rename` to rename). `delete_styles` unlinks layers, which keep their look.
 
@@ -114,6 +115,8 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
   - Rows: horizontal frames.
   - Spacing: use `gap` and `padding` instead of manual positioning.
   - Children use `width: "fill"` to stretch across their parent. Parents hug their content by default when you leave width/height out.
+  - `alignItems: "stretch"` works like CSS: cards in a row all get the tallest one's height, cells in a table row line up.
+  - Badges, ribbons and decorations that sit over a card: `absolute: true`. With `width: "fill"` an absolute layer spans the whole card (CSS `absolute inset-x-0`), and it keeps its place when the card grows.
 - **Use a spacing scale:** 4, 8, 12, 16, 24, 32, 48, 64. Use a radius scale: 4, 8, 12, 16, 999 for pills.
 - **Use a type scale:**
   - 12 or 13 for captions
@@ -122,7 +125,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
   - 24, 32, 40 or 48 for headings
   - Weights are 400 for body, 600 for labels and buttons, and 700 to 800 for headings.
   - For long text, set `width: "fill"` (or a fixed width) so it wraps.
-- **Fonts:** Inter is always available. For anything else, use a family from `list_fonts` (the workspace's fonts), or add a Google Fonts family with `add_font` *before* using it. For the user's own font files (a brand or game font on their computer), call `upload_font` and run the `curl` command it returns once per file. A font that isn't in the workspace shows as Inter for most people and in exports, and the tool result warns you. One or two families per design is plenty.
+- **Fonts:** Inter is always available. Characters a font lacks (₺, ✓, emoji) are drawn from another font one character at a time, like a browser does; emoji show in color. For anything else, use a family from `list_fonts` (the workspace's fonts), or add a Google Fonts family with `add_font` *before* using it. For the user's own font files (a brand or game font on their computer), call `upload_font` and run the `curl` command it returns once per file. A font that isn't in the workspace shows as Inter for most people and in exports, and the tool result warns you. One or two families per design is plenty.
 - **Color:** use one accent color, neutral grays for text (`#111` for primary, `#555` to `#666` for secondary) and light surfaces (`#fff`, `#f6f6f8`). Check contrast on colored backgrounds.
 - **Names:** give layers meaningful names ("Header", "Primary button", "Plan card / Pro"). People read the layers panel, and so will the next agent.
 - **Notes:** put intent, specs or code hints in a node's `description` (Notes). They are visible to humans and agents.
@@ -153,7 +156,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `list_fonts` | See the workspace's fonts (uploaded and Google Fonts) and their weights |
 | `add_font` | Add a Google Fonts family to the workspace so everyone sees it |
 | `upload_font` | Upload the user's own .ttf/.otf files: returns a 15-minute `curl` upload link |
-| `upload_image` | Upload PNG/JPEG/GIF/WebP images: returns a 15-minute `curl` upload link |
+| `upload_image` | Upload PNG/JPEG/GIF/WebP/SVG images: returns a 15-minute `curl` upload link |
 | `list_images` | Images already in the workspace, to reuse |
 | `share_file` | Get a public view-only link (no account needed) to hand to someone, or turn it off |
 | `list_comments` | Read open feedback threads (who, where, which node, replies) |
@@ -206,9 +209,11 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - Unity projects in Linear color space: create their pages with `linearBlending: true` so translucent overlays and text edges match Unity.
 - Keep source data with the design in `meta` (any JSON object), e.g. the Unity component or a button's action. `find_nodes` can search it by `meta` entries or by `key`.
 - Re-exports: give every node a stable `key` (e.g. its Unity object path). Uploading again then updates the same nodes in place (ids, comments and people's additions survive) instead of adding copies. Don't delete and recreate screens.
+  - Children without a `key` that people added in Flexma are kept. When the export itself has no keys and its structure changed (a section rebuilt from new HTML), add `"prune": true` to the top-level spec so old unkeyed layers are deleted instead of piling up.
+- Upload links (`upload_image`, `upload_font`, `upload_nodes`) last 15 minutes. An expired or used link makes `curl` exit with an error: ask the tool for a new one.
 - Fixed text boxes (TextMeshPro rects): give `width` and `height` with `overflow` (`CLIP`, `ELLIPSIS` or `TRUNCATE`) or `autoSize: [min, max]` (shrinks the font to fit); `wrap: false` keeps each paragraph on one line.
 - Text outlines: give TEXT a `stroke`, `strokeWeight` and `strokeAlign` (`OUTSIDE` keeps the letters' fill intact; `CENTER` matches TextMeshPro outlines). They render in the editor and in exports.
-- Rendering limits: drop shadows (blur, `spread`, several per layer) on shapes, frames and text look the same in the editor and in exports. The editor shadows a frame's box, while exports shadow everything it paints, so they differ only for frames without a fill. Vectors show their shadows in exports only, and layer blur too. Without a real picture, use a neutral placeholder rectangle named "Image: …".
+- Rendering limits: drop shadows (blur, `spread`, several per layer) on shapes, frames and text look the same in the editor and in exports. The editor shadows a frame's box, while exports shadow everything it paints, so they differ only for frames without a fill. Vectors show their shadows in exports only, and layer blur too. Background blur (`backgroundBlur: 16`, frosted glass) shows everywhere. Without a real picture, use a neutral placeholder rectangle named "Image: …".
 - Styles win: if a spec has both `fillStyle` and `fill` (or `textStyle` and `size`), the style's values apply. To use a raw value, leave the style out (or set it to null).
 - Icons: recolor with `update_nodes {id:"<icon frame>", color:"#…", strokeWidth:1.5}`. `strokeWidth` is in Lucide's 24-unit grid and scales with the icon's size. Old icon names still work (`home` → `house`).
 - Large files: outline with `depth: 2` first, then zoom into the frames you need with `node_id`.

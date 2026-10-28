@@ -247,7 +247,7 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
-        tool("upload_image", "Upload images (PNG, JPEG, GIF or WebP) from the user's computer, or ones you downloaded, into the file's workspace. Returns a curl command with a short-lived upload link; run it once per image, then place each with create_nodes {type:'image', asset:'<id>'}.", json!({
+        tool("upload_image", "Upload images (PNG, JPEG, GIF, WebP or SVG) from the user's computer, or ones you downloaded, into the file's workspace. Returns a curl command with a short-lived upload link; run it once per image, then place each with create_nodes {type:'image', asset:'<id>'}.", json!({
             "type": "object",
             "properties": {
                 "file_id": file_id,
@@ -1930,8 +1930,9 @@ impl Ctx {
         let url = format!("{}/api/font-uploads/{token}", self.base);
         Ok(text_result(format!(
             "Upload link ready. It works for {files} font {} over the next 15 minutes. Run this once per file:\n\n\
-             curl -sS --data-binary @\"/path/to/Font-Regular.ttf\" {url}\n\n\
+             curl -sS --fail-with-body --data-binary @\"/path/to/Font-Regular.ttf\" {url}\n\n\
              Each upload prints the family, weight and style it added (and how many uploads are left); use that family name as fontFamily. \
+             An expired or used-up link fails with an error (curl exits non-zero): ask for a new link. \
              One style per file, .ttf or .otf (WOFF/WOFF2 and .ttc collections aren't accepted). \
              A file with the same family, weight and style replaces the existing one. \
              Only upload fonts the user is licensed to use on the web. Don't share this link.",
@@ -2029,8 +2030,9 @@ impl Ctx {
         let mb = self.st.cfg.max_upload_bytes / (1024 * 1024);
         Ok(text_result(format!(
             "Upload link ready. It works for {files} {} over the next 15 minutes. Run this once per image:\n\n\
-             curl -sS --data-binary @\"/path/to/photo.jpg\" {url}\n\n\
+             curl -sS --fail-with-body --data-binary @\"/path/to/photo.jpg\" {url}\n\n\
              Each upload prints the new asset id, its pixel size and a ready-made node like {{\"type\":\"image\",\"asset\":\"<id>\"}}. \
+             An expired or used-up link fails with an error (curl exits non-zero): ask for a new link. \
              Put that node in create_nodes (leave out width/height to use the image's proportions), or use the asset as a fill on any frame or shape: \
              {{\"type\":\"IMAGE\",\"asset\":\"<id>\",\"fit\":\"FILL\"}} (FILL crops to cover, FIT letterboxes, STRETCH distorts). \
              PNG, JPEG, GIF, WebP or SVG, up to {mb} MB each (an SVG becomes a sharp PNG, and its width/height are the SVG's own size; use import_svg instead for editable vector layers). For a picture on the web, download it first (curl -L -o photo.jpg <url>), then upload it. \
