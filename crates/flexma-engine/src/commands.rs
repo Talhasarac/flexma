@@ -798,7 +798,22 @@ impl Editor {
         if !self.can_edit {
             return;
         }
-        let ops: Vec<Op> = self.style_targets(kind).into_iter().map(|t| Op::update1(t, key, json!(style_id))).collect();
+        // A text style's color comes along, unless the layer has a color style.
+        let color = style_id.filter(|_| kind == "text").and_then(|s| flexma_doc::styles::text_style_color(&self.doc, s));
+        let ops: Vec<Op> = self
+            .style_targets(kind)
+            .into_iter()
+            .map(|t| {
+                let mut props = Map::new();
+                props.insert(key.to_string(), json!(style_id));
+                if let Some((k, v)) = &color {
+                    if self.doc.get(&t).is_some_and(|n| n.fill_style_id.is_none()) {
+                        props.insert((*k).to_string(), v.clone());
+                    }
+                }
+                Op::Update { id: t, props }
+            })
+            .collect();
         if !ops.is_empty() {
             self.begin(if style_id.is_some() { "apply style" } else { "detach style" });
             self.apply_local(ops);

@@ -143,7 +143,7 @@ Sizing rules:
 | `italic` | bool |
 | `textDecoration` | `UNDERLINE`, `STRIKETHROUGH` or `null` |
 | `stroke`, `strokeWeight`, `strokeAlign` | Text outline. `OUTSIDE` (fill stays intact), `CENTER` (like TextMeshPro) or `INSIDE`. |
-| `textStyle` | Link to a shared text style by name or id (sets font, size, weight, line height, letter spacing); null detaches. |
+| `textStyle` | Link to a shared text style by name or id (sets font, size, weight, line height, letter spacing); null detaches. A text style made with a color (`color` or `fillStyle` in `create_styles`) also sets the text's color, unless the spec gives its own. |
 | `textAutoResize` | `WIDTH_AND_HEIGHT` (default: grows with the text), `HEIGHT` (fixed width, wraps; the default once you give a width), `NONE` (fixed box) |
 | `wrap` / `textWrap` | Default true. `false`: only `\n` breaks lines, and long lines run past the box width (TextMeshPro's word wrapping off). |
 | `autoSize` / `autoFontSize` | `[min, max]` or `{min, max}`: a fixed box draws its text at the largest size in the range that fits, like TextMeshPro's Auto Size. Line height and letter spacing scale along; `size` stays as set. `false` turns it off. |

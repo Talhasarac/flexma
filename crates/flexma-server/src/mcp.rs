@@ -321,7 +321,7 @@ fn tools() -> Value {
             "properties": { "file_id": file_id },
             "required": ["file_id"]
         })),
-        tool("create_styles", "Create shared styles, or update ones with the same name. Color styles: {type:'color', name:'Brand/Primary', color:'#6d5dfc'} (or fill/fills for gradients). Text styles: {type:'text', name:'Heading/H1', font:'Inter', size:40, weight:800, lineHeight:48, letterSpacing:-0.5}. Use '/' in names to group them.", json!({
+        tool("create_styles", "Create shared styles, or update ones with the same name. Color styles: {type:'color', name:'Brand/Primary', color:'#6d5dfc'} (or fill/fills for gradients). Text styles: {type:'text', name:'Heading/H1', font:'Inter', size:40, weight:800, lineHeight:48, letterSpacing:-0.5}, optionally with a color (color:'#111' or fillStyle:'Ink', which stays linked) that text gets with the style unless it sets its own. Use '/' in names to group them.", json!({
             "type": "object",
             "properties": {
                 "file_id": file_id,
@@ -1075,6 +1075,18 @@ impl Ctx {
                     }
                 };
                 let mut props = style_props(o, ty, existing.is_none())?;
+                if ty == flexma_doc::StyleType::Text {
+                    match o.get("fillStyle").or_else(|| o.get("colorStyle")) {
+                        Some(Value::Null) => {
+                            props.insert("fillStyleId".into(), Value::Null);
+                        }
+                        Some(Value::String(c)) => {
+                            let cid = flexma_doc::styles::find(tx.doc, c).filter(|id| tx.doc.get(id).is_some_and(|n| n.style_type == flexma_doc::StyleType::Fill));
+                            props.insert("fillStyleId".into(), json!(cid.ok_or(format!("{key}[{i}]: no color style '{c}'"))?));
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(new_name) = opt_str(o, "rename") {
                     props.insert("name".into(), json!(new_name));
                 }
@@ -2789,6 +2801,19 @@ fn style_props(o: &serde_json::Map<String, Value>, ty: flexma_doc::StyleType, ne
             if new && !props.keys().any(|k| flexma_doc::styles::TEXT_PROPS.contains(&k.as_str())) {
                 return Err("a text style needs at least one of font, size, weight, lineHeight, letterSpacing".into());
             }
+            // Optional color, applied with the style (a `fillStyle` is resolved by the caller).
+            match o.get("fills").or_else(|| o.get("fill")).or_else(|| o.get("color")) {
+                Some(Value::Null) => {
+                    props.insert("fills".into(), json!([]));
+                }
+                Some(p) => {
+                    let mut src = serde_json::Map::new();
+                    src.insert("fills".into(), p.clone());
+                    let norm = normalize_props(NodeType::Rectangle, &src)?;
+                    props.insert("fills".into(), norm.get("fills").cloned().unwrap_or(json!([])));
+                }
+                None => {}
+            }
         }
     }
     Ok(props)
@@ -2815,7 +2840,14 @@ fn style_value(st: &Node) -> String {
         flexma_doc::StyleType::Text => {
             let lh = st.line_height.map(|l| format!("/{}", fmt_num(l))).unwrap_or_default();
             let ls = if st.letter_spacing != 0.0 { format!(" ls {}", fmt_num(st.letter_spacing)) } else { String::new() };
-            format!("{} {}{lh} w{}{}{ls}", st.font_family, fmt_num(st.font_size), st.font_weight, if st.italic { " italic" } else { "" })
+            let color = match &st.fill_style_id {
+                Some(f) => format!(" color style [{f}]"),
+                None => st.fills.iter().find_map(|p| match p {
+                    flexma_doc::Paint::Solid { color, .. } => Some(format!(" color {}", color.to_hex())),
+                    _ => None,
+                }).unwrap_or_default(),
+            };
+            format!("{} {}{lh} w{}{}{ls}{color}", st.font_family, fmt_num(st.font_size), st.font_weight, if st.italic { " italic" } else { "" })
         }
     }
 }

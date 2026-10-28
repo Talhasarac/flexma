@@ -140,7 +140,22 @@ pub fn find(doc: &Document, key: &str) -> Option<NodeId> {
 
 /// Turn friendly `fillStyle` / `strokeStyle` / `textStyle` (a style's name
 /// or id, or null to detach) into style ref props.
+/// The color a text style carries, if any, as a prop for the text: its color
+/// style (`fillStyleId`, which stays linked) or its own fills. Text styles
+/// without one leave the text's color alone.
+pub fn text_style_color(doc: &Document, style_id: &str) -> Option<(&'static str, Value)> {
+    let st = doc.get(style_id).filter(|s| s.kind == NodeType::Style && s.style_type == StyleType::Text)?;
+    if let Some(f) = st.fill_style_id.as_ref().filter(|f| doc.contains(f)) {
+        return Some(("fillStyleId", Value::String(f.clone())));
+    }
+    (!st.fills.is_empty()).then(|| ("fills", serde_json::to_value(&st.fills).unwrap_or_default()))
+}
+
+/// Props that set a layer's color, friendly or canonical.
+const COLOR_KEYS: &[&str] = &["fill", "fills", "color", "background", "fillStyle", "fillStyleId"];
+
 pub fn resolve_refs(doc: &Document, props: &mut serde_json::Map<String, Value>) -> Result<(), String> {
+    let own_color = COLOR_KEYS.iter().any(|k| props.contains_key(*k));
     for (friendly, canonical, ty) in [
         ("fillStyle", "fillStyleId", StyleType::Fill),
         ("strokeStyle", "strokeStyleId", StyleType::Fill),
@@ -159,6 +174,12 @@ pub fn resolve_refs(doc: &Document, props: &mut serde_json::Map<String, Value>) 
             }
             other => return Err(format!("{friendly} must be a style name or id, not {other}")),
         };
+        // A text style's color comes along unless the spec sets one.
+        if ty == StyleType::Text && !own_color {
+            if let Some((key, color)) = id.as_str().and_then(|i| text_style_color(doc, i)) {
+                props.insert(key.into(), color);
+            }
+        }
         props.insert(canonical.to_string(), id);
     }
     Ok(())
@@ -237,5 +258,21 @@ mod tests {
         // Setting the style ref itself isn't a detach.
         let ops = route_ops(&doc, vec![Op::update1("r:1", "fillStyleId", json!("s:1"))]);
         assert!(matches!(&ops[0], Op::Update { props, .. } if props.len() == 1));
+    }
+
+    /// A text style's color comes with it, unless the spec sets a color.
+    #[test]
+    fn text_style_color_comes_along() {
+        let mut doc = setup();
+        doc.apply(&Op::update1("s:2", "fillStyleId", json!("s:1"))).unwrap();
+        let mut props = serde_json::Map::new();
+        props.insert("textStyle".into(), json!("s:2"));
+        resolve_refs(&doc, &mut props).unwrap();
+        assert_eq!(props.get("fillStyleId"), Some(&json!("s:1")));
+        let mut own = serde_json::Map::new();
+        own.insert("textStyle".into(), json!("s:2"));
+        own.insert("color".into(), json!("#ff0000"));
+        resolve_refs(&doc, &mut own).unwrap();
+        assert!(!own.contains_key("fillStyleId"));
     }
 }
