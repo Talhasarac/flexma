@@ -478,6 +478,210 @@ pub fn instances_of(doc: &Document, comp_id: &str) -> Vec<NodeId> {
         .collect()
 }
 
+/// The variant set a component belongs to: components with its name that
+/// have variant values (just itself if it has none).
+pub fn variant_set(doc: &Document, comp_id: &str) -> Vec<NodeId> {
+    let Some(c) = doc.get(comp_id) else { return Vec::new() };
+    if c.variant.is_empty() {
+        return vec![comp_id.to_string()];
+    }
+    let mut set: Vec<NodeId> = Vec::new();
+    doc.walk(crate::node::ROOT_ID, &mut |n| {
+        if n.kind == NodeType::Component && n.name == c.name && !n.variant.is_empty() {
+            set.push(n.id.clone());
+        }
+    });
+    set
+}
+
+/// Each variant property of a component's set and the values it takes.
+pub fn variant_options(doc: &Document, comp_id: &str) -> Map<String, Value> {
+    let mut out: Map<String, Value> = Map::new();
+    for id in variant_set(doc, comp_id) {
+        let Some(c) = doc.get(&id) else { continue };
+        for (k, v) in &c.variant {
+            let list = out.entry(k.clone()).or_insert_with(|| Value::Array(Vec::new()));
+            if let Value::Array(a) = list {
+                if !a.contains(v) {
+                    a.push(v.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A variant's values as strings (`true`, `3`, `"Hover"` all compare as text).
+pub fn variant_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The component in `comp_id`'s variant set with its values changed by
+/// `wanted`: an exact match, or else the one matching every wanted value and
+/// most of the others.
+pub fn find_variant(doc: &Document, comp_id: &str, wanted: &Map<String, Value>) -> Option<NodeId> {
+    let current = doc.get(comp_id)?.variant.clone();
+    let mut target = current.clone();
+    for (k, v) in wanted {
+        target.insert(k.clone(), Value::String(variant_text(v)));
+    }
+    let same = |a: &Value, b: &Value| variant_text(a) == variant_text(b);
+    variant_set(doc, comp_id)
+        .into_iter()
+        .filter_map(|id| {
+            let c = doc.get(&id)?;
+            if !wanted.iter().all(|(k, v)| c.variant.get(k).is_some_and(|cv| same(cv, v))) {
+                return None;
+            }
+            let score = target.iter().filter(|(k, v)| c.variant.get(*k).is_some_and(|cv| same(cv, v))).count();
+            Some((score, id))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, id)| id)
+}
+
+/// A layer's path of names from its component, to find "the same" layer in
+/// another variant.
+fn name_path(doc: &Document, comp_id: &str, id: &str) -> Vec<String> {
+    let mut path = vec![doc.get(id).map(|n| n.name.clone()).unwrap_or_default()];
+    for a in doc.ancestors(id) {
+        if a == comp_id {
+            break;
+        }
+        path.push(doc.get(&a).map(|n| n.name.clone()).unwrap_or_default());
+    }
+    path.reverse();
+    path
+}
+
+/// The layer in component `to` matching layer `id` of another variant: same
+/// `key`, else same path of names.
+fn matching_layer(doc: &Document, from: &str, id: &str, to: &str) -> Option<NodeId> {
+    let src = doc.get(id)?;
+    let path = name_path(doc, from, id);
+    let mut by_path = None;
+    let mut by_key = None;
+    doc.walk(to, &mut |n| {
+        if n.id == to {
+            return;
+        }
+        if by_key.is_none() && src.key.is_some() && n.key == src.key {
+            by_key = Some(n.id.clone());
+        }
+        if by_path.is_none() && n.name == src.name && name_path(doc, to, &n.id) == path {
+            by_path = Some(n.id.clone());
+        }
+    });
+    by_key.or(by_path)
+}
+
+/// Overrides of an instance of `from` re-keyed for `to` (another variant):
+/// each layer's overrides move to its match by key or name path; ones without
+/// a match are dropped.
+pub fn carry_overrides(doc: &Document, from: &str, to: &str, ov: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (k, v) in ov {
+        if k.is_empty() {
+            out.insert(k.clone(), v.clone());
+            continue;
+        }
+        let (head, rest) = match k.split_once('~') {
+            Some((h, r)) => (h, Some(r)),
+            None => (k.as_str(), None),
+        };
+        if let Some(new) = matching_layer(doc, from, head, to) {
+            let key = match rest {
+                Some(r) => format!("{new}~{r}"),
+                None => new,
+            };
+            out.insert(key, v.clone());
+        }
+    }
+    out
+}
+
+/// The update that switches an instance to another variant of its set (the
+/// values in `wanted` changed), carrying its overrides over.
+pub fn switch_variant_op(doc: &Document, inst_id: &str, wanted: &Map<String, Value>) -> Result<Op, String> {
+    let inst = doc.get(inst_id).filter(|n| n.kind == NodeType::Instance).ok_or("not an instance")?;
+    let from = inst.component_id.clone().ok_or("this instance has no main component")?;
+    if doc.get(&from).is_some_and(|c| c.variant.is_empty()) {
+        return Err(format!("'{}' has no variants", doc.get(&from).map(|c| c.name.as_str()).unwrap_or_default()));
+    }
+    let to = find_variant(doc, &from, wanted).ok_or_else(|| {
+        let opts: Vec<String> = variant_options(doc, &from).iter().map(|(k, v)| format!("{k}: {v}")).collect();
+        format!("no variant with those values (it has {})", opts.join(", "))
+    })?;
+    let mut props = Map::new();
+    props.insert("componentId".into(), Value::String(to.clone()));
+    props.insert("overrides".into(), Value::Object(carry_overrides(doc, &from, &to, &inst.overrides)));
+    Ok(Op::Update { id: inst_id.to_string(), props })
+}
+
+/// The overrides that set component properties (`{"Show icon": false,
+/// "Label": "Buy"}`) on an instance of `comp_id`, by layer.
+pub fn property_overrides(doc: &Document, comp_id: &str, values: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+    let comp = doc.get(comp_id).ok_or("no such component")?;
+    let mut out: Map<String, Value> = Map::new();
+    for (name, value) in values {
+        let def = comp.component_properties.get(name).and_then(Value::as_object).ok_or_else(|| {
+            let names: Vec<&String> = comp.component_properties.keys().collect();
+            format!("'{}' has no property '{name}' (it has {names:?})", comp.name)
+        })?;
+        let layer = def.get("layer").and_then(Value::as_str).unwrap_or_default().to_string();
+        let ty = def.get("type").and_then(Value::as_str).unwrap_or("BOOLEAN").to_ascii_uppercase();
+        let mut o = Map::new();
+        match ty.as_str() {
+            "BOOLEAN" => {
+                o.insert("visible".into(), Value::Bool(value.as_bool().unwrap_or_else(|| variant_text(value) == "true")));
+            }
+            "TEXT" => {
+                o.insert("characters".into(), Value::String(variant_text(value)));
+                o.insert("needsMeasure".into(), Value::Bool(true));
+            }
+            "INSTANCE_SWAP" => {
+                o.insert("componentId".into(), value.clone());
+            }
+            other => return Err(format!("property '{name}' has an unknown type {other}")),
+        }
+        let entry = out.entry(layer).or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(e) = entry {
+            e.extend(o);
+        }
+    }
+    Ok(out)
+}
+
+/// An instance's component properties with their current values.
+pub fn property_values(doc: &Document, inst: &Node) -> Map<String, Value> {
+    let mut out = Map::new();
+    let Some(comp) = inst.component_id.as_deref().and_then(|c| doc.get(c)) else { return out };
+    for (name, def) in &comp.component_properties {
+        let Some(def) = def.as_object() else { continue };
+        let layer = def.get("layer").and_then(Value::as_str).unwrap_or_default();
+        let ty = def.get("type").and_then(Value::as_str).unwrap_or("BOOLEAN").to_ascii_uppercase();
+        let key = match ty.as_str() {
+            "BOOLEAN" => "visible",
+            "TEXT" => "characters",
+            _ => "componentId",
+        };
+        let current = inst
+            .overrides
+            .get(layer)
+            .and_then(|o| o.get(key))
+            .cloned()
+            .or_else(|| doc.get(layer).and_then(|n| n.get_prop(key)))
+            .unwrap_or(Value::Null);
+        let mut d = def.clone();
+        d.insert("value".into(), current);
+        out.insert(name.clone(), Value::Object(d));
+    }
+    out
+}
+
 /// Find a component descendant by id or (unique-ish) name, for friendly override keys.
 pub fn resolve_override_key(doc: &Document, component_id: &str, key: &str) -> Option<String> {
     if key.is_empty() {

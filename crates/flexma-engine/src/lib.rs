@@ -384,6 +384,18 @@ impl FlexmaEditor {
     pub fn apply_style(&mut self, kind: &str, style_id: &str) {
         self.ed.set_style(kind, Some(style_id));
     }
+    /// wanted_json: `{"State": "Hover"}`.
+    pub fn set_variant(&mut self, inst_id: &str, wanted_json: &str) {
+        if let Ok(Value::Object(w)) = serde_json::from_str::<Value>(wanted_json) {
+            self.ed.set_variant(inst_id, w);
+        }
+    }
+    /// value_json: `true`, `"Buy"` or a component id.
+    pub fn set_component_property(&mut self, inst_id: &str, name: &str, value_json: &str) {
+        if let Ok(v) = serde_json::from_str::<Value>(value_json) {
+            self.ed.set_component_property(inst_id, name, v);
+        }
+    }
     pub fn detach_style(&mut self, kind: &str) {
         self.ed.set_style(kind, None);
     }

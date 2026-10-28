@@ -821,6 +821,49 @@ impl Editor {
         }
     }
 
+    /// Switch an instance to another variant of its set (`wanted`: the values
+    /// that change), keeping its overrides on the matching layers.
+    pub fn set_variant(&mut self, inst_id: &str, wanted: Map<String, Value>) {
+        if !self.can_edit {
+            return;
+        }
+        if flexma_doc::node::is_derived_id(inst_id) {
+            // Inside an instance: swap the nested one to that variant.
+            let cur = self.doc.get(inst_id).and_then(|n| n.component_id.clone()).unwrap_or_default();
+            if let Some(to) = flexma_doc::components::find_variant(&self.doc, &cur, &wanted) {
+                self.begin("switch variant");
+                self.apply_local(vec![Op::update1(inst_id, "componentId", json!(to))]);
+                self.end();
+            }
+            return;
+        }
+        if let Ok(op) = flexma_doc::components::switch_variant_op(&self.doc, inst_id, &wanted) {
+            self.begin("switch variant");
+            self.apply_local(vec![op]);
+            self.end();
+        }
+    }
+
+    /// Set one of an instance's component properties (a layer's visibility,
+    /// text or nested component), stored as an override.
+    pub fn set_component_property(&mut self, inst_id: &str, name: &str, value: Value) {
+        if !self.can_edit {
+            return;
+        }
+        let Some(cid) = self.doc.get(inst_id).and_then(|n| n.component_id.clone()) else { return };
+        let mut values = Map::new();
+        values.insert(name.to_string(), value);
+        let Ok(set) = flexma_doc::components::property_overrides(&self.doc, &cid, &values) else { return };
+        // Each property is an override on its layer, through the instance's routing.
+        let ops: Vec<Op> = set
+            .into_iter()
+            .filter_map(|(layer, o)| Some(Op::Update { id: format!("{inst_id}~{layer}"), props: o.as_object()?.clone() }))
+            .collect();
+        self.begin("set property");
+        self.apply_local(ops);
+        self.end();
+    }
+
     /// Change a style's values (canonical props); every user updates.
     pub fn update_style(&mut self, style_id: &str, props: Map<String, Value>) {
         if !self.can_edit || self.doc.get(style_id).map(|n| n.kind != NodeType::Style).unwrap_or(true) || props.is_empty() {

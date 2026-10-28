@@ -661,8 +661,18 @@ impl Editor {
                 j["parentLayout"] = json!(parent.map(|p| p.layout_mode).unwrap_or_default());
                 j["derived"] = json!(flexma_doc::node::is_derived_id(&n.id));
                 if n.kind == NodeType::Instance {
-                    j["componentName"] = json!(n.component_id.as_deref().and_then(|c| self.doc.get(c)).map(|c| c.name.clone()));
+                    let comp = n.component_id.as_deref().and_then(|c| self.doc.get(c));
+                    j["componentName"] = json!(comp.map(|c| c.name.clone()));
                     j["overrideCount"] = json!(n.overrides.len());
+                    if let Some(c) = comp {
+                        if !c.variant.is_empty() {
+                            j["componentVariant"] = json!(c.variant);
+                            j["variantOptions"] = json!(flexma_doc::components::variant_options(&self.doc, &c.id));
+                        }
+                        if !c.component_properties.is_empty() {
+                            j["componentPropertyValues"] = json!(flexma_doc::components::property_values(&self.doc, n));
+                        }
+                    }
                 }
                 if n.kind == NodeType::Component {
                     j["instanceCount"] = json!(flexma_doc::components::instances_of(&self.doc, &n.id).len());

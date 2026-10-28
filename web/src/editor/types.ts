@@ -264,6 +264,11 @@ export interface NodeData {
   derived: boolean;
   componentName?: string | null;
   overrideCount?: number;
+  /** Instances of a variant: their component's values, and each property's options. */
+  componentVariant?: Record<string, string>;
+  variantOptions?: Record<string, string[]>;
+  /** Instances: their component's properties with current values. */
+  componentPropertyValues?: Record<string, { type: 'BOOLEAN' | 'TEXT' | 'INSTANCE_SWAP'; layer: string; default: unknown; value: unknown }>;
   instanceCount?: number;
   parentType: NodeType | null;
   parentLayout: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'GRID';

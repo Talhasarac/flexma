@@ -56,6 +56,7 @@ Anything that repeats (buttons, inputs, cards, nav items, list rows, avatars) sh
    - `text` overrides the component's first text layer.
    - For anything else, use `overrides: { "<layer name or id>": { color: "#fff", text: "…", visible: false } }`.
    - Swap a nested instance (an icon) for another component: `overrides: { "Icon": { component: "Icons/Star" } }`. One nav item component then serves every icon.
+   - States (selected, active, size) are variants: components sharing a name with a `variant` object; instances choose with `variant: { Selected: "true" }`. Named knobs (show a badge, a title, an icon) are component `properties` that instances set with `props`. See the node spec.
    - Instance-level styling like `fill` or `stroke` is also an override.
    - Instances look the component up by name or id. It can be made in the same `create_nodes` / `upload_nodes` batch, as long as it comes before its instances (e.g. a "Components" frame first, then the screens).
 3. **Customize one instance.** `update_nodes` works on an instance's inner layers through their ids from `get_file_tree` (they look like `instanceId~layerId`). These edits become overrides on that instance. Deleting an inner layer hides it.

@@ -126,7 +126,13 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
     let mut out = Map::new();
     for (k, v) in input {
         match k.as_str() {
-            "type" | "children" | "id" | "x1" | "y1" | "x2" | "y2" | "prune" => {}
+            "type" | "children" | "id" | "x1" | "y1" | "x2" | "y2" | "prune" | "props" | "properties" => {}
+            "variant" => {
+                // A component's values in its variant set, as text.
+                let o = v.as_object().ok_or("variant must be an object like {\"State\": \"Hover\"}")?;
+                let m: Map<String, Value> = o.iter().map(|(k, v)| (k.clone(), Value::String(crate::components::variant_text(v)))).collect();
+                out.insert("variant".into(), Value::Object(m));
+            }
             "w" => {
                 out.insert("width".into(), v.clone());
             }
@@ -547,7 +553,14 @@ fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> 
         .or_else(|| obj.get("of"))
         .and_then(Value::as_str)
         .ok_or("instances need \"component\": the main component's id or name")?;
-    let cid = find_component(doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file (a component made in the same batch must come before its instances)"))?;
+    let mut cid = find_component(doc, ckey).ok_or_else(|| format!("no component '{ckey}' in this file (a component made in the same batch must come before its instances)"))?;
+    // A variant of the set: {component:"Button", variant:{State:"Hover"}}.
+    if let Some(Value::Object(wanted)) = obj.get("variant") {
+        cid = crate::components::find_variant(doc, &cid, wanted).ok_or_else(|| {
+            let opts: Vec<String> = crate::components::variant_options(doc, &cid).iter().map(|(k, v)| format!("{k}: {v}")).collect();
+            format!("'{ckey}' has no variant {wanted:?} (variants: {})", opts.join(", "))
+        })?;
+    }
     let comp = doc.get(&cid).unwrap();
     node.component_id = Some(cid.clone());
     // Start from the component's look, not frame defaults (a white fill and
@@ -583,6 +596,22 @@ fn build_instance(doc: &Document, obj: &Map<String, Value>, node: &mut Node) -> 
             let entry = overrides.entry(key).or_insert_with(|| Value::Object(Map::new()));
             if let Value::Object(e) = entry {
                 e.extend(norm);
+            }
+        }
+    }
+    // Component properties: {props:{"Show icon": false, "Label": "Buy"}}.
+    if let Some(Value::Object(values)) = obj.get("props").or_else(|| obj.get("properties")) {
+        let mut values = values.clone();
+        for (name, v) in values.iter_mut() {
+            let swap = comp.component_properties.get(name).and_then(|d| d.get("type")).and_then(Value::as_str).is_some_and(|t| t.eq_ignore_ascii_case("INSTANCE_SWAP"));
+            if swap {
+                *v = Value::String(swap_target(doc, &cid, v)?);
+            }
+        }
+        for (key, o) in crate::components::property_overrides(doc, &cid, &values)? {
+            let entry = overrides.entry(key).or_insert_with(|| Value::Object(Map::new()));
+            if let (Value::Object(e), Value::Object(o)) = (entry, o) {
+                e.extend(o);
             }
         }
     }
@@ -714,7 +743,7 @@ fn build_one(
     let props = if kind == NodeType::Instance {
         let rest: Map<String, Value> = obj
             .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "component" | "componentId" | "of" | "overrides" | "text"))
+            .filter(|(k, _)| !matches!(k.as_str(), "component" | "componentId" | "of" | "overrides" | "text" | "variant" | "props" | "properties"))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         normalize_props(kind, &rest)?
@@ -814,7 +843,61 @@ fn build_one(
     for (c, key) in children.iter().zip(keys) {
         build_one(ctx, c, &id, kind, key, ops, new_id)?;
     }
+    if kind == NodeType::Component {
+        if let Some(Value::Object(defs)) = obj.get("properties").or_else(|| obj.get("props")) {
+            let props = component_properties(&id, defs, ops)?;
+            if let Some(Op::Create { node }) = ops.iter_mut().find(|op| matches!(op, Op::Create { node } if node.id == id)) {
+                node.component_properties = props;
+            }
+        }
+    }
     Ok(id)
+}
+
+/// A component's `properties` spec, `{"Show icon": {type:"boolean",
+/// layer:"Icon", default:true}}`, with layers (name or key) as ids among the
+/// nodes just built under it.
+fn component_properties(comp: &str, defs: &Map<String, Value>, ops: &[Op]) -> Result<Map<String, Value>, String> {
+    let built: Vec<&Node> = ops.iter().filter_map(|op| if let Op::Create { node } = op { Some(node) } else { None }).collect();
+    let under = |n: &Node| {
+        let mut p = n.parent.clone();
+        while let Some(id) = p {
+            if id == comp {
+                return true;
+            }
+            p = built.iter().find(|b| b.id == id).and_then(|b| b.parent.clone());
+        }
+        false
+    };
+    let mut out = Map::new();
+    for (name, def) in defs {
+        let d = def.as_object().ok_or_else(|| format!("property '{name}' must be an object like {{type:'boolean', layer:'Icon'}}"))?;
+        let layer = d.get("layer").and_then(Value::as_str).ok_or_else(|| format!("property '{name}' needs a 'layer' (a layer name or key)"))?;
+        let target = built
+            .iter()
+            .find(|n| under(n) && (n.key.as_deref() == Some(layer) || n.id == layer))
+            .or_else(|| built.iter().find(|n| under(n) && n.name == layer))
+            .ok_or_else(|| format!("property '{name}': no layer '{layer}' in the component"))?;
+        let ty = match d.get("type").and_then(Value::as_str).unwrap_or("boolean").to_ascii_lowercase().as_str() {
+            "boolean" | "bool" | "visible" => "BOOLEAN",
+            "text" | "string" => "TEXT",
+            "instance_swap" | "swap" | "instance" => "INSTANCE_SWAP",
+            other => return Err(format!("property '{name}': type must be boolean, text or instance_swap, not '{other}'")),
+        };
+        if ty == "TEXT" && target.kind != NodeType::Text {
+            return Err(format!("property '{name}': '{layer}' isn't a text layer"));
+        }
+        if ty == "INSTANCE_SWAP" && target.kind != NodeType::Instance {
+            return Err(format!("property '{name}': '{layer}' isn't an instance"));
+        }
+        let default = match ty {
+            "BOOLEAN" => Value::Bool(target.visible),
+            "TEXT" => Value::String(target.characters.clone()),
+            _ => target.component_id.clone().map(Value::String).unwrap_or(Value::Null),
+        };
+        out.insert(name.clone(), serde_json::json!({ "type": ty, "layer": target.id, "default": default }));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1035,6 +1118,45 @@ mod tests {
         // A component can't be swapped into itself.
         let bad = json!([{ "type": "instance", "component": "Nav item", "overrides": { "Icon": { "component": "Nav item" } } }]);
         assert!(build_create_ops(&doc, "0:1", bad.as_array().unwrap(), None, &mut || "x:1".into()).is_err());
+    }
+
+    /// Variants share a name; instances pick one, set component properties,
+    /// and switch variants keeping their overrides.
+    #[test]
+    fn variants_and_properties() {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("v:{n}")
+        };
+        let card = |selected: bool, fill: &str| {
+            json!({ "type": "component", "name": "Cycle Card", "variant": { "Selected": selected }, "layout": "vertical", "fill": fill,
+                "properties": { "Show badge": { "type": "boolean", "layer": "Badge" }, "Title": { "type": "text", "layer": "Title" } },
+                "children": [{ "type": "text", "name": "Title", "text": "Monthly" }, { "type": "rect", "name": "Badge", "w": 40, "h": 10 }] })
+        };
+        let spec = json!([card(false, "#ffffff"), card(true, "#ffcc00"),
+            { "type": "instance", "component": "Cycle Card", "variant": { "Selected": true }, "props": { "Show badge": false, "Title": "Yearly" } }]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        crate::components::sync_all(&mut doc);
+        let inst = doc.get(&top[2]).unwrap().clone();
+        assert_eq!(inst.component_id.as_deref(), Some(top[1].as_str()), "the selected variant");
+        let props = crate::components::property_values(&doc, &inst);
+        assert_eq!((props["Show badge"]["value"].clone(), props["Title"]["value"].clone()), (json!(false), json!("Yearly")));
+        // Switch back to Selected=false: the overrides move to that variant's layers.
+        let op = crate::components::switch_variant_op(&doc, &top[2], json!({ "Selected": "false" }).as_object().unwrap()).unwrap();
+        let (eff, errs) = doc.apply_all(&[op]);
+        assert!(errs.is_empty(), "{errs:?}");
+        crate::components::sync_instances(&mut doc, &eff.changed, &[]);
+        let inst = doc.get(&top[2]).unwrap().clone();
+        assert_eq!(inst.component_id.as_deref(), Some(top[0].as_str()));
+        let props = crate::components::property_values(&doc, &inst);
+        assert_eq!((props["Show badge"]["value"].clone(), props["Title"]["value"].clone()), (json!(false), json!("Yearly")));
+        assert_eq!(inst.fills.first().map(|p| p.approx_color().to_hex()), Some("#ffffff".into()), "follows the new variant's look");
+        // A value the set doesn't have.
+        assert!(crate::components::switch_variant_op(&doc, &top[2], json!({ "Selected": "maybe" }).as_object().unwrap()).is_err());
     }
 
     /// Overrides take what node specs take, style names included.

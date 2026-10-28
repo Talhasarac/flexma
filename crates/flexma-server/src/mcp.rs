@@ -1246,6 +1246,40 @@ impl Ctx {
                         }
                     }
                 }
+                // Variants and component properties.
+                if node.kind == NodeType::Instance {
+                    if let Some(Value::Object(wanted)) = raw.remove("variant") {
+                        if flexma_doc::components::owner_of(id).is_none() {
+                            let op = flexma_doc::components::switch_variant_op(tx.doc, id, &wanted).map_err(|e| format!("{id}: {e}"))?;
+                            if let Op::Update { props, .. } = op {
+                                raw.extend(props);
+                            }
+                        } else {
+                            // Inside another instance: swap to that variant.
+                            let cur = node.component_id.clone().unwrap_or_default();
+                            let to = flexma_doc::components::find_variant(tx.doc, &cur, &wanted).ok_or(format!("{id}: no variant {wanted:?}"))?;
+                            raw.insert("componentId".into(), json!(to));
+                        }
+                    }
+                    if let Some(Value::Object(values)) = raw.remove("props").or_else(|| raw.remove("properties")) {
+                        let cid = raw.get("componentId").and_then(Value::as_str).map(str::to_string).or_else(|| node.component_id.clone()).unwrap_or_default();
+                        let mut values = values.clone();
+                        for (name, v) in values.iter_mut() {
+                            let swap = tx.doc.get(&cid).and_then(|c| c.component_properties.get(name)).and_then(|d| d.get("type")).and_then(Value::as_str) == Some("INSTANCE_SWAP");
+                            if swap {
+                                *v = json!(flexma_doc::friendly::swap_target(tx.doc, &cid, v).map_err(|e| format!("{id}: {e}"))?);
+                            }
+                        }
+                        let set = flexma_doc::components::property_overrides(tx.doc, &cid, &values).map_err(|e| format!("{id}: {e}"))?;
+                        let mut merged = raw.get("overrides").and_then(Value::as_object).cloned().unwrap_or_else(|| node.overrides.clone());
+                        for (k, o) in set {
+                            if let (Value::Object(e), Value::Object(o)) = (merged.entry(k).or_insert_with(|| json!({})), o) {
+                                e.extend(o);
+                            }
+                        }
+                        raw.insert("overrides".into(), Value::Object(merged));
+                    }
+                }
                 // Instance swap: show another component.
                 if node.kind == NodeType::Instance {
                     if let Some(c) = ["component", "componentId", "of"].iter().find_map(|k| raw.remove(*k)) {
@@ -2082,8 +2116,9 @@ impl Ctx {
                         let page = doc.page_of(&n.id).and_then(|p| doc.get(&p)).map(|p| p.name.clone()).unwrap_or_default();
                         let count = flexma_doc::components::instances_of(doc, &n.id).len();
                         out.push_str(&format!(
-                            "COMPONENT \"{}\" [{}] {}×{} on page \"{}\" — {} instance(s){}\n",
+                            "COMPONENT \"{}\"{} [{}] {}×{} on page \"{}\" — {} instance(s){}\n",
                             n.name,
+                            variant_label(n),
                             n.id,
                             fmt_num(n.width),
                             fmt_num(n.height),
@@ -2091,6 +2126,11 @@ impl Ctx {
                             count,
                             if n.description.is_empty() { String::new() } else { format!(" — {}", n.description) }
                         ));
+                        for (name, def) in &n.component_properties {
+                            let ty = def.get("type").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
+                            let layer = def.get("layer").and_then(Value::as_str).and_then(|l| doc.get(l)).map(|l| l.name.clone()).unwrap_or_default();
+                            out.push_str(&format!("    property \"{name}\" ({ty}, layer \"{layer}\", default {})\n", def.get("default").cloned().unwrap_or(Value::Null)));
+                        }
                         for c in doc.children(&n.id) {
                             if let Some(cn) = doc.get(c) {
                                 out.push_str(&format!("    layer {} \"{}\" [{}]\n", cn.kind.as_str(), cn.name, cn.id));
@@ -2378,6 +2418,15 @@ fn re_estimate_text(node: &Node, props: &mut Map<String, Value>) {
     props.insert("needsMeasure".into(), json!(true));
 }
 
+/// ` (Selected=true, Size=L)` for a variant component, else empty.
+fn variant_label(n: &Node) -> String {
+    if n.variant.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = n.variant.iter().map(|(k, v)| format!("{k}={}", flexma_doc::components::variant_text(v))).collect();
+    format!(" ({})", parts.join(", "))
+}
+
 fn first_fill_hex(n: &Node) -> Option<String> {
     n.fills.iter().find(|p| p.is_visible()).map(|p| match p {
         flexma_doc::Paint::Solid { color, .. } => color.to_hex(),
@@ -2409,9 +2458,9 @@ fn first_fill_hex(n: &Node) -> Option<String> {
 }
 
 fn node_line(doc: &Document, n: &Node) -> String {
-    let mut s = format!("{} \"{}\" [{}]", n.kind.as_str(), n.name.replace('"', "'"), n.id);
+    let mut s = format!("{} \"{}\"{} [{}]", n.kind.as_str(), n.name.replace('"', "'"), variant_label(n), n.id);
     if n.kind == NodeType::Instance {
-        let comp = n.component_id.as_deref().and_then(|c| doc.get(c)).map(|c| c.name.clone()).unwrap_or_else(|| "missing component".into());
+        let comp = n.component_id.as_deref().and_then(|c| doc.get(c)).map(|c| format!("{}{}", c.name, variant_label(c))).unwrap_or_else(|| "missing component".into());
         s.push_str(&format!(" of \"{comp}\""));
         let count = n.overrides.len();
         if count > 0 && !flexma_doc::node::is_derived_id(&n.id) {

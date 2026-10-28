@@ -133,6 +133,28 @@
 .follow-label button:hover {
   background: rgb(0 0 0 / 0.4);
 }
+.instance-props {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.instance-prop {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+.instance-prop > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.instance-prop input[type='checkbox'] {
+  justify-self: start;
+}
 .swap-select {
   display: flex;
   align-items: center;
@@ -775,6 +797,7 @@
   user-select: text;
 }
 .prop-select,
+.prop-input,
 .paint-type {
   height: 28px;
   border: 1px solid transparent;

@@ -278,6 +278,13 @@ define_node! {
     /// INSTANCE: per-node overrides, keyed by the source node id relative to the
     /// instance (`""` = the instance itself, `N~S` = inside nested instance N).
     overrides: serde_json::Map<String, serde_json::Value> = serde_json::Map::new() => "overrides",
+    /// COMPONENT: its values in a variant set, the components sharing its name
+    /// (e.g. `{"State": "Hover"}`). Instances switch between them.
+    variant: serde_json::Map<String, serde_json::Value> = serde_json::Map::new() => "variant",
+    /// COMPONENT: named properties instances set, each `{type, layer, default}`:
+    /// BOOLEAN shows or hides a layer, TEXT sets a text layer, INSTANCE_SWAP
+    /// sets a nested instance's component. They become ordinary overrides.
+    component_properties: serde_json::Map<String, serde_json::Value> = serde_json::Map::new() => "componentProperties",
     /// Free-form notes, handy for agents to leave intent or component docs.
     description: String = String::new() => "description",
     /// A stable id from outside Flexma (e.g. a Unity object), so a later upload
