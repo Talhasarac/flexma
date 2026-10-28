@@ -2309,10 +2309,10 @@ impl Ctx {
         self.st
             .db
             .call(move |c| {
+                let stored = crate::doc_store::read(c, &f2)?.ok_or_else(|| crate::error::AppError::not_found("file"))?;
                 c.execute(
-                    "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at)
-                     SELECT ?1, id, ?2, document, version, ?3, ?4 FROM files WHERE id = ?5",
-                    params![new_id(), l2, uid, now(), f2],
+                    "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![new_id(), f2, l2, stored.json, stored.version, uid, now()],
                 )?;
                 Ok(())
             })

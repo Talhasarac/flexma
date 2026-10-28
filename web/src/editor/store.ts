@@ -24,6 +24,8 @@ interface UiState {
   canEdit: boolean;
   page: string;
   editingText: EditingText | null;
+  /** A page someone switched to that is still streaming in. */
+  loadingPage: string | null;
 }
 
 export interface ServerMessage {
@@ -65,6 +67,11 @@ export class EditorStore {
   private pendingInit: ServerMessage | null = null;
   /** Messages that arrive before that frame (normally none). */
   private held: string[] = [];
+  /** Socket messages, handled in order (see `drain`). */
+  private inbox: (string | Uint8Array)[] = [];
+  private draining = false;
+  /** Pages still to stream in after the first part. */
+  private pagesLeft = 0;
   onFatal: ((message: string) => void) | null = null;
   onReject: ((message: string) => void) | null = null;
   onReload: (() => void) | null = null;
@@ -85,6 +92,7 @@ export class EditorStore {
     canEdit: true,
     page: '',
     editingText: null,
+    loadingPage: null,
   };
   /** Every other connection in the file, one per tab. */
   private allPeers: Peer[] = [];
@@ -199,6 +207,7 @@ export class EditorStore {
         canEdit: e.can_edit(),
         page,
         editingText: editing === 'null' ? null : (JSON.parse(editing) as EditingText),
+        loadingPage: e.waiting_for_page() || null,
       };
       changed = true;
     }
@@ -265,22 +274,24 @@ export class EditorStore {
     if (!this.flushTimer) this.flushTimer = window.setInterval(() => this.flush(), 50);
     this.status = 'connecting';
     this.notify();
-    // The document comes as its own zlib frame, about a tenth of its JSON,
-    // and the engine unpacks it without the page parsing it first.
-    const ws = new WebSocket(url + (url.includes('?') ? '&' : '?') + 'doc=zlib');
+    // The document comes compressed (about a tenth of its JSON), the page
+    // being shown first and the others after it, and the engine unpacks it
+    // without the page parsing it first.
+    const page = this.loadedOnce ? this.engine.current_page() : '';
+    const params = 'doc=zlib&pages=stream' + (page ? '&page=' + encodeURIComponent(page) : '');
+    const ws = new WebSocket(url + (url.includes('?') ? '&' : '?') + params);
     ws.binaryType = 'arraybuffer';
     this.socket = ws;
-    this.pendingInit = null;
-    this.held = [];
+    this.resetInbox();
     ws.onmessage = (ev) => {
-      if (ev.data instanceof ArrayBuffer) this.handleDoc(new Uint8Array(ev.data));
-      else if (typeof ev.data === 'string') this.handleMessage(ev.data);
+      if (this.socket !== ws) return;
+      if (ev.data instanceof ArrayBuffer) this.receive(new Uint8Array(ev.data));
+      else if (typeof ev.data === 'string') this.receive(ev.data);
     };
     ws.onclose = () => {
       if (this.socket !== ws) return;
       this.socket = null;
-      this.pendingInit = null;
-      this.held = [];
+      this.resetInbox();
       this.status = 'offline';
       this.activeAt.clear();
       this.setPeers([]);
@@ -326,12 +337,56 @@ export class EditorStore {
     this.poll();
   }
 
-  /** The document frame after an `init` with `docFrame: "zlib"`. */
+  private resetInbox() {
+    this.pendingInit = null;
+    this.held = [];
+    this.inbox = [];
+    this.pagesLeft = 0;
+  }
+
+  private receive(m: string | Uint8Array) {
+    this.inbox.push(m);
+    if (!this.draining) this.drain();
+  }
+
+  /** Handle socket messages in order. After each page that streams in, let
+   * the browser draw before merging the next one. */
+  private drain() {
+    this.draining = true;
+    while (this.inbox.length) {
+      const m = this.inbox.shift()!;
+      if (typeof m === 'string') {
+        this.handleMessage(m);
+        continue;
+      }
+      this.handleDoc(m);
+      if (this.inbox.length) {
+        window.setTimeout(() => this.drain(), 0);
+        return;
+      }
+    }
+    this.draining = false;
+  }
+
+  /** A document frame: after an `init` with `docFrame: "zlib"` the document
+   * (or, with `parts`, its first part), then the other pages one by one. */
   private handleDoc(data: Uint8Array) {
     const init = this.pendingInit;
-    if (!init) return;
+    if (!init) {
+      if (this.pagesLeft > 0) {
+        this.pagesLeft--;
+        this.engine.merge_zlib(data);
+        this.poll();
+      }
+      return;
+    }
     this.pendingInit = null;
-    this.start(init, (canEdit) => this.engine.load_zlib(data, String(init.clientId), canEdit));
+    const parts = Number(init.parts ?? 1);
+    this.start(init, (canEdit) => {
+      this.engine.load_zlib(data, String(init.clientId), canEdit);
+      if (parts > 1) this.engine.begin_stream(String(init.page));
+    });
+    this.pagesLeft = parts - 1;
     const held = this.held;
     this.held = [];
     for (const raw of held) this.handleMessage(raw);

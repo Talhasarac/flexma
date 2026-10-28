@@ -235,6 +235,18 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'design';
     "#,
+    // 11: documents stored in parts (see flexma_doc::parts and doc_store), so
+    // a save rewrites only the parts that changed. They are the document
+    // while parts_version equals version; otherwise files.document is.
+    r#"
+    ALTER TABLE files ADD COLUMN parts_version INTEGER;
+    CREATE TABLE file_parts (
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        part TEXT NOT NULL,
+        document TEXT NOT NULL,
+        PRIMARY KEY (file_id, part)
+    );
+    "#,
 ];
 
 impl Db {

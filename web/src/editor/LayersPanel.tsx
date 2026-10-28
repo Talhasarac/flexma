@@ -129,7 +129,7 @@ function PagesSection({ store }: { store: EditorStore }) {
             <li key={p.id}>
               <button
                 type="button"
-                className={`page-item${p.id === current ? ' active' : ''}`}
+                className={`page-item${p.id === current ? ' active' : ''}${p.loading ? ' loading' : ''}`}
                 onClick={() => {
                   engine.set_page(p.id);
                   store.poll();

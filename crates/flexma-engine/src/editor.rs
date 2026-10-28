@@ -63,6 +63,10 @@ pub struct Editor {
     pub guides: Vec<Guide>,
     pub fonts_ready: bool,
     pub needs_measure: HashSet<NodeId>,
+    /// Pages still streaming in after the first part (see `merge_page`).
+    pub pending_pages: HashSet<NodeId>,
+    /// A page asked for before it arrived; shown once it's merged.
+    pub wanted_page: Option<NodeId>,
     pub last_camera_change: f64,
     pub frame_labels: Vec<(NodeId, Rect)>,
     pub drop_target: Option<NodeId>,
@@ -128,6 +132,8 @@ impl Editor {
             guides: vec![],
             fonts_ready: false,
             needs_measure: HashSet::new(),
+            pending_pages: HashSet::new(),
+            wanted_page: None,
             last_camera_change: -1e9,
             frame_labels: vec![],
             drop_target: None,
@@ -174,6 +180,8 @@ impl Editor {
         }
         self.selection.retain(|id| self.doc.contains(id));
         self.loaded = true;
+        self.pending_pages.clear();
+        self.wanted_page = None;
         // Re-apply our edits that the server never acknowledged (reconnect).
         if !unacked.is_empty() && can_edit {
             let mut changed = Vec::new();
@@ -197,6 +205,39 @@ impl Editor {
         });
         self.bump_all();
         Ok(())
+    }
+
+    /// After loading a first part (`flexma_doc::parts::first_part`): the
+    /// other pages stream in through `merge_page`, `first` is here.
+    pub fn begin_stream(&mut self, first: &str) {
+        self.pending_pages = self.doc.pages().into_iter().filter(|p| p != first).collect();
+        self.set_page(first);
+        self.ui_version += 1;
+    }
+
+    /// Merge a page that streamed in after the first part. Its instances
+    /// expand, styles apply and auto layout runs, as when a file loads.
+    pub fn merge_page(&mut self, json: &str) -> Result<NodeId, String> {
+        let part: flexma_doc::parts::PagePart = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let page = part.page;
+        let mut changed = self.doc.merge_nodes(part.nodes);
+        let synced = components::sync_instances(&mut self.doc, &changed, &[]);
+        changed.extend(synced);
+        let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
+        changed.extend(styled);
+        layout::relayout(&mut self.doc, &changed);
+        self.doc.clear_fresh();
+        for id in &changed {
+            if self.doc.get(id).is_some_and(|n| n.kind == NodeType::Text && n.needs_measure) {
+                self.needs_measure.insert(id.clone());
+            }
+        }
+        self.pending_pages.remove(&page);
+        self.bump_all();
+        if self.wanted_page.as_deref() == Some(page.as_str()) {
+            self.set_page(&page);
+        }
+        Ok(page)
     }
 
     pub fn bump_all(&mut self) {
@@ -654,7 +695,7 @@ impl Editor {
             .pages()
             .iter()
             .filter_map(|id| self.doc.get(id))
-            .map(|p| json!({ "id": p.id, "name": p.name }))
+            .map(|p| json!({ "id": p.id, "name": p.name, "loading": self.pending_pages.contains(&p.id) }))
             .collect();
         json!({ "pages": pages, "current": self.scene.page })
     }
@@ -694,6 +735,16 @@ impl Editor {
     }
 
     pub fn set_page(&mut self, page: &str) {
+        if self.pending_pages.contains(page) {
+            // Still streaming in: switch once it's merged.
+            self.wanted_page = Some(page.to_string());
+            self.ui_version += 1;
+            self.dirty = true;
+            return;
+        }
+        if self.wanted_page.take().is_some() {
+            self.ui_version += 1;
+        }
         if self.doc.get(page).map(|n| n.kind) == Some(NodeType::Page) && self.scene.page != page {
             self.scene.page = page.to_string();
             self.scene.dirty = true;

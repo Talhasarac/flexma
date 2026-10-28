@@ -18,6 +18,7 @@ mod auth;
 mod backup;
 mod config;
 mod db;
+mod doc_store;
 mod error;
 mod fonts;
 mod icons;

@@ -89,6 +89,43 @@ impl Document {
         Ok(Document::from_snapshot(snap))
     }
 
+    /// Add or replace nodes, e.g. a page that streamed in after the first
+    /// part. Like loading, a node is inserted once its parent is there, and
+    /// one whose parent never arrives is dropped. Returns the ids merged.
+    pub fn merge_nodes(&mut self, nodes: Vec<Node>) -> Vec<NodeId> {
+        let mut merged = Vec::with_capacity(nodes.len());
+        let mut pending = Vec::new();
+        for n in nodes {
+            if n.id == ROOT_ID {
+                continue;
+            }
+            if self.nodes.contains_key(&n.id) {
+                merged.push(n.id.clone());
+                self.replace_unchecked(n);
+            } else {
+                pending.push(n);
+            }
+        }
+        loop {
+            let before = pending.len();
+            let mut rest = Vec::new();
+            for n in pending {
+                let ok = n.parent.as_ref().and_then(|p| self.nodes.get(p)).is_some_and(|p| p.kind.is_container());
+                if ok {
+                    merged.push(n.id.clone());
+                    self.insert_unchecked(n);
+                } else {
+                    rest.push(n);
+                }
+            }
+            pending = rest;
+            if pending.is_empty() || pending.len() == before {
+                break;
+            }
+        }
+        merged
+    }
+
     pub fn snapshot(&self) -> DocSnapshot {
         let mut nodes = Vec::with_capacity(self.nodes.len());
         self.walk(ROOT_ID, &mut |n| nodes.push(n.clone()));

@@ -37,6 +37,12 @@ fn parse_ids(json: &str) -> Vec<NodeId> {
     serde_json::from_str(json).unwrap_or_default()
 }
 
+/// A zlib frame from the server as text.
+fn inflate(data: &[u8]) -> Result<String, JsValue> {
+    let raw = miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|e| JsValue::from_str(&format!("couldn't unpack the document: {e:?}")))?;
+    String::from_utf8(raw).map_err(|_| JsValue::from_str("the document isn't UTF-8"))
+}
+
 #[wasm_bindgen]
 pub struct FlexmaEditor {
     ed: Editor,
@@ -83,9 +89,23 @@ impl FlexmaEditor {
     /// Load the document from the zlib frame the server sends after `init`
     /// (`?doc=zlib`), without the page parsing a big JSON string first.
     pub fn load_zlib(&mut self, data: &[u8], client_id: &str, can_edit: bool) -> Result<(), JsValue> {
-        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|e| JsValue::from_str(&format!("couldn't unpack the document: {e:?}")))?;
-        let json = String::from_utf8(raw).map_err(|_| JsValue::from_str("the document isn't UTF-8"))?;
-        self.load(&json, client_id, can_edit)
+        self.load(&inflate(data)?, client_id, can_edit)
+    }
+
+    /// After `load_zlib` of a first part (`&pages=stream`): the other pages
+    /// stream in through `merge_zlib`; `first_page` is the one loaded.
+    pub fn begin_stream(&mut self, first_page: &str) {
+        self.ed.begin_stream(first_page);
+    }
+
+    /// Merge a page that streamed in (a zlib frame); returns its id.
+    pub fn merge_zlib(&mut self, data: &[u8]) -> Result<String, JsValue> {
+        self.ed.merge_page(&inflate(data)?).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// The page someone switched to that hasn't arrived yet ("" if none).
+    pub fn waiting_for_page(&self) -> String {
+        self.ed.wanted_page.clone().unwrap_or_default()
     }
 
     pub fn set_asset_base(&mut self, base: &str) {

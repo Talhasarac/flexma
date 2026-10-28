@@ -42,11 +42,20 @@ pub struct SocketQuery {
     /// `zlib`: send the document as its own compressed frame after `init`.
     #[serde(default)]
     doc: Option<String>,
+    /// `stream`: send it page by page, `page` first.
+    #[serde(default)]
+    pages: Option<String>,
+    #[serde(default)]
+    page: Option<String>,
 }
 
 impl SocketQuery {
     fn doc_frame(&self) -> bool {
         self.doc.as_deref() == Some("zlib")
+    }
+
+    fn stream_pages(&self) -> Option<Option<String>> {
+        (self.doc_frame() && self.pages.as_deref() == Some("stream")).then(|| self.page.clone().filter(|p| p.len() <= 64))
     }
 }
 
@@ -83,7 +92,7 @@ pub async fn handler(
     let (_, _, role) = st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer)).await?;
     let room = st.rooms.get(&file_id).await?;
     Ok(ws.max_message_size(64 * 1024 * 1024).on_upgrade(move |socket| async move {
-        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, credential, doc_frame: q.doc_frame() };
+        let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, credential, doc_frame: q.doc_frame(), stream_pages: q.stream_pages() };
         run(socket, room, info).await;
     }))
 }
@@ -106,6 +115,7 @@ pub async fn share_handler(
             role: Role::Viewer,
             credential: Credential::Share(token),
             doc_frame: q.doc_frame(),
+            stream_pages: q.stream_pages(),
         };
         run(socket, room, info).await;
     }))

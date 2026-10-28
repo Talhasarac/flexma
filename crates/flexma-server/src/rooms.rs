@@ -47,6 +47,8 @@ impl std::fmt::Display for Msg {
 /// Bounded per-client outbound queue. A client that falls this far behind is
 /// disconnected and will resync from a fresh snapshot on reconnect.
 pub const CLIENT_QUEUE: usize = 2048;
+/// Files with more pages than this load whole (each page is a frame in the queue).
+const MAX_STREAMED_PAGES: usize = 256;
 const SAVE_EVERY: Duration = Duration::from_secs(2);
 const IDLE_CLOSE_SECS: i64 = 90;
 const AGENT_PRESENCE_TTL: Duration = Duration::from_secs(12);
@@ -93,6 +95,9 @@ pub struct JoinInfo {
     /// The client takes the document as its own zlib frame after `init`
     /// (`?doc=zlib`); older clients get it inside `init`.
     pub doc_frame: bool,
+    /// With `doc_frame`: the client takes the document page by page
+    /// (`&pages=stream`), this page first (`&page=`, else the first page).
+    pub stream_pages: Option<Option<String>>,
 }
 
 /// What a socket signed in with. The room re-checks it when access changes,
@@ -585,20 +590,17 @@ impl Rooms {
             }
         }
         let fid = file_id.to_string();
-        let loaded: Option<(String, i64, u64)> = self
+        let loaded = self
             .db
-            .call(move |c| {
-                let row: Option<(String, i64)> = c
-                    .query_row("SELECT document, version FROM files WHERE id = ?1", params![fid], |r| Ok((r.get(0)?, r.get(1)?)))
-                    .optional()?;
-                match row {
-                    Some((doc, version)) => Ok(Some((doc, version, crate::paint::last_seq(c, &fid)?))),
-                    None => Ok(None),
-                }
+            .call(move |c| match crate::doc_store::read(c, &fid)? {
+                Some(stored) => Ok(Some((stored, crate::paint::last_seq(c, &fid)?))),
+                None => Ok(None),
             })
             .await?;
-        let (json, version, paint_seq) = loaded.ok_or_else(|| AppError::not_found("file"))?;
-        let mut doc = Document::from_json(&json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
+        let (stored, paint_seq) = loaded.ok_or_else(|| AppError::not_found("file"))?;
+        let version = stored.version;
+        let part_hashes = stored.parts.iter().map(|(name, json)| (name.clone(), hash_str(json))).collect();
+        let mut doc = Document::from_json(&stored.json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
         components::sync_all(&mut doc);
         flexma_doc::styles::sync_all(&mut doc);
         layout::relayout_all(&mut doc);
@@ -624,6 +626,8 @@ impl Rooms {
             stroke_authors: HashMap::new(),
             db: self.db.clone(),
             stats: stats.clone(),
+            part_hashes,
+            saved_parts: false,
         };
         tokio::spawn(room.run(rx));
         let h = RoomHandle { tx, stats };
@@ -655,6 +659,20 @@ struct Room {
     stroke_authors: HashMap<String, String>,
     db: Db,
     stats: Arc<Stats>,
+    /// Hashes of the stored parts (see `doc_store`): a save writes only the
+    /// parts whose JSON changed.
+    part_hashes: HashMap<String, u64>,
+    /// This room saved parts, so on closing it stores the whole document too.
+    saved_parts: bool,
+}
+
+/// A part's JSON fingerprint, to tell which parts a save must write (kept
+/// in memory only).
+fn hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
 }
 
 fn msg(v: Value) -> Msg {
@@ -667,10 +685,12 @@ impl Room {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK_EVERY, RECHECK_EVERY);
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut discarded = false;
         loop {
             tokio::select! {
                 cmd = rx.recv() => match cmd {
                     Some(Cmd::Shutdown { notify, discard }) => {
+                        discarded = discard;
                         if discard {
                             self.dirty = false;
                         }
@@ -716,6 +736,14 @@ impl Room {
         if self.dirty {
             self.save().await;
         }
+        // Servers from before parts read files.document: keep it current, once
+        // per session rather than on every save.
+        if self.saved_parts && !discarded {
+            let (fid, json, version) = (self.file_id.clone(), self.doc.to_json(), self.version as i64);
+            if let Err(e) = self.db.call(move |c| Ok(crate::doc_store::write_whole(c, &fid, &json, version)?)).await {
+                tracing::error!("storing {} whole failed: {}", self.file_id, e.message);
+            }
+        }
         tracing::debug!("room {} closed", self.file_id);
     }
 
@@ -753,14 +781,30 @@ impl Room {
                 });
                 // The document is most of what a client downloads on open: as
                 // its own frame it goes compressed (about a tenth of the size).
-                let doc = if info.doc_frame {
-                    init["docFrame"] = json!("zlib");
-                    Some(Msg::Doc(Arc::from(self.doc.to_json())))
-                } else {
+                let frames = if !info.doc_frame {
                     init["doc"] = json!(self.doc.snapshot());
-                    None
+                    Vec::new()
+                } else if let Some(first) = info.stream_pages.filter(|_| self.doc.pages().len() <= MAX_STREAMED_PAGES) {
+                    // The page they open (with what every page needs) comes
+                    // first and shows at once; the other pages follow. All are
+                    // queued now, so no ops come between them.
+                    let pages = self.doc.pages();
+                    let first = first.filter(|p| pages.contains(p)).unwrap_or_else(|| pages[0].clone());
+                    let parts = flexma_doc::parts::split(&self.doc);
+                    let head = flexma_doc::parts::first_part(&self.doc, &parts, &first);
+                    let mut frames = vec![Msg::Doc(Arc::from(format!(r#"{{"nodes":{}}}"#, flexma_doc::parts::to_json(&head))))];
+                    for (page, nodes) in parts.pages.iter().filter(|(p, _)| *p != first) {
+                        frames.push(Msg::Doc(Arc::from(flexma_doc::parts::page_part_json(page, nodes))));
+                    }
+                    init["docFrame"] = json!("zlib");
+                    init["page"] = json!(first);
+                    init["parts"] = json!(frames.len());
+                    frames
+                } else {
+                    init["docFrame"] = json!("zlib");
+                    vec![Msg::Doc(Arc::from(self.doc.to_json()))]
                 };
-                if out.try_send(msg(init)).is_err() || doc.is_some_and(|d| out.try_send(d).is_err()) {
+                if out.try_send(msg(init)).is_err() || frames.into_iter().any(|f| out.try_send(f).is_err()) {
                     return;
                 }
                 self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
@@ -1114,18 +1158,21 @@ impl Room {
     }
 
     async fn save(&mut self) {
-        let json = self.doc.to_json();
         let version = self.version as i64;
         let fid = self.file_id.clone();
+        // Every part's JSON; only those that differ from what's stored are written.
+        let parts: Vec<(String, String)> = flexma_doc::parts::split(&self.doc).named().map(|(name, nodes)| (name.to_string(), flexma_doc::parts::to_json(nodes))).collect();
+        let hashes: HashMap<String, u64> = parts.iter().map(|(name, json)| (name.clone(), hash_str(json))).collect();
+        let changed: Vec<bool> = parts.iter().map(|(name, _)| self.part_hashes.get(name) != hashes.get(name)).collect();
         let res = self
             .db
             .call(move |c| {
-                c.execute(
-                    "UPDATE files SET document = ?1, version = ?2, updated_at = ?3 WHERE id = ?4",
-                    params![json, version, now(), fid],
-                )?;
+                let tx = c.transaction()?;
+                let write: Vec<(&str, &str)> = parts.iter().zip(&changed).filter(|(_, ch)| **ch).map(|((name, json), _)| (name.as_str(), json.as_str())).collect();
+                let all: Vec<&str> = parts.iter().map(|(name, _)| name.as_str()).collect();
+                crate::doc_store::write_parts(&tx, &fid, version, &write, &all)?;
                 // Automatic version history: keep a snapshot at most every 15 minutes of editing.
-                let last: Option<i64> = c
+                let last: Option<i64> = tx
                     .query_row(
                         "SELECT MAX(created_at) FROM file_versions WHERE file_id = ?1 AND label IS NULL",
                         params![fid],
@@ -1134,23 +1181,29 @@ impl Room {
                     .optional()?
                     .flatten();
                 if last.map(|t| now() - t >= AUTO_VERSION_SECS).unwrap_or(true) {
-                    c.execute(
+                    let json = flexma_doc::parts::assemble(parts.iter().map(|(_, json)| json.as_str()));
+                    tx.execute(
                         "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at)
                          VALUES (?1, ?2, NULL, ?3, ?4, NULL, ?5)",
                         params![crate::db::new_id(), fid, json, version, now()],
                     )?;
                     // Keep the newest 200 automatic versions.
-                    c.execute(
+                    tx.execute(
                         "DELETE FROM file_versions WHERE file_id = ?1 AND label IS NULL AND id NOT IN
                          (SELECT id FROM file_versions WHERE file_id = ?1 AND label IS NULL ORDER BY created_at DESC LIMIT 200)",
                         params![fid],
                     )?;
                 }
+                tx.commit()?;
                 Ok(())
             })
             .await;
         match res {
-            Ok(()) => self.dirty = false,
+            Ok(()) => {
+                self.dirty = false;
+                self.part_hashes = hashes;
+                self.saved_parts = true;
+            }
             Err(e) => tracing::error!("saving {} failed: {}", self.file_id, e.message),
         }
     }
@@ -1226,10 +1279,107 @@ mod access_tests {
     /// Join the room for "f" as "u"; returns the socket's outbound queue.
     async fn join(rooms: &Rooms, role: Role) -> mpsc::Receiver<Msg> {
         let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
-        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role, credential: Credential::Session(sha256_hex("s")), doc_frame: false };
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role, credential: Credential::Session(sha256_hex("s")), doc_frame: false, stream_pages: None };
         rooms.get("f").await.unwrap().join(info, out).await.unwrap();
         assert!(rx.recv().await.unwrap().contains(r#""t":"init""#));
         rx
+    }
+
+    /// Rooms save documents in parts and write only the parts that changed;
+    /// closing stores the whole document too, and a file saved whole later
+    /// (by an older server) is read whole again.
+    #[tokio::test]
+    async fn documents_are_saved_in_parts() {
+        let (db, dir) = setup("parts").await;
+        sql(
+            &db,
+            "CREATE TABLE part_writes (part TEXT);
+             CREATE TRIGGER part_insert AFTER INSERT ON file_parts BEGIN INSERT INTO part_writes VALUES (NEW.part); END;
+             CREATE TRIGGER part_update AFTER UPDATE ON file_parts BEGIN INSERT INTO part_writes VALUES (NEW.part); END;",
+        )
+        .await;
+        let writes = |db: &Db| {
+            let db = db.clone();
+            async move {
+                db.call(|c| {
+                    let w: Vec<String> = c.prepare("SELECT part FROM part_writes ORDER BY part")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+                    c.execute("DELETE FROM part_writes", [])?;
+                    Ok(w)
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let node = |id: &str, kind: flexma_doc::NodeType, parent: &str, name: &str| {
+            let mut n = flexma_doc::Node::new(id, kind);
+            n.parent = Some(parent.into());
+            n.name = name.into();
+            n.index = id.into();
+            Op::Create { node: n }
+        };
+        let rooms = Rooms::new(db.clone());
+        let room = rooms.get("f").await.unwrap();
+        let (out, _rx) = mpsc::channel(CLIENT_QUEUE);
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: false, stream_pages: None };
+        let me = room.join(info, out).await.unwrap();
+        use flexma_doc::NodeType::{Frame, Page};
+        room.client_ops(me.clone(), 1, vec![node("p:2", Page, flexma_doc::ROOT_ID, "Two"), node("a:1", Frame, "0:1", "A"), node("b:1", Frame, "p:2", "B")]).await;
+        room.flush().await.unwrap();
+        // The first save writes every part.
+        assert_eq!(writes(&db).await, ["0:1", "p:2", "shared"]);
+        // A change on page two writes page two only.
+        room.client_ops(me.clone(), 2, vec![Op::update1("b:1", "name", json!("B2"))]).await;
+        room.flush().await.unwrap();
+        assert_eq!(writes(&db).await, ["p:2"]);
+        let (version, parts_version): (i64, Option<i64>) = db.call(|c| Ok(c.query_row("SELECT version, parts_version FROM files WHERE id = 'f'", [], |r| Ok((r.get(0)?, r.get(1)?)))?)).await.unwrap();
+        assert_eq!(Some(version), parts_version);
+        // Reopened from its parts; closing stored it whole as well.
+        rooms.shutdown_all().await;
+        let whole: String = db.call(|c| Ok(c.query_row("SELECT document FROM files WHERE id = 'f'", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(Document::from_json(&whole).unwrap().get("b:1").map(|n| n.name.clone()), Some("B2".into()));
+        let rooms = Rooms::new(db.clone());
+        let name = rooms.get("f").await.unwrap().read(|d, _| d.get("b:1").map(|n| n.name.clone())).await.unwrap();
+        assert_eq!(name.as_deref(), Some("B2"));
+        rooms.shutdown_all().await;
+        // An older server saves it whole (its version moves past the parts).
+        let older = Document::new_empty().to_json();
+        db.call(move |c| Ok(c.execute("UPDATE files SET document = ?1, version = version + 1 WHERE id = 'f'", params![older])?)).await.unwrap();
+        let rooms = Rooms::new(db.clone());
+        let has = rooms.get("f").await.unwrap().read(|d, _| d.contains("b:1")).await.unwrap();
+        assert!(!has, "the whole document wins over older parts");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With `&pages=stream`, the page asked for comes first (with what every
+    /// page needs) and the other pages follow, one frame each.
+    #[tokio::test]
+    async fn pages_can_stream_in_after_the_first() {
+        let (db, dir) = setup("stream").await;
+        let rooms = Rooms::new(db.clone());
+        let room = rooms.get("f").await.unwrap();
+        let (out, _rx) = mpsc::channel(CLIENT_QUEUE);
+        let info = |stream_pages| JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: true, stream_pages };
+        let me = room.join(info(None), out).await.unwrap();
+        let mut page2 = flexma_doc::Node::new("p:2", flexma_doc::NodeType::Page);
+        page2.parent = Some(flexma_doc::ROOT_ID.into());
+        page2.index = "b".into();
+        let mut a = flexma_doc::Node::new("a:1", flexma_doc::NodeType::Frame);
+        a.parent = Some("0:1".into());
+        let mut b = flexma_doc::Node::new("b:1", flexma_doc::NodeType::Frame);
+        b.parent = Some("p:2".into());
+        room.client_ops(me, 1, vec![Op::Create { node: page2 }, Op::Create { node: a }, Op::Create { node: b }]).await;
+        let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
+        room.join(info(Some(Some("p:2".into()))), out).await.unwrap();
+        let init: Value = serde_json::from_str(&next(&mut rx).await.unwrap()).unwrap();
+        assert_eq!((init["page"].as_str(), init["parts"].as_u64()), (Some("p:2"), Some(2)));
+        let Some(Msg::Doc(first)) = next(&mut rx).await else { panic!("the first part") };
+        let first = Document::from_json(&first).unwrap();
+        assert!(first.contains("b:1") && !first.contains("a:1") && first.contains("0:1"), "page two, and every page in the list");
+        let Some(Msg::Doc(rest)) = next(&mut rx).await else { panic!("page one") };
+        let part: flexma_doc::parts::PagePart = serde_json::from_str(&rest).unwrap();
+        assert_eq!(part.page, "0:1");
+        assert_eq!(part.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["a:1"]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// With `?doc=zlib`, `init` leaves the document out and it follows as
@@ -1239,7 +1389,7 @@ mod access_tests {
         let (db, dir) = setup("docframe").await;
         let rooms = Rooms::new(db.clone());
         let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
-        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: true };
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: true, stream_pages: None };
         rooms.get("f").await.unwrap().join(info, out).await.unwrap();
         let init: Value = serde_json::from_str(&next(&mut rx).await.unwrap()).unwrap();
         assert_eq!(init["t"], "init");

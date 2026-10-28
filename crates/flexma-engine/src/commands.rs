@@ -874,7 +874,8 @@ impl Editor {
 
     /// Delete a style; layers using it keep their look but are unlinked.
     pub fn delete_style(&mut self, style_id: &str) {
-        if !self.can_edit || self.doc.get(style_id).map(|n| n.kind != NodeType::Style).unwrap_or(true) {
+        // It unlinks layers on every page: wait until they've all arrived.
+        if !self.can_edit || !self.pending_pages.is_empty() || self.doc.get(style_id).map(|n| n.kind != NodeType::Style).unwrap_or(true) {
             return;
         }
         let mut ops = Vec::new();
@@ -988,7 +989,7 @@ impl Editor {
     /// Swap one font family for another everywhere in the file, as one undo
     /// step. Returns how many text layers changed.
     pub fn replace_font(&mut self, from: &str, to: &str) -> usize {
-        if !self.can_edit || from == to || to.trim().is_empty() {
+        if !self.can_edit || !self.pending_pages.is_empty() || from == to || to.trim().is_empty() {
             return 0;
         }
         let ids: Vec<NodeId> = self
@@ -1048,6 +1049,9 @@ impl Editor {
     }
 
     pub fn duplicate_page(&mut self, page: &str) -> Option<NodeId> {
+        if self.pending_pages.contains(page) {
+            return None;
+        }
         let src = self.doc.get(page)?.clone();
         let mut nodes = Vec::new();
         self.doc.walk(page, &mut |n| nodes.push(n.clone()));

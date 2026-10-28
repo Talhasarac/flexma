@@ -13,7 +13,7 @@ import type { LayerNode } from './types';
 import { CommentsPanel } from './CommentsLayer';
 import { Canvas } from './Canvas';
 import { Toolbar } from './Toolbar';
-import { FollowFrame, TopBar } from './TopBar';
+import { FollowFrame, PageLoading, TopBar } from './TopBar';
 import { LayersPanel } from './LayersPanel';
 import { PropertiesPanel } from './PropertiesPanel';
 import './editor.css';
@@ -225,6 +225,7 @@ export function Editor({ store, canvas, header, footer }: { store: EditorStore; 
         <main className="editor-center">
           <Canvas store={store} canvas={canvas} onContextMenu={onContextMenu} onDropFiles={onDropFiles} />
           <FollowFrame store={store} />
+          <PageLoading store={store} />
           <Toolbar store={store} />
           {footer}
         </main>

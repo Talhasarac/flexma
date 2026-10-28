@@ -114,6 +114,8 @@ export type StyleKind = 'fill' | 'stroke' | 'text';
 export interface PageInfo {
   id: string;
   name: string;
+  /** Still streaming in after the page that opened first. */
+  loading?: boolean;
 }
 
 export interface GradientStop {

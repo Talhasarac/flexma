@@ -294,7 +294,7 @@ pub async fn thumbnail_response(st: &AppState, file_id: &str) -> AppResult<Respo
         return Ok(thumbnail_image(cached));
     }
     let fid = file_id.to_string();
-    let doc: String = st.db.call(move |c| Ok(c.query_row("SELECT document FROM files WHERE id = ?1", params![fid], |r| r.get(0))?)).await?;
+    let doc: String = st.db.call(move |c| crate::doc_store::read_json(c, &fid)).await?;
     let png = render_thumbnail(st, file_id, &ws, doc).await?;
     let (fid, stored) = (file_id.to_string(), png.clone());
     st.db

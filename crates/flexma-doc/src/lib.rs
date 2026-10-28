@@ -24,6 +24,7 @@ pub mod layout;
 pub mod node;
 pub mod ops;
 pub mod paint;
+pub mod parts;
 pub mod path;
 pub mod raster;
 pub mod styles;

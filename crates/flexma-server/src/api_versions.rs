@@ -63,10 +63,10 @@ pub async fn create(
     let vid2 = vid.clone();
     st.db
         .call(move |c| {
+            let stored = crate::doc_store::read(c, &id)?.ok_or_else(|| AppError::not_found("file"))?;
             c.execute(
-                "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at)
-                 SELECT ?1, id, ?2, document, version, ?3, ?4 FROM files WHERE id = ?5",
-                params![vid2, label, user.id, now(), id],
+                "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![vid2, id, label, stored.json, stored.version, user.id, now()],
             )?;
             Ok(())
         })
@@ -121,10 +121,10 @@ pub async fn restore(State(st): State<AppState>, user: AuthUser, Path((id, vid))
                 .optional()?
                 .ok_or_else(|| AppError::not_found("version"))?;
             Document::from_json(&doc).map_err(|e| AppError::internal(format!("corrupt version: {e}")))?;
+            let current = crate::doc_store::read(&tx, &fid)?.ok_or_else(|| AppError::not_found("file"))?;
             tx.execute(
-                "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at)
-                 SELECT ?1, id, 'Before restore', document, version, ?2, ?3 FROM files WHERE id = ?4",
-                params![new_id(), uid, now(), fid],
+                "INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at) VALUES (?1, ?2, 'Before restore', ?3, ?4, ?5, ?6)",
+                params![new_id(), fid, current.json, current.version, uid, now()],
             )?;
             tx.execute(
                 "UPDATE files SET document = ?1, version = version + 1, thumbnail = NULL, updated_at = ?2 WHERE id = ?3",

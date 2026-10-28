@@ -170,6 +170,13 @@ export function Presence({ store, self }: { store: EditorStore; self: { name: st
 
 /** While following someone: a frame in their color around the canvas, with
  * their name and a way out (Stop or Esc; panning or zooming also stops). */
+/** Shown while a page someone switched to is still streaming in. */
+export function PageLoading({ store }: { store: EditorStore }) {
+  const ui = useUi(store);
+  if (!ui.loadingPage) return null;
+  return <div className="page-loading">Loading page…</div>;
+}
+
 export function FollowFrame({ store }: { store: EditorStore }) {
   const following = useFollowing(store);
   const peers = usePeers(store);
