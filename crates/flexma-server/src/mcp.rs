@@ -1246,6 +1246,19 @@ impl Ctx {
                         }
                     }
                 }
+                // Instance swap: show another component.
+                if node.kind == NodeType::Instance {
+                    if let Some(c) = ["component", "componentId", "of"].iter().find_map(|k| raw.remove(*k)) {
+                        // The component it sits in can't be swapped into it.
+                        let within = match flexma_doc::components::owner_of(id) {
+                            Some((owner, _)) => tx.doc.get(owner).and_then(|o| o.component_id.clone()),
+                            None => tx.doc.ancestors(id).into_iter().find(|a| tx.doc.get(a).is_some_and(|n| n.kind == NodeType::Component)),
+                        }
+                        .unwrap_or_default();
+                        let cid = flexma_doc::friendly::swap_target(tx.doc, &within, &c).map_err(|e| format!("{id}: {e}"))?;
+                        raw.insert("componentId".into(), json!(cid));
+                    }
+                }
                 // Overrides as in create_nodes, merged per layer (null clears a layer's).
                 if let (Some(Value::Object(ov)), Some(cid)) = (raw.get("overrides").cloned(), node.component_id.clone().filter(|_| node.kind == NodeType::Instance)) {
                     let mut merged = node.overrides.clone();

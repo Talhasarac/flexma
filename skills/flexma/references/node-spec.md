@@ -165,6 +165,7 @@ For a fixed box, like a TextMeshPro rect, give `width` and `height` plus an `ove
   - `text`: shorthand that overrides the component's first text layer.
   - `overrides`: `{ "<layer id, key or name>": { …props } }`. A layer's `key` is unambiguous where names repeat (e.g. several "Text (TMP)" layers), and it reaches layers inside nested instances too. The key `""` targets the instance itself, though setting props directly on the instance does the same.
   - Geometry overrides (`x`, `y`, `width`, `height`) on inner layers win over their constraints when the instance is resized.
+  - Instance swap: `{ "<nested instance>": { "component": "Icons/Star" } }` shows another component in a nested instance's place (an icon in a nav item). It keeps following that component. In `update_nodes`, set `component` on the nested instance's id (`instanceId~layerId`) or on any instance.
   - Any frame prop (`fill`, `radius`, `padding`, `layout`, …) set on the instance overrides the component's value. Unset props follow the component.
   - `component`: the main component's id, `key` or name. It can be one made earlier in the same batch.
   - An instance can't have `children`. Its layers come from the component, and their ids look like `<instanceId>~<componentLayerId>`. Nested instances use `I~N~S`.

@@ -504,6 +504,19 @@ fn stretch_children(spec: &Value) -> Option<Value> {
     Some(Value::Object(out))
 }
 
+/// The component to swap in, by id, key or name; it can't contain `within`
+/// (the component being swapped inside), which would nest it in itself.
+pub fn swap_target(doc: &Document, within: &str, v: &Value) -> Result<String, String> {
+    let name = v.as_str().ok_or("component must be a component's id, key or name")?;
+    let id = find_component(doc, name).ok_or_else(|| format!("no component '{name}' in this file"))?;
+    let mut nested_in_it = false;
+    doc.walk(&id, &mut |n| nested_in_it |= n.id == within || n.component_id.as_deref() == Some(within));
+    if nested_in_it {
+        return Err(format!("'{name}' contains this component, so it can't go inside it"));
+    }
+    Ok(id)
+}
+
 /// One `overrides` entry of an instance of component `cid`: the layer (its
 /// id, key or name) as an override key, and its props as written in a node
 /// spec (friendly names, style names) in canonical form.
@@ -513,6 +526,13 @@ pub fn normalize_override(doc: &Document, cid: &str, layer: &str, props: &Value)
     let target_kind = if key.is_empty() { NodeType::Instance } else { doc.get(&key).map(|n| n.kind).unwrap_or(NodeType::Rectangle) };
     let mut raw = props.as_object().ok_or_else(|| format!("override for '{layer}' must be an object"))?.clone();
     crate::styles::resolve_refs(doc, &mut raw)?;
+    // Instance swap: a nested instance shows another component.
+    if let Some(c) = ["component", "componentId", "of"].iter().find_map(|k| raw.remove(*k)) {
+        if target_kind != NodeType::Instance {
+            return Err(format!("'{layer}' isn't an instance, so it can't swap its component"));
+        }
+        raw.insert("componentId".into(), Value::String(swap_target(doc, cid, &c)?));
+    }
     let mut norm = normalize_props(target_kind, &raw)?;
     if target_kind == NodeType::Text && norm.contains_key("characters") {
         norm.insert("needsMeasure".into(), Value::Bool(true));
@@ -977,6 +997,44 @@ mod tests {
         doc.apply(&crate::ops::Op::update1(q.clone(), "height", json!(20))).unwrap();
         crate::layout::relayout(&mut doc, &[q]);
         assert_eq!(get(&doc, "Cell").height, 20.0);
+    }
+
+    /// Instance swap: an override points a nested instance at another
+    /// component, which keeps following that component.
+    #[test]
+    fn instance_swap() {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("w:{n}")
+        };
+        let spec = json!([
+            { "type": "component", "name": "Icons/Home", "w": 16, "h": 16, "children": [{ "type": "rect", "name": "Glyph", "w": 16, "h": 16, "fill": "#000000" }] },
+            { "type": "component", "name": "Icons/Star", "w": 16, "h": 16, "children": [{ "type": "ellipse", "name": "Glyph", "w": 16, "h": 16, "fill": "#ffcc00" }] },
+            { "type": "component", "name": "Nav item", "layout": "horizontal", "gap": 8, "children": [
+                { "type": "instance", "name": "Icon", "component": "Icons/Home" },
+                { "type": "text", "name": "Label", "text": "Home" } ] },
+            { "type": "instance", "component": "Nav item", "overrides": { "Icon": { "component": "Icons/Star" }, "Label": { "text": "Favorites" } } }
+        ]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        crate::components::sync_all(&mut doc);
+        // Derived layers (walk skips them).
+        fn find(doc: &Document, id: &str, name: &str) -> Option<Node> {
+            doc.children(id).iter().find_map(|c| doc.get(c).filter(|n| n.name == name).cloned().or_else(|| find(doc, c, name)))
+        }
+        let glyph = |doc: &Document| find(doc, &top[3], "Glyph").map(|n| (n.kind, n.fills.first().map(|p| p.approx_color().to_hex())));
+        assert_eq!(glyph(&doc), Some((NodeType::Ellipse, Some("#ffcc00".into()))));
+        // Editing the swapped-in component updates the instance.
+        let star = doc.children(&top[1])[0].clone();
+        let (eff, _) = doc.apply_all(&[Op::update1(star, "fills", json!([{ "type": "SOLID", "color": "#ff0000" }]))]);
+        crate::components::sync_instances(&mut doc, &eff.changed, &[]);
+        assert_eq!(glyph(&doc), Some((NodeType::Ellipse, Some("#ff0000".into()))));
+        // A component can't be swapped into itself.
+        let bad = json!([{ "type": "instance", "component": "Nav item", "overrides": { "Icon": { "component": "Nav item" } } }]);
+        assert!(build_create_ops(&doc, "0:1", bad.as_array().unwrap(), None, &mut || "x:1".into()).is_err());
     }
 
     /// Overrides take what node specs take, style names included.

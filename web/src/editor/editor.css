@@ -133,6 +133,18 @@
 .follow-label button:hover {
   background: rgb(0 0 0 / 0.4);
 }
+.swap-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+.swap-select .prop-select {
+  flex: 1;
+  min-width: 0;
+}
 .presence-more {
   color: var(--text-muted);
   font-size: var(--font-size-xs);

@@ -130,6 +130,14 @@ pub fn sync_instances(doc: &mut Document, changed: &[NodeId], removed: &[NodeId]
     if all_instances.is_empty() {
         return Vec::new();
     }
+    // Components swapped in by overrides (instance swap) are used too.
+    let swapped: Vec<(NodeId, Vec<NodeId>)> = all_instances
+        .iter()
+        .filter_map(|(iid, _)| {
+            let used = swapped_components(doc.get(iid)?);
+            (!used.is_empty()).then(|| (iid.clone(), used))
+        })
+        .collect();
     let mut comps: HashSet<NodeId> = HashSet::new();
     let mut targets: Vec<NodeId> = Vec::new();
     for id in changed {
@@ -172,6 +180,11 @@ pub fn sync_instances(doc: &mut Document, changed: &[NodeId], removed: &[NodeId]
             targets.push(iid.clone());
         }
     }
+    for (iid, used) in &swapped {
+        if used.iter().any(|c| comps.contains(c) || removed.contains(c)) {
+            targets.push(iid.clone());
+        }
+    }
     if targets.is_empty() {
         return Vec::new();
     }
@@ -185,6 +198,11 @@ pub fn sync_instances(doc: &mut Document, changed: &[NodeId], removed: &[NodeId]
         expand_instance(doc, &t, &mut out);
     }
     out
+}
+
+/// Components an instance's overrides swap in for nested instances.
+fn swapped_components(inst: &Node) -> Vec<NodeId> {
+    inst.overrides.values().filter_map(|o| o.get("componentId").and_then(Value::as_str).map(str::to_string)).collect()
 }
 
 /// Expand every instance (after loading a document).

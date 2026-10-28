@@ -30,7 +30,7 @@ import { familyWeights, findGoogleFamily, googleCatalogue, WEIGHTS, weightName }
 import { FontPicker } from './FontPicker';
 import { StyleChip, StylePickerButton } from './Styles';
 import { useToast } from '../components/Toast';
-import { useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
+import { useComponents, useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
 import type { ConstraintType, Constraints, EffectValue, FillMethod, FillOrigin, ImageFilled, NineSlice, NodeData, Paint } from './types';
 import { FILL_ORIGINS } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
@@ -268,6 +268,26 @@ function typeLabel(t: NodeData['type']) {
   return t.charAt(0) + t.slice(1).toLowerCase();
 }
 
+/** Instance swap: show another component in this instance's place (inside
+ * an instance it's saved as an override). */
+function SwapSelect({ store, n }: { store: EditorStore; n: NodeData }) {
+  const components = useComponents(store);
+  if (!n.componentId || components.length < 2) return null;
+  return (
+    <label className="swap-select" title="Show another component here">
+      Swap
+      <Select
+        value={n.componentId}
+        options={components.map((c) => ({ value: c.id, label: c.name }))}
+        onChange={(id) => {
+          store.engine.update_nodes(JSON.stringify([{ id: n.id, props: { componentId: id } }]));
+          store.poll();
+        }}
+      />
+    </label>
+  );
+}
+
 /** Component / instance context at the top of the Design panel. */
 function ComponentBanner({ store, sel, readOnly }: { store: EditorStore; sel: NodeData[]; readOnly: boolean }) {
   const e = store.engine;
@@ -329,6 +349,7 @@ function ComponentBanner({ store, sel, readOnly }: { store: EditorStore; sel: No
             </>
           )}
         </div>
+        {!readOnly && <SwapSelect store={store} n={n} />}
       </div>
     );
   }
@@ -338,6 +359,7 @@ function ComponentBanner({ store, sel, readOnly }: { store: EditorStore; sel: No
         <span>
           <b>Inside an instance</b> — changes here are saved as overrides; the rest follows the main component.
         </span>
+        {!readOnly && n.type === 'INSTANCE' && <SwapSelect store={store} n={n} />}
       </div>
     );
   }
