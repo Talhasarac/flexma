@@ -25,6 +25,10 @@ pub struct SvgOptions<'a> {
     /// baseline the way the editor and browsers do. Without it every font is
     /// taken as 0.8em / 0.2em.
     pub font_metrics: Option<&'a dyn Fn(&Node) -> (f64, f64)>,
+    /// A line of text split into runs by font: the family for characters the
+    /// node's font lacks (and emoji), `None` for the node's own font. Without
+    /// it the renderer picks fallbacks itself.
+    pub font_runs: Option<&'a dyn Fn(&Node, &str) -> Vec<(String, Option<String>)>>,
     /// An image with its crop cut out and/or its tint multiplied in, as its
     /// own URL or data URI, if the host can make one. Otherwise crops are
     /// viewports into the whole image (where smoothing can pick up a sliver of
@@ -49,6 +53,7 @@ impl Default for SvgOptions<'_> {
             image_size: &|_| None,
             measure_text: None,
             font_metrics: None,
+            font_runs: None,
             resolve_variant: &|_, _, _| None,
             linear: false,
             paint_tiles: &|_| Vec::new(),
@@ -900,13 +905,17 @@ impl Writer<'_> {
             // Baseline: the font's ascent + descent centred in the line box,
             // like CSS and the editor (`flexma-engine` text.rs).
             let baseline = y0 + lh * i as f64 + (lh - (asc + desc)) / 2.0 + asc;
-            let _ = write!(
-                spans,
-                r#"<tspan x="{}" y="{}" xml:space="preserve">{}</tspan>"#,
-                fmt_num(x),
-                fmt_num(baseline),
-                escape(line)
-            );
+            let content = match self.opts.font_runs {
+                Some(runs) => runs(n, line)
+                    .into_iter()
+                    .map(|(t, family)| match family {
+                        Some(f) => format!(r#"<tspan font-family="'{}'">{}</tspan>"#, escape(&f.replace(['\'', '"', '\\'], "")), escape(&t)),
+                        None => escape(&t),
+                    })
+                    .collect(),
+                None => escape(line),
+            };
+            let _ = write!(spans, r#"<tspan x="{}" y="{}" xml:space="preserve">{content}</tspan>"#, fmt_num(x), fmt_num(baseline));
         }
         // Text outline (stroke): drawn from separate copies so it renders the
         // same everywhere. OUTSIDE sits behind the fill, CENTER on top of it,

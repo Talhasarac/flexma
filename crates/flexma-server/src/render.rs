@@ -45,7 +45,8 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, allowed: &HashSet<String>,
     let measurer = TextMeasurer::new(fonts.clone());
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
     let metrics = |n: &flexma_doc::Node| measurer.metrics(n);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
+    let runs = |n: &flexma_doc::Node, s: &str| measurer.svg_runs(n, s);
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), font_runs: Some(&runs), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear, Some((data_dir, allowed))).ok().map(|(png, _, _)| png)
 }
@@ -136,6 +137,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
     let measurer = fonts.map(|f| TextMeasurer::new(f.clone()));
     let measure = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.measure(n, s)).unwrap_or(0.0);
     let metrics = |n: &flexma_doc::Node| measurer.as_ref().map(|m| m.metrics(n)).unwrap_or((n.font_size * 0.8, n.font_size * 0.2));
+    let runs = |n: &flexma_doc::Node, s: &str| measurer.as_ref().map(|m| m.svg_runs(n, s)).unwrap_or_else(|| vec![(s.to_string(), None)]);
     let opts = SvgOptions {
         padding: 0.0,
         background,
@@ -143,6 +145,7 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         image_size: &size,
         measure_text: if measurer.is_some() { Some(&measure) } else { None },
         font_metrics: if measurer.is_some() { Some(&metrics) } else { None },
+        font_runs: if measurer.is_some() { Some(&runs) } else { None },
         resolve_variant: &variant,
         linear,
         paint_tiles: &|l| paint.tiles(l, inline),
@@ -183,16 +186,131 @@ pub fn encode_linear(pm: &mut resvg::tiny_skia::Pixmap) {
 /// weight and style, shaped like resvg draws them (kerning, ligatures).
 pub struct TextMeasurer {
     db: Arc<FontDb>,
-    faces: std::cell::RefCell<HashMap<(String, u16, bool), Option<resvg::usvg::fontdb::ID>>>,
+    faces: std::cell::RefCell<HashMap<(String, u16, bool), Option<FaceId>>>,
     /// Shaped width per string in em.
-    widths: std::cell::RefCell<HashMap<(resvg::usvg::fontdb::ID, String), f32>>,
+    widths: std::cell::RefCell<HashMap<(FaceId, String), f32>>,
     /// (ascent, descent) per face in em.
-    metrics: std::cell::RefCell<HashMap<resvg::usvg::fontdb::ID, (f32, f32)>>,
+    metrics: std::cell::RefCell<HashMap<FaceId, (f32, f32)>>,
+    /// Whether a face has a character.
+    glyphs: std::cell::RefCell<HashMap<(FaceId, char), bool>>,
+    /// The face that draws a character another face lacks: (face, char, as emoji).
+    fallbacks: std::cell::RefCell<HashMap<(FaceId, char, bool), Option<FaceId>>>,
+}
+
+type FaceId = resvg::usvg::fontdb::ID;
+
+/// The bundled emoji font (see `assets/fonts/twemoji/README.md`).
+const EMOJI_FAMILY: &str = "Twemoji Mozilla";
+
+/// Whether `c` (followed by `next`) shows as a color emoji in browsers:
+/// pictographs, the symbols drawn as emoji by default, and anything with the
+/// emoji variation selector U+FE0F.
+fn is_emoji(c: char, next: Option<char>) -> bool {
+    let u = c as u32;
+    next == Some('\u{fe0f}')
+        || (0x1F000..=0x1FAFF).contains(&u)
+        || matches!(u, 0x231A..=0x231B | 0x23E9..=0x23EC | 0x23F0 | 0x23F3 | 0x25FD..=0x25FE | 0x2614..=0x2615 | 0x2648..=0x2653 | 0x267F | 0x2693 | 0x26A1
+            | 0x26AA..=0x26AB | 0x26BD..=0x26BE | 0x26C4..=0x26C5 | 0x26CE | 0x26D4 | 0x26EA | 0x26F2..=0x26F3 | 0x26F5 | 0x26FA | 0x26FD | 0x2705
+            | 0x270A..=0x270B | 0x2728 | 0x274C | 0x274E | 0x2753..=0x2755 | 0x2757 | 0x2795..=0x2797 | 0x27B0 | 0x27BF | 0x2B1B..=0x2B1C | 0x2B50 | 0x2B55)
+}
+
+/// Characters that belong to the one before them (variation selectors,
+/// joiners, combining marks, skin tones, tags).
+fn joins_previous(c: char) -> bool {
+    matches!(c as u32, 0xFE00..=0xFE0F | 0x200D | 0x20E3 | 0x0300..=0x036F | 0x20D0..=0x20FF | 0x1F3FB..=0x1F3FF | 0xE0020..=0xE007F)
 }
 
 impl TextMeasurer {
     pub fn new(db: Arc<FontDb>) -> TextMeasurer {
-        TextMeasurer { db, faces: Default::default(), widths: Default::default(), metrics: Default::default() }
+        TextMeasurer {
+            db,
+            faces: Default::default(),
+            widths: Default::default(),
+            metrics: Default::default(),
+            glyphs: Default::default(),
+            fallbacks: Default::default(),
+        }
+    }
+
+    fn has_glyph(&self, id: FaceId, c: char) -> bool {
+        if let Some(h) = self.glyphs.borrow().get(&(id, c)) {
+            return *h;
+        }
+        let h = self.db.with_face_data(id, |data, index| ttf_parser::Face::parse(data, index).ok().and_then(|f| f.glyph_index(c)).is_some()).unwrap_or(false);
+        self.glyphs.borrow_mut().insert((id, c), h);
+        h
+    }
+
+    fn query(&self, family: &str, n: &flexma_doc::Node) -> Option<FaceId> {
+        use resvg::usvg::fontdb::{Family, Query, Stretch, Style, Weight};
+        self.db.query(&Query {
+            families: &[Family::Name(family)],
+            weight: Weight(n.font_weight),
+            stretch: Stretch::Normal,
+            style: if n.italic { Style::Italic } else { Style::Normal },
+        })
+    }
+
+    /// The face for a character `primary` lacks (or an emoji): like browsers
+    /// with the editor's font list, Inter first, then the emoji font, then
+    /// any font that has it.
+    fn fallback(&self, primary: FaceId, n: &flexma_doc::Node, c: char, emoji: bool) -> Option<FaceId> {
+        let key = (primary, c, emoji);
+        if let Some(f) = self.fallbacks.borrow().get(&key) {
+            return *f;
+        }
+        let inter = self.query("Inter", n);
+        let color = self.query(EMOJI_FAMILY, n);
+        let order = if emoji { [color, inter] } else { [inter, color] };
+        let found = order
+            .into_iter()
+            .flatten()
+            .find(|id| self.has_glyph(*id, c))
+            .or_else(|| self.db.faces().map(|f| f.id).find(|id| *id != primary && self.has_glyph(*id, c)));
+        self.fallbacks.borrow_mut().insert(key, found);
+        found
+    }
+
+    /// `s` in runs by the face that draws them: the node's face, except for
+    /// characters it lacks and emoji, which come from a fallback face per
+    /// character (not the whole text, as resvg would do on its own).
+    pub fn runs(&self, n: &flexma_doc::Node, s: &str) -> Vec<(String, Option<FaceId>)> {
+        let primary = self.face(n);
+        let chars: Vec<char> = s.chars().collect();
+        let mut out: Vec<(String, Option<FaceId>)> = Vec::new();
+        for (i, &c) in chars.iter().enumerate() {
+            let face = match out.last() {
+                Some((_, f)) if joins_previous(c) => *f,
+                _ => match primary {
+                    Some(p) => {
+                        let emoji = is_emoji(c, chars.get(i + 1).copied());
+                        if !emoji && (c.is_whitespace() || self.has_glyph(p, c)) {
+                            Some(p)
+                        } else {
+                            self.fallback(p, n, c, emoji).or(Some(p))
+                        }
+                    }
+                    None => None,
+                },
+            };
+            match out.last_mut() {
+                Some((t, f)) if *f == face => t.push(c),
+                _ => out.push((c.to_string(), face)),
+            }
+        }
+        out
+    }
+
+    /// The family name a face goes by.
+    pub fn family(&self, id: FaceId) -> Option<String> {
+        self.db.face(id).and_then(|f| f.families.first().map(|(name, _)| name.clone()))
+    }
+
+    /// Runs for an SVG: text with the family of each fallback run (`None`
+    /// for the node's own font).
+    pub fn svg_runs(&self, n: &flexma_doc::Node, s: &str) -> Vec<(String, Option<String>)> {
+        let primary = self.face(n);
+        self.runs(n, s).into_iter().map(|(t, f)| (t, f.filter(|f| Some(*f) != primary).and_then(|f| self.family(f)))).collect()
     }
 
     /// The face's (ascent, descent) in px at the node's size, from the table
@@ -260,24 +378,28 @@ impl TextMeasurer {
     }
 
     pub fn measure(&self, n: &flexma_doc::Node, s: &str) -> f64 {
-        let Some(id) = self.face(n) else {
+        if self.face(n).is_none() {
             return flexma_doc::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight);
-        };
-        let key = (id, s.to_string());
-        let cached = self.widths.borrow().get(&key).copied();
-        let em = match cached {
-            Some(w) => w,
-            None => {
-                let w = self.db.with_face_data(id, |data, index| shaped_width(data, index, s)).flatten();
-                let w = w.unwrap_or_else(|| flexma_doc::text::estimate_width(s, 1.0, 0.0, n.font_weight) as f32);
-                let mut widths = self.widths.borrow_mut();
-                if widths.len() > 20_000 {
-                    widths.clear();
+        }
+        let mut em = 0.0;
+        for (run, face) in self.runs(n, s) {
+            let Some(id) = face else { continue };
+            let key = (id, run);
+            let cached = self.widths.borrow().get(&key).copied();
+            em += match cached {
+                Some(w) => w,
+                None => {
+                    let w = self.db.with_face_data(id, |data, index| shaped_width(data, index, &key.1)).flatten();
+                    let w = w.unwrap_or_else(|| flexma_doc::text::estimate_width(&key.1, 1.0, 0.0, n.font_weight) as f32);
+                    let mut widths = self.widths.borrow_mut();
+                    if widths.len() > 20_000 {
+                        widths.clear();
+                    }
+                    widths.insert(key, w);
+                    w
                 }
-                widths.insert(key, w);
-                w
-            }
-        };
+            };
+        }
         em as f64 * n.font_size + n.letter_spacing * s.chars().count() as f64
     }
 }
@@ -534,9 +656,13 @@ static INTER: [&[u8]; 18] = [
     include_bytes!("../assets/fonts/inter/Inter-900-Italic.ttf"),
 ];
 
-/// The bundled Inter, then system fonts (plus `FLEXMA_FONTS_DIR`), shared by
-/// every workspace. Inter goes first so it wins over an installed Inter of
-/// another version, whose widths would wrap lines differently from the editor.
+/// Color emoji for server renders (see `assets/fonts/twemoji/README.md`).
+static TWEMOJI: &[u8] = include_bytes!("../assets/fonts/twemoji/Twemoji.Mozilla.ttf");
+
+/// The bundled Inter and emoji font, then system fonts (plus
+/// `FLEXMA_FONTS_DIR`), shared by every workspace. Inter goes first so it wins
+/// over an installed Inter of another version, whose widths would wrap lines
+/// differently from the editor.
 pub fn base_fontdb() -> Arc<FontDb> {
     static DB: OnceLock<Arc<FontDb>> = OnceLock::new();
     DB.get_or_init(|| {
@@ -544,6 +670,7 @@ pub fn base_fontdb() -> Arc<FontDb> {
         for data in INTER {
             db.load_font_source(resvg::usvg::fontdb::Source::Binary(Arc::new(data)));
         }
+        db.load_font_source(resvg::usvg::fontdb::Source::Binary(Arc::new(TWEMOJI)));
         db.load_system_fonts();
         if let Ok(dir) = std::env::var("FLEXMA_FONTS_DIR") {
             db.load_fonts_dir(dir);
@@ -591,13 +718,13 @@ pub fn wants_checkerboard(doc: &Document, ids: &[NodeId]) -> bool {
 /// PNG and the SVG's own size in px.
 pub fn rasterize_svg(svg: &str, fonts: Arc<FontDb>) -> Result<(Vec<u8>, f64, f64), String> {
     let mut opt = svg_options();
-    opt.fontdb = fonts.clone();
+    opt.fontdb = fonts;
     opt.font_family = "Inter".into();
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
     let (w, h) = (tree.size().width(), tree.size().height());
     let longest = w.max(h).max(1.0);
     let scale = (2048.0 / longest).clamp(2.0, 8.0);
-    let (png, _, _) = svg_to_png(svg, scale, 4096, fonts, false, None)?;
+    let (png, _, _) = tree_to_png(&tree, scale, 4096, false, false)?;
     Ok((png, w as f64, h as f64))
 }
 
@@ -636,8 +763,19 @@ pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, li
     let mut opt = svg_options();
     opt.fontdb = fonts;
     opt.font_family = "Inter".into();
+    // Exports already give each character a font that has it
+    // (`TextMeasurer::svg_runs`). resvg's own fallback shapes a whole line
+    // with each span's font and, when one font has every character, swaps
+    // the entire span to it (the first face with the character, often a
+    // thin weight), so it stays off.
+    opt.font_resolver.select_fallback = Box::new(|_, _, _| None);
     opt.image_href_resolver.resolve_string = image_resolver(images);
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
+    tree_to_png(&tree, scale, max_dim, linear, checker)
+}
+
+/// Draw a parsed SVG to PNG in strips (see `svg_to_png_on`).
+fn tree_to_png(tree: &resvg::usvg::Tree, scale: f32, max_dim: u32, linear: bool, checker: bool) -> Result<(Vec<u8>, u32, u32), String> {
     let (w, h, s) = png_size(tree.size().width(), tree.size().height(), scale, max_dim);
     let strip = strip_rows(w, h);
     let mut png = Vec::new();
@@ -651,7 +789,7 @@ pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, li
         while y0 < h {
             let sh = strip.min(h - y0);
             let mut pm = resvg::tiny_skia::Pixmap::new(w, sh).ok_or("image too large")?;
-            resvg::render(&tree, resvg::tiny_skia::Transform::from_row(s, 0.0, 0.0, s, 0.0, -(y0 as f32)), &mut pm.as_mut());
+            resvg::render(tree, resvg::tiny_skia::Transform::from_row(s, 0.0, 0.0, s, 0.0, -(y0 as f32)), &mut pm.as_mut());
             if linear {
                 encode_linear(&mut pm);
             }
@@ -1580,3 +1718,39 @@ mod svg_upload_tests {
         assert_eq!(pm.pixel(700, 10).unwrap().alpha(), 0, "transparent stays transparent");
     }
 }
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use flexma_doc::{Node, NodeType};
+
+    /// Only the characters a font lacks, and emoji, come from fallback fonts;
+    /// the rest of the line keeps its font.
+    #[test]
+    fn fallback_per_character_and_color_emoji() {
+        let m = TextMeasurer::new(base_fontdb());
+        let mut n = Node::new("t:1", NodeType::Text);
+        (n.font_size, n.font_weight) = (32.0, 600);
+        let runs = m.svg_runs(&n, "Gift ⚡🎁 ok");
+        assert_eq!(runs, vec![("Gift ".into(), None), ("⚡🎁".into(), Some(EMOJI_FAMILY.into())), (" ok".into(), None)]);
+        // A face without Latin letters gets them from Inter, not the whole line.
+        let mut emoji_font = n.clone();
+        emoji_font.font_family = EMOJI_FAMILY.into();
+        let runs = m.svg_runs(&emoji_font, "🎁Hi");
+        assert_eq!(runs, vec![("🎁".into(), None), ("Hi".into(), Some("Inter".into()))]);
+        // Drawn in color.
+        let mut doc = Document::new_empty();
+        n.parent = Some("0:1".into());
+        n.characters = "🎁".into();
+        (n.width, n.height) = (40.0, 40.0);
+        doc.apply(&flexma_doc::Op::Create { node: n }).unwrap();
+        let paint = PaintSource { data_dir: Path::new("/nonexistent"), file_id: "f", share_token: None };
+        let (svg, _) = export_svg(&doc, &["t:1".to_string()], None, AssetMode::Url, Some(&base_fontdb()), &paint).unwrap();
+        assert!(svg.contains("Twemoji Mozilla"), "{svg}");
+        let (png, _, _) = svg_to_png(&svg, 1.0, 512, base_fontdb(), false, None).unwrap();
+        let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let colored = pm.pixels().iter().filter(|p| p.alpha() > 200 && (p.red() as i32 - p.blue() as i32).abs() > 60).count();
+        assert!(colored > 50, "emoji drawn in color ({colored} colored pixels)");
+    }
+}
+
