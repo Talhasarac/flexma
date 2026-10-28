@@ -461,6 +461,49 @@ pub fn find_component(doc: &Document, key: &str) -> Option<NodeId> {
 
 /// Build an INSTANCE node from a friendly spec: `{type:"instance", component:"Button",
 /// text:"Buy", overrides:{"Label":{text:"Buy", color:"#fff"}}}`.
+/// Whether an `alignItems` value is CSS `stretch`.
+pub fn is_stretch(v: &Value) -> bool {
+    v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("stretch"))
+}
+
+/// The axis an auto-layout frame's children stretch across, from its layout
+/// mode (`None` without auto layout or with a grid).
+pub fn cross_size_key(layout_mode: &str) -> Option<&'static str> {
+    match layout_mode {
+        "HORIZONTAL" => Some("height"),
+        "VERTICAL" => Some("width"),
+        _ => None,
+    }
+}
+
+/// `alignItems: "stretch"` (CSS): besides the frame's STRETCH alignment
+/// (which stretches children that hug their content), shapes and plain frames
+/// that don't size the cross axis fill it, like an empty CSS box. Text and
+/// auto-layout children keep sizing the line. `None` if the spec doesn't ask.
+fn stretch_children(spec: &Value) -> Option<Value> {
+    let obj = spec.as_object()?;
+    ["alignItems", "counterAxisAlign", "crossAxisAlign"].into_iter().find(|k| obj.get(*k).is_some_and(is_stretch))?;
+    let mut out = obj.clone();
+    let mode = ["layout", "layoutMode", "direction", "flexDirection"]
+        .iter()
+        .find_map(|k| obj.get(*k))
+        .and_then(|v| normalize_props(NodeType::Frame, &Map::from_iter([("layout".to_string(), v.clone())])).ok())
+        .and_then(|m| m.get("layoutMode").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
+    if let (Some(cross), Some(Value::Array(kids))) = (cross_size_key(&mode), out.get_mut("children")) {
+        let short = if cross == "width" { "w" } else { "h" };
+        for k in kids.iter_mut().filter_map(Value::as_object_mut) {
+            let absolute = k.get("absolute").or_else(|| k.get("layoutAbsolute")).and_then(Value::as_bool).unwrap_or(false);
+            let text = k.get("type").and_then(Value::as_str).is_some_and(|t| t.eq_ignore_ascii_case("text"));
+            let hugs = ["layout", "layoutMode", "direction", "flexDirection"].iter().any(|key| k.get(*key).and_then(Value::as_str).is_some_and(|m| !m.eq_ignore_ascii_case("none")));
+            if !absolute && !text && !hugs && !k.contains_key(cross) && !k.contains_key(short) {
+                k.insert(cross.into(), Value::String("fill".into()));
+            }
+        }
+    }
+    Some(Value::Object(out))
+}
+
 /// One `overrides` entry of an instance of component `cid`: the layer (its
 /// id, key or name) as an override key, and its props as written in a node
 /// spec (friendly names, style names) in canonical form.
@@ -604,6 +647,8 @@ fn build_one(
         expanded = Some(Value::Object(o));
     }
     let spec = expanded.as_ref().unwrap_or(spec);
+    let stretched = stretch_children(spec);
+    let spec = stretched.as_ref().unwrap_or(spec);
     let obj = spec.as_object().ok_or("each node spec must be an object")?;
     let ty = obj.get("type").and_then(|v| v.as_str()).ok_or("node spec needs a \"type\" (FRAME, RECTANGLE, ELLIPSE, TEXT, LINE, VECTOR, POLYGON, STAR, GROUP, COMPONENT, INSTANCE, IMAGE)")?;
     let kind = parse_type(ty).ok_or_else(|| format!("unknown node type '{ty}'"))?;
@@ -902,6 +947,36 @@ mod tests {
         let early = json!([{ "type": "instance", "component": "Badge" }, { "type": "component", "name": "Badge" }]);
         let err = build_create_ops(&doc, "0:1", early.as_array().unwrap(), None, &mut || "x:1".into()).unwrap_err();
         assert!(err.contains("must come before"), "{err}");
+    }
+
+    /// CSS `alignItems: "stretch"`: children without a cross size fill it.
+    #[test]
+    fn align_items_stretch() {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("s:{n}")
+        };
+        let spec = json!([{ "type": "frame", "layout": "row", "alignItems": "stretch", "children": [
+            { "type": "rect", "name": "Bar", "w": 4 },
+            { "type": "text", "name": "Quote", "text": "A quote that wraps onto a second line", "width": 120, "lineHeight": 20 },
+            { "type": "frame", "name": "Cell", "layout": "vertical", "padding": 4, "children": [{ "type": "rect", "w": 30, "h": 10 }] },
+            { "type": "rect", "name": "Fixed", "w": 10, "h": 10 } ] }]);
+        let (ops, top) = build_create_ops(&doc, "0:1", spec.as_array().unwrap(), None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        crate::layout::relayout_all(&mut doc);
+        let get = |doc: &Document, name: &str| doc.nodes().find(|n| n.name == name).unwrap().clone();
+        assert_eq!(doc.get(&top[0]).unwrap().counter_axis_align, crate::paint::LayoutAlign::Stretch);
+        let row = doc.get(&top[0]).unwrap().height;
+        assert_eq!(row, get(&doc, "Quote").height, "the text sets the row");
+        assert_eq!((get(&doc, "Bar").height, get(&doc, "Cell").height, get(&doc, "Fixed").height), (row, row, 10.0));
+        // The cell still shrinks back when the text gets shorter.
+        let q = get(&doc, "Quote").id;
+        doc.apply(&crate::ops::Op::update1(q.clone(), "height", json!(20))).unwrap();
+        crate::layout::relayout(&mut doc, &[q]);
+        assert_eq!(get(&doc, "Cell").height, 20.0);
     }
 
     /// Overrides take what node specs take, style names included.

@@ -250,7 +250,7 @@ export interface NodeData {
   itemSpacing: number;
   padding: Padding;
   primaryAxisAlign: 'START' | 'CENTER' | 'END' | 'SPACE_BETWEEN';
-  counterAxisAlign: 'START' | 'CENTER' | 'END' | 'SPACE_BETWEEN';
+  counterAxisAlign: 'START' | 'CENTER' | 'END' | 'SPACE_BETWEEN' | 'STRETCH';
   layoutSizingHorizontal: 'FIXED' | 'HUG' | 'FILL';
   layoutSizingVertical: 'FIXED' | 'HUG' | 'FILL';
   layoutAbsolute: boolean;

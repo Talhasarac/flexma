@@ -643,6 +643,10 @@ pub enum LayoutAlign {
     Center,
     End,
     SpaceBetween,
+    /// Cross axis only (CSS `align-items: stretch`): children that hug their
+    /// content still size the line, then all take its thickness. Text keeps
+    /// its own height. Along the main axis it reads as `Start`.
+    Stretch,
 }
 
 /// How a node sizes itself along an axis inside (or as) an auto-layout frame.

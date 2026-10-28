@@ -227,7 +227,8 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
             if fill_main && !parent_hugs_main {
                 cm = fill_each;
             }
-            if fill_cross {
+            let hugs_cross = if horizontal { cn.layout_sizing_vertical } else { cn.layout_sizing_horizontal } == SizingMode::Hug;
+            if fill_cross || (n.counter_axis_align == LayoutAlign::Stretch && hugs_cross && cn.kind != NodeType::Text) {
                 cc = inner_cross;
             }
             sizes.push((cm, cc));
@@ -235,7 +236,7 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
         let used: f64 = sizes.iter().map(|s| s.0).sum::<f64>() + spacing_total;
         let free = (inner_main - used).max(0.0);
         let (mut cursor, gap) = match n.primary_axis_align {
-            LayoutAlign::Start => (0.0, n.item_spacing),
+            LayoutAlign::Start | LayoutAlign::Stretch => (0.0, n.item_spacing),
             LayoutAlign::Center => (free / 2.0, n.item_spacing),
             LayoutAlign::End => (free, n.item_spacing),
             LayoutAlign::SpaceBetween => {
@@ -250,7 +251,7 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
         let start_cross = if horizontal { n.padding.top } else { n.padding.left };
         for (c, (cm, cc)) in flow.iter().zip(sizes) {
             let cross_off = match n.counter_axis_align {
-                LayoutAlign::Start | LayoutAlign::SpaceBetween => 0.0,
+                LayoutAlign::Start | LayoutAlign::SpaceBetween | LayoutAlign::Stretch => 0.0,
                 LayoutAlign::Center => (inner_cross - cc) / 2.0,
                 LayoutAlign::End => inner_cross - cc,
             };
@@ -369,7 +370,7 @@ fn arrange_wrapped(doc: &mut Document, n: &Node, out: &mut Vec<NodeId>) {
     for line in &lines {
         let free = (inner_main - line.main).max(0.0);
         let (mut cursor, gap) = match n.primary_axis_align {
-            LayoutAlign::Start => (0.0, n.item_spacing),
+            LayoutAlign::Start | LayoutAlign::Stretch => (0.0, n.item_spacing),
             LayoutAlign::Center => (free / 2.0, n.item_spacing),
             LayoutAlign::End => (free, n.item_spacing),
             LayoutAlign::SpaceBetween if line.items.len() > 1 => (0.0, n.item_spacing + free / (line.items.len() - 1) as f64),
@@ -378,11 +379,12 @@ fn arrange_wrapped(doc: &mut Document, n: &Node, out: &mut Vec<NodeId>) {
         for c in &line.items {
             let Some(cn) = doc.get(c) else { continue };
             let (cm, mut cc) = if horizontal { (cn.width, cn.height) } else { (cn.height, cn.width) };
-            if child_fill(cn, horizontal).1 {
+            let hugs_cross = if horizontal { cn.layout_sizing_vertical } else { cn.layout_sizing_horizontal } == SizingMode::Hug;
+            if child_fill(cn, horizontal).1 || (n.counter_axis_align == LayoutAlign::Stretch && hugs_cross && cn.kind != NodeType::Text) {
                 cc = line.cross;
             }
             let off = match n.counter_axis_align {
-                LayoutAlign::Start | LayoutAlign::SpaceBetween => 0.0,
+                LayoutAlign::Start | LayoutAlign::SpaceBetween | LayoutAlign::Stretch => 0.0,
                 LayoutAlign::Center => (line.cross - cc) / 2.0,
                 LayoutAlign::End => line.cross - cc,
             };

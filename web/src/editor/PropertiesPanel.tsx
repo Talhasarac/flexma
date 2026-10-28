@@ -440,6 +440,12 @@ function AutoLayoutSection({ sel, set, begin, end, store }: SectionProps & { sto
             </label>
           )}
           {!grid && (
+            <label className="check" title="Stretch children that hug their content to the tallest one (CSS align-items: stretch)">
+              <input type="checkbox" checked={counter === 'STRETCH'} onChange={(e) => set({ counterAxisAlign: e.target.checked ? 'STRETCH' : 'START' })} />
+              Stretch
+            </label>
+          )}
+          {!grid && (
             <label className="check" title="Wrap items onto new lines (needs a fixed width or height)">
               <input type="checkbox" checked={wrap} onChange={(e) => set({ layoutWrap: e.target.checked })} />
               Wrap
