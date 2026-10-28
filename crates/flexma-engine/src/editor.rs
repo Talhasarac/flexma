@@ -188,6 +188,7 @@ impl Editor {
             let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
             changed.extend(styled);
             layout::relayout(&mut self.doc, &changed);
+            self.doc.clear_fresh();
         }
         self.doc.walk(flexma_doc::ROOT_ID, &mut |n| {
             if n.kind == NodeType::Text && n.needs_measure {
@@ -280,6 +281,7 @@ impl Editor {
             }
         }
         laid.extend(synced);
+        self.doc.clear_fresh();
         laid
     }
 

@@ -75,9 +75,10 @@ pub fn build_upsert_ops(
         list.sort_by(|a, b| fresh.nodes[a].index.cmp(&fresh.nodes[b].index).then(a.cmp(b)));
     }
 
-    let mut w = Work { doc, fresh: &fresh, deletes: Vec::new(), creates: HashSet::new(), parent_of: HashMap::new(), updates: Vec::new(), out: Upsert::default() };
+    let mut w = Work { doc, fresh: &fresh, deletes: Vec::new(), creates: HashSet::new(), parent_of: HashMap::new(), updates: Vec::new(), out: Upsert::default(), prune: false };
     for (spec, t) in specs.iter().zip(&fresh_top) {
         let tn = &fresh.nodes[t];
+        w.prune = spec.get("prune").and_then(Value::as_bool).unwrap_or(false);
         let existing = tn.key.as_deref().and_then(|k| find_by_key(doc, k)).and_then(|id| doc.get(&id));
         match existing {
             Some(e) if e.kind == tn.kind => {
@@ -153,6 +154,9 @@ struct Work<'a> {
     parent_of: HashMap<NodeId, (NodeId, Option<String>)>,
     updates: Vec<Op>,
     out: Upsert,
+    /// The spec being matched has `prune: true`: unkeyed children it no
+    /// longer lists are deleted too, not kept as layers added in Flexma.
+    prune: bool,
 }
 
 impl Work<'_> {
@@ -272,13 +276,13 @@ impl Work<'_> {
             pairs.push((c, m));
         }
         // Children that left the spec: keyed ones came from an upload and go;
-        // unkeyed ones were added in Flexma and stay, on top.
+        // unkeyed ones were added in Flexma and stay, on top (unless pruning).
         let mut extras: Vec<&Node> = Vec::new();
         for h in &have {
             if taken.contains(h.id.as_str()) {
                 continue;
             }
-            if h.key.is_some() {
+            if h.key.is_some() || self.prune {
                 self.delete(&h.id);
             } else {
                 extras.push(h);
@@ -432,6 +436,27 @@ mod tests {
         assert_eq!((changed.created, changed.updated, changed.deleted), (0, 1, 0), "{:?}", changed.ops);
         assert_eq!(doc.children(&first.top[1])[0], row);
         assert_eq!(texts(&doc), vec!["Car", "M3"]);
+    }
+
+    /// `prune: true` deletes unkeyed children the spec no longer has (here a
+    /// text that became a frame), instead of keeping them as Flexma edits.
+    #[test]
+    fn prune_removes_unkeyed_leftovers() {
+        let mut doc = Document::new_empty();
+        let mut n = 0;
+        let page = |body: Value, prune: bool| json!([{ "type": "frame", "key": "legal", "prune": prune, "layout": "vertical", "children": [body] }]);
+        let first = run(&mut doc, page(json!({ "type": "text", "name": "Body", "text": "Terms" }), false), &mut n);
+        let frame = first.top[0].clone();
+        let framed = json!({ "type": "frame", "name": "Body", "children": [{ "type": "text", "text": "Terms" }] });
+        // Without prune the old text stays next to the new frame.
+        let kept = run(&mut doc, page(framed.clone(), false), &mut n);
+        assert_eq!((kept.created, kept.deleted), (2, 0));
+        assert_eq!(doc.children(&frame).len(), 2);
+        // With prune only the spec's children remain.
+        let pruned = run(&mut doc, page(framed, true), &mut n);
+        assert_eq!(pruned.deleted, 1, "{:?}", pruned.ops);
+        let kinds: Vec<NodeType> = doc.children(&frame).iter().map(|c| doc.get(c).unwrap().kind).collect();
+        assert_eq!(kinds, vec![NodeType::Frame]);
     }
 
     #[test]

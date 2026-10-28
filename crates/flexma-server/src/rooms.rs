@@ -758,6 +758,7 @@ impl Room {
                 tx.relayout();
                 tx.settle_undo();
                 let Tx { applied, touched, undo, .. } = tx;
+                self.doc.clear_fresh();
                 if !applied.is_empty() {
                     let summary = match &result {
                         Ok(v) => v.as_str().unwrap_or("change").lines().next().unwrap_or("change").trim().trim_end_matches(':').to_string(),
@@ -857,6 +858,7 @@ impl Room {
         let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
         changed.extend(styled);
         layout::relayout(&mut self.doc, &changed);
+        self.doc.clear_fresh();
         if !accepted.is_empty() {
             self.version += 1;
             self.dirty = true;
@@ -1041,6 +1043,7 @@ impl Room {
             failed += tx.apply_all(ops).len();
             tx.relayout();
             let Tx { applied: a, touched: t, .. } = tx;
+            self.doc.clear_fresh();
             applied.extend(a);
             touched.extend(t);
         }

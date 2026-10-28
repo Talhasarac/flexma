@@ -10,6 +10,10 @@ use std::collections::HashMap;
 pub struct Document {
     nodes: HashMap<NodeId, Node>,
     children: HashMap<NodeId, Vec<NodeId>>,
+    /// Nodes created by ops in the batch being applied. Their first layout
+    /// isn't a resize: children were placed for the laid-out size. Not
+    /// stored; every replica clears it after a batch (`clear_fresh`).
+    fresh: std::collections::HashSet<NodeId>,
 }
 
 /// Wire/storage form of a document: nodes in tree pre-order (parents first).
@@ -292,6 +296,19 @@ impl Document {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn mark_fresh(&mut self, id: &str) {
+        self.fresh.insert(id.to_string());
+    }
+
+    pub fn is_fresh(&self, id: &str) -> bool {
+        self.fresh.contains(id)
+    }
+
+    /// End of a batch of ops (after its layout): nothing is new any more.
+    pub fn clear_fresh(&mut self) {
+        self.fresh.clear();
     }
 
     /// Flag a text box for exact measuring (derived state, like layout).

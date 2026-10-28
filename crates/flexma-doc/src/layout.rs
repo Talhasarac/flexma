@@ -61,11 +61,28 @@ pub fn relayout_all(doc: &mut Document) -> Vec<NodeId> {
 }
 
 fn layout_subtree(doc: &mut Document, root: &str, out: &mut Vec<NodeId>) {
+    // Frame sizes before layout, top-down.
+    let mut before: Vec<(NodeId, f64, f64)> = Vec::new();
+    doc.walk(root, &mut |n| {
+        if n.kind.is_frame_like() {
+            before.push((n.id.clone(), n.width, n.height));
+        }
+    });
     // Two passes: FILL widths assigned in `arrange` can change wrapped text
     // heights, which feed back into HUG sizes.
     for _ in 0..2 {
         measure_hug(doc, root, out);
         arrange(doc, root, out);
+    }
+    // Children layout doesn't place (absolute ones, and those of frames
+    // without auto layout) follow their constraints when layout resizes their
+    // frame, as when it's resized by hand, and like Unity anchors. A frame
+    // created in this batch isn't resized: its first size is its size.
+    for (id, w0, h0) in before {
+        let resized = !doc.is_fresh(&id) && doc.get(&id).is_some_and(|n| (n.width - w0).abs() > 1e-9 || (n.height - h0).abs() > 1e-9);
+        if resized {
+            out.extend(crate::constraints::follow_layout_resize(doc, &id, w0, h0));
+        }
     }
     out.sort();
     out.dedup();
@@ -263,9 +280,40 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
             cursor += cm + gap;
         }
     }
+    if is_auto(doc, id) {
+        fill_absolute(doc, id, out);
+    }
     let kids: Vec<NodeId> = doc.children(id).to_vec();
     for k in kids {
         arrange(doc, &k, out);
+    }
+}
+
+/// Absolute children that FILL an axis span the whole frame along it, like
+/// CSS `inset-x-0` (a badge across a card, an overlay).
+fn fill_absolute(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
+    let Some((pw, ph)) = doc.get(id).map(|n| (n.width, n.height)) else { return };
+    for c in doc.children(id).to_vec() {
+        let Some(cn) = doc.get(&c) else { continue };
+        if !cn.layout_absolute {
+            continue;
+        }
+        let (mut x, mut y, mut w, mut h) = (cn.x, cn.y, cn.width, cn.height);
+        if cn.layout_sizing_horizontal == SizingMode::Fill {
+            (x, w) = (0.0, pw);
+        }
+        if cn.layout_sizing_vertical == SizingMode::Fill {
+            (y, h) = (0.0, ph);
+        }
+        if cn.kind == NodeType::Text && cn.text_auto_resize == crate::paint::TextAutoResize::Height && (cn.width - w).abs() > 0.01 {
+            let mut probe = cn.clone();
+            probe.width = w;
+            h = crate::text::estimate_layout(&probe).2;
+            doc.set_needs_measure(&c);
+        }
+        if doc.set_geometry(&c, x, y, w, h) {
+            out.push(c);
+        }
     }
 }
 
@@ -471,6 +519,33 @@ mod tests {
         relayout(&mut doc, &["r:0".to_string()]);
         let r0 = doc.get("r:0").unwrap();
         assert_eq!(r0.width, 200.0 - 10.0 - 10.0 - 30.0);
+    }
+
+    /// An absolute badge with `width: "fill"` spans its card, and children
+    /// layout doesn't place follow their constraints when layout resizes the
+    /// card (as when resizing it by hand).
+    #[test]
+    fn absolute_children_fill_and_follow() {
+        let (mut doc, top) = build(serde_json::json!([{
+            "type": "frame", "name": "Card", "layout": "vertical", "padding": 20, "children": [
+                { "type": "rect", "name": "Body", "w": 200, "h": 100 },
+                { "type": "rect", "name": "Badge", "absolute": true, "y": -12, "width": "fill", "h": 24 },
+                { "type": "rect", "name": "Corner", "absolute": true, "x": 200, "y": 10, "w": 20, "h": 20, "constraints": { "horizontal": "MAX" } }
+            ] }]));
+        let card = top[0].clone();
+        let get = |doc: &Document, name: &str| doc.nodes().find(|n| n.name == name).cloned().unwrap();
+        assert_eq!(get(&doc, "Card").width, 240.0);
+        assert_eq!(get(&doc, "Corner").x, 200.0, "placed for the laid-out card");
+        let badge = get(&doc, "Badge");
+        assert_eq!((badge.x, badge.y, badge.width), (0.0, -12.0, 240.0));
+        // The card grows by 60: the badge still spans it, the corner keeps its right margin.
+        doc.clear_fresh();
+        let body = get(&doc, "Body").id;
+        doc.apply(&Op::update1(body.clone(), "width", serde_json::json!(260))).unwrap();
+        relayout(&mut doc, &[body]);
+        assert_eq!(get(&doc, "Card").width, 300.0, "{card}");
+        assert_eq!(get(&doc, "Badge").width, 300.0);
+        assert_eq!(get(&doc, "Corner").x, 260.0);
     }
 
     /// Measured wrapping text that layout narrows is re-estimated and flagged

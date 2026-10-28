@@ -126,7 +126,7 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
     let mut out = Map::new();
     for (k, v) in input {
         match k.as_str() {
-            "type" | "children" | "id" | "x1" | "y1" | "x2" | "y2" => {}
+            "type" | "children" | "id" | "x1" | "y1" | "x2" | "y2" | "prune" => {}
             "w" => {
                 out.insert("width".into(), v.clone());
             }

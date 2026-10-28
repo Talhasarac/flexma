@@ -30,7 +30,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `description` | string | "" | Notes for collaborators and agents. |
 | `meta` | object | `{}` | Your own JSON (up to 64 KB), kept with the node and never drawn: the source component, a button's action, data bindings. `find_nodes` filters by it (`meta: {"onClick": "OpenShop"}`; a null value matches any). People see it read-only under Data. |
 | `key` | string | none | A stable id from the source of the design (e.g. a Unity object). Uploading a top-level spec with the same `key` again updates that node in place: see Re-uploads. |
-| `absolute` / `layoutAbsolute` | bool | false | Take the node out of its auto-layout parent's flow. |
+| `absolute` / `layoutAbsolute` | bool | false | Take the node out of its auto-layout parent's flow. With `width: "fill"` (or `height`) it spans the whole frame on that axis, like CSS `inset-x-0`: a badge across a card (center its text with `textAlign`). |
 | `constraints` | `{horizontal, vertical}` \| string | `MIN` / `MIN` | How the node follows when its parent frame or instance is resized, like Unity anchors. See Constraints. |
 | `children` | spec[] | | `FRAME` and `GROUP` only. |
 
@@ -124,7 +124,7 @@ Sizing rules:
 
 - Resizing a frame with `update_nodes` moves its children by their constraints, like dragging its handle in the editor. A child you also update in the same call keeps the values you give it.
 - Instances re-flow from their main component: resize an instance and its layers follow their constraints.
-- Children placed by auto layout ignore constraints; `absolute` children use them. Children of groups always scale.
+- Children placed by auto layout ignore constraints; `absolute` children use them, also when the frame grows or shrinks with its content. Children of groups always scale.
 - Unity anchors use y-up fractions, which are converted for you: 0 becomes `MIN` (left/bottom → `MAX` vertically), 1 the opposite edge, 0.5 `CENTER`, 0 to 1 `STRETCH`, and anything else `SCALE`.
 
 ## TEXT
@@ -217,7 +217,7 @@ Give every node of an export a `key` that stays the same between exports, such a
 
 - Changed properties are updated, and the node ids stay the same, so comments, links and instances keep working.
 - Children are matched by `key` within their parent, or by name and type when they have no key. New children are created, and keyed children missing from the spec are deleted.
-- Nodes that people added in Flexma (no `key`) are kept, on top of the exported ones.
+- Nodes that people added in Flexma (no `key`) are kept, on top of the exported ones. Add `"prune": true` to the top-level spec to delete unkeyed children that are no longer in it instead (useful when the export itself has no keys and its structure changed, e.g. a text became a frame). The result reports how many nodes were deleted.
 - A top-level node without `x`/`y` keeps its position. One found on another page or frame moves to the given parent.
 - Copies made in Flexma (duplicate, paste) drop their `key`.
 - Keys must be unique among siblings. At the top level they should be unique in the file.

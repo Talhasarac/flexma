@@ -108,6 +108,7 @@ impl Document {
                 let id = node.id.clone();
                 let parent = node.parent.clone().unwrap_or_default();
                 self.insert_unchecked(node);
+                self.mark_fresh(&id);
                 Ok(OpEffect { structure: true, changed: vec![id, parent], removed: vec![] })
             }
             Op::Update { id, props } => {

@@ -211,6 +211,24 @@ fn resized_extras(n: &Node, w: f64, h: f64, props: &mut Map<String, Value>) {
     }
 }
 
+/// After auto layout resized `id` from `w0`×`h0` to its current size: move
+/// and resize the children layout doesn't place by their constraints (derived
+/// state, like layout itself). Returns the nodes changed.
+pub fn follow_layout_resize(doc: &mut Document, id: &str, w0: f64, h0: f64) -> Vec<NodeId> {
+    let Some((w, h)) = doc.get(id).map(|n| (n.width, n.height)) else { return Vec::new() };
+    let mut t = Subtree::capture(doc, id);
+    if let Some(root) = t.nodes.get_mut(id) {
+        root.width = w0;
+        root.height = h0;
+    }
+    let mut changed = Vec::new();
+    for op in resize_ops(&t, w, h) {
+        changed.push(op.target().to_string());
+        let _ = doc.apply(&op);
+    }
+    changed
+}
+
 /// Child updates for an update `props` (new `width`/`height`) aimed at `id`,
 /// computed against the document before the update applies.
 pub fn follow_resize(doc: &Document, id: &str, props: &Map<String, Value>) -> Vec<Op> {
