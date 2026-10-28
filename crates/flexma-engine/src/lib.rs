@@ -666,6 +666,12 @@ impl FlexmaEditor {
     }
 
     pub fn fonts_ready(&mut self) {
+        // The font check runs after every document change; when nothing was
+        // loading, keep the text drawn (dropping it made big pages redraw
+        // their text over and over while collaborators edited).
+        if self.ed.fonts_ready {
+            return;
+        }
         self.ed.fonts_ready = true;
         if let Some(t) = self.ed.text.as_mut() {
             t.reset();

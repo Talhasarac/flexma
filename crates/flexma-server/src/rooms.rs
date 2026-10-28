@@ -862,14 +862,15 @@ impl Room {
         changed.extend(styled);
         layout::relayout(&mut self.doc, &changed);
         self.doc.clear_fresh();
+        let echo = msg(json!({ "t": "ops", "from": client_id, "batch": batch, "ops": accepted }));
         if any {
             self.version += 1;
             self.dirty = true;
+            self.broadcast(echo, None);
+        } else if let Some(c) = self.clients.get(&client_id) {
+            // Nothing changed: only the sender needs it, as its acknowledgement.
+            let _ = c.out.try_send(echo);
         }
-        self.broadcast(
-            msg(json!({ "t": "ops", "from": client_id, "batch": batch, "ops": accepted })),
-            None,
-        );
         if !rejected.is_empty() {
             let errors: Vec<String> = rejected.iter().map(|(_, e)| e.clone()).collect();
             let corrections: Vec<Op> = rejected.iter().flat_map(|(op, _)| self.doc.correction_for(op)).collect();

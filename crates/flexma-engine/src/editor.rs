@@ -286,6 +286,10 @@ impl Editor {
     }
 
     pub fn after_effect(&mut self, eff: &OpEffect, laid: &[NodeId]) {
+        // Ops that set values nodes already had (often another editor's).
+        if !eff.structure && eff.changed.is_empty() && eff.removed.is_empty() && laid.is_empty() {
+            return;
+        }
         self.doc_version += 1;
         if eff.structure {
             self.structure_version += 1;
