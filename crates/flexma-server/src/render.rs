@@ -586,6 +586,21 @@ pub fn wants_checkerboard(doc: &Document, ids: &[NodeId]) -> bool {
     !opaque
 }
 
+/// An uploaded SVG as a PNG to use as an image: sharp when drawn larger than
+/// its own size (2× to 8×, aiming at 2048 px), 4096 px at most. Returns the
+/// PNG and the SVG's own size in px.
+pub fn rasterize_svg(svg: &str, fonts: Arc<FontDb>) -> Result<(Vec<u8>, f64, f64), String> {
+    let mut opt = svg_options();
+    opt.fontdb = fonts.clone();
+    opt.font_family = "Inter".into();
+    let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
+    let (w, h) = (tree.size().width(), tree.size().height());
+    let longest = w.max(h).max(1.0);
+    let scale = (2048.0 / longest).clamp(2.0, 8.0);
+    let (png, _, _) = svg_to_png(svg, scale, 4096, fonts, false, None)?;
+    Ok((png, w as f64, h as f64))
+}
+
 pub fn svg_to_png(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, images: Images) -> Result<(Vec<u8>, u32, u32), String> {
     svg_to_png_on(svg, scale, max_dim, fonts, linear, false, images)
 }
@@ -1547,3 +1562,21 @@ mod asset_scope_tests {
     }
 }
 
+
+#[cfg(test)]
+mod svg_upload_tests {
+    use super::*;
+
+    /// An uploaded SVG becomes a sharper PNG and keeps its own size.
+    #[test]
+    fn svg_uploads_rasterize() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="50" height="50" fill="#f00"/></svg>"##;
+        let (png, w, h) = rasterize_svg(svg, base_fontdb()).unwrap();
+        assert_eq!((w, h), (100.0, 50.0));
+        let size = imagesize::blob_size(&png).unwrap();
+        assert_eq!((size.width, size.height), (800, 400), "8× for a small drawing");
+        let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(pm.pixel(10, 10).unwrap().red(), 255);
+        assert_eq!(pm.pixel(700, 10).unwrap().alpha(), 0, "transparent stays transparent");
+    }
+}

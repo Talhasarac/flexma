@@ -1985,7 +1985,7 @@ impl Ctx {
              Each upload prints the new asset id, its pixel size and a ready-made node like {{\"type\":\"image\",\"asset\":\"<id>\"}}. \
              Put that node in create_nodes (leave out width/height to use the image's proportions), or use the asset as a fill on any frame or shape: \
              {{\"type\":\"IMAGE\",\"asset\":\"<id>\",\"fit\":\"FILL\"}} (FILL crops to cover, FIT letterboxes, STRETCH distorts). \
-             PNG, JPEG, GIF or WebP, up to {mb} MB each. For a picture on the web, download it first (curl -L -o photo.jpg <url>), then upload it. \
+             PNG, JPEG, GIF, WebP or SVG, up to {mb} MB each (an SVG becomes a sharp PNG, and its width/height are the SVG's own size; use import_svg instead for editable vector layers). For a picture on the web, download it first (curl -L -o photo.jpg <url>), then upload it. \
              Only use images the user has the rights to. Don't share this link.",
             if files == 1 { "image" } else { "images" }
         )))

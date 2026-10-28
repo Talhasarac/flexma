@@ -78,7 +78,7 @@ Shared color and text styles keep a design consistent: change a style once and e
 
 ## Images
 
-- **Upload:** call `upload_image` (say how many with `files`) and run the `curl` command it returns once per image. Each upload prints an asset id and a ready-made node.
+- **Upload:** call `upload_image` (say how many with `files`) and run the `curl` command it returns once per image. Each upload prints an asset id and a ready-made node. SVG files work too: they become a sharp PNG at the SVG's own size (for a logo band or an illustration). Use `import_svg` instead when the SVG should become editable layers.
 - **Place:** put `{ "type": "image", "asset": "<id>" }` in `create_nodes`.
   - Leave out width and height to keep the picture's proportions (longest side up to 1200), or give one side and the other follows.
   - `fit`: `FILL` (default, crops to cover), `FIT` (letterbox), `STRETCH` or `TILE` (repeats at `tileScale`).

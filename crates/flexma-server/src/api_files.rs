@@ -479,7 +479,7 @@ pub async fn upload_asset(
     let mime = check_image(&st, &body)?;
     let (fid, uid) = (id.clone(), user.id.clone());
     let ws = st.db.call(move |c| Ok(file_access(c, &uid, &fid, Role::Editor)?.0)).await?;
-    Ok(Json(store_image(&st, &ws, &id, &user.id, mime, &body).await?))
+    Ok(Json(store_upload(&st, &ws, &id, &user.id, mime, &body).await?))
 }
 
 /// The image's type, or why it can't be used.
@@ -490,7 +490,43 @@ fn check_image(st: &AppState, body: &[u8]) -> AppResult<&'static str> {
     if body.len() > st.cfg.max_upload_bytes {
         return Err(AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "image is too large"));
     }
-    render::sniff_mime(body).ok_or_else(|| AppError::bad_request("unsupported image type (use PNG, JPEG, GIF or WebP)"))
+    if is_svg(body) {
+        return Ok("image/svg+xml");
+    }
+    render::sniff_mime(body).ok_or_else(|| AppError::bad_request("unsupported image type (use PNG, JPEG, GIF, WebP or SVG)"))
+}
+
+/// Whether an upload is an SVG document.
+fn is_svg(body: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&body[..body.len().min(4096)]);
+    let t = head.trim_start_matches('\u{feff}').trim_start();
+    (t.starts_with('<')) && head.contains("<svg")
+}
+
+/// Save an uploaded image; an SVG is drawn to a PNG first, since image fills
+/// are bitmaps everywhere (editor, exports, Unity). It reports the SVG's own
+/// size, so a node made from it gets the drawing's proportions and size.
+async fn store_upload(st: &AppState, ws: &str, file_id: &str, user_id: &str, mime: &str, body: &[u8]) -> AppResult<Value> {
+    if mime != "image/svg+xml" {
+        return store_image(st, ws, file_id, user_id, mime, body).await;
+    }
+    let svg = std::str::from_utf8(body).map_err(|_| AppError::bad_request("the SVG isn't UTF-8 text"))?.to_string();
+    if crate::svg_import::declares_entities(&svg) {
+        return Err(AppError::bad_request("SVGs that declare XML entities (<!ENTITY>) aren't supported; export the SVG again without them"));
+    }
+    let fonts = crate::fonts::fontdb_for(st, ws).await;
+    let _permit = render::RENDERS.acquire().await.map_err(AppError::internal)?;
+    let (png, w, h) = tokio::task::spawn_blocking(move || render::rasterize_svg(&svg, fonts))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(|e| AppError::bad_request(format!("couldn't draw the SVG: {e}")))?;
+    let mut asset = store_image(st, ws, file_id, user_id, "image/png", &png).await?;
+    asset["pixelWidth"] = asset["width"].clone();
+    asset["pixelHeight"] = asset["height"].clone();
+    asset["width"] = json!(w);
+    asset["height"] = json!(h);
+    asset["from"] = json!("svg");
+    Ok(asset)
 }
 
 /// Save an image to a workspace's assets (access already checked).
@@ -577,7 +613,7 @@ pub async fn upload_image_with_link(State(st): State<AppState>, Path(token): Pat
     // The person may have lost access since the link was made.
     let (uid, fid) = (grant.user_id.clone(), file_id.clone());
     st.db.call(move |c| file_access(c, &uid, &fid, Role::Editor).map(|_| ())).await?;
-    let mut asset = store_image(&st, &grant.workspace_id, file_id, &grant.user_id, mime, &body).await?;
+    let mut asset = store_upload(&st, &grant.workspace_id, file_id, &grant.user_id, mime, &body).await?;
     asset["remainingUploads"] = json!(grant.remaining);
     asset["node"] = json!({ "type": "image", "asset": asset["id"], "width": asset["width"], "height": asset["height"] });
     Ok(Json(asset))

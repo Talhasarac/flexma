@@ -238,7 +238,7 @@ impl Ctx {
 }
 
 /// Whether the markup declares entities (in any letter case, since this is a guard).
-fn declares_entities(svg: &str) -> bool {
+pub fn declares_entities(svg: &str) -> bool {
     svg.as_bytes().windows(8).any(|w| w.eq_ignore_ascii_case(b"<!entity"))
 }
 
