@@ -145,6 +145,10 @@ pub trait Backend {
     /// Push (or pop) a stencil clip drawn from scene instances, each with its
     /// texture (alpha masks). Overlapping parts count once.
     fn clip(&mut self, parts: &[(u32, Option<TexId>)], push: bool);
+    /// Background blur: blur what's been drawn so far (Gaussian σ in device
+    /// px) and draw it inside the shape of `parts` (as for `clip`), under the
+    /// layer that's drawn next.
+    fn backdrop_blur(&mut self, parts: &[(u32, Option<TexId>)], sigma: f32);
     fn draw_mesh(&mut self, mesh: MeshId, m: Rows, color: [f32; 4]);
     /// A textured quad covering `rect` (x, y, w, h) in local space, showing
     /// the texture region `uv` (x0, y0, x1, y1).

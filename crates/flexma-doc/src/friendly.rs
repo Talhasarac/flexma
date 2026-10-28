@@ -120,6 +120,16 @@ fn align(v: &Value) -> Value {
     }
 }
 
+/// Add effects from a shorthand to any already given.
+fn append_effects(out: &mut Map<String, Value>, more: Vec<Value>) {
+    match out.get_mut("effects") {
+        Some(Value::Array(a)) => a.extend(more),
+        _ => {
+            out.insert("effects".into(), Value::Array(more));
+        }
+    }
+}
+
 /// Rich text from spans: `[{text:"Anılarını seç, "}, {text:"baskıya dönüştür",
 /// color:"#c9a227", weight:700}]` (a plain string is unstyled). Each span takes
 /// the text style props (font, weight/bold, italic, color/fill, underline,
@@ -401,7 +411,11 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                     o.entry("blur").or_insert(json!(12));
                     effects.push(Value::Object(o));
                 }
-                out.insert("effects".into(), Value::Array(effects));
+                append_effects(&mut out, effects);
+            }
+            "backgroundBlur" | "backdropBlur" | "blurBehind" => {
+                let radius = v.as_f64().ok_or(format!("'{k}' must be a blur radius in px, e.g. 16"))?;
+                append_effects(&mut out, vec![json!({ "type": "BACKGROUND_BLUR", "radius": radius })]);
             }
             "path" | "d" | "pathData" => {
                 out.insert("pathData".into(), v.clone());

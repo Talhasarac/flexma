@@ -47,6 +47,9 @@ enum Cmd {
     /// Stencil clip drawn from one or more instances, each with its image (alpha masks).
     PushClip { parts: Vec<(u32, Option<String>)> },
     PopClip { parts: Vec<(u32, Option<String>)> },
+    /// Background blur: blur what's drawn so far inside the shape of `parts`
+    /// (radius in world units), before the layer itself.
+    Backdrop { parts: Vec<(u32, Option<String>)>, radius: f32 },
 }
 
 struct FillParams {
@@ -523,6 +526,30 @@ impl Renderer {
             if !is_hidden {
                 match n.kind {
                     NodeType::Rectangle | NodeType::Frame | NodeType::Ellipse | NodeType::Component | NodeType::Instance => {
+                        let backdrop = n.effects.iter().find_map(|e| match e {
+                            Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => Some(*radius),
+                            _ => None,
+                        });
+                        if let Some(radius) = backdrop {
+                            // The layer's shape, as a clip.
+                            let ci = (inst.len() / INST_FLOATS) as u32;
+                            push_instance(
+                                &mut inst,
+                                &world,
+                                n.width,
+                                n.height,
+                                n.kind == NodeType::Ellipse,
+                                2.0,
+                                n.radii(),
+                                [[0.0; 4]; 4],
+                                [0.0; 4],
+                                [0.0, 0.0, 0.0, 1.0],
+                                [0.0; 4],
+                                [0.0; 4],
+                                [0.0; 4],
+                            );
+                            cmds.push(Cmd::Backdrop { parts: vec![(ci, None)], radius });
+                        }
                         self.build_box(n, &world, opacity, &mut inst, &mut cmds, &push_shape);
                     }
                     NodeType::Text => {
@@ -1053,6 +1080,12 @@ impl Renderer {
                     flush_shapes!();
                     let parts = self.clip_parts(parts);
                     self.gpu.clip(&parts, matches!(cmd, Cmd::PushClip { .. }));
+                }
+                Cmd::Backdrop { parts, radius } => {
+                    flush_shapes!();
+                    let parts = self.clip_parts(parts);
+                    // σ = radius / 2, like the exports' blur.
+                    self.gpu.backdrop_blur(&parts, *radius / 2.0 * (cam.zoom * dpr) as f32);
                 }
                 Cmd::Mesh { id, fill, stroke } => {
                     let Some(n) = doc.get(id) else { continue };

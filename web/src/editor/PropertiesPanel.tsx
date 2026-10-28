@@ -1126,13 +1126,20 @@ function EffectsSection({ sel, set, begin, end }: SectionProps) {
                 onChange={(ev) =>
                   update(
                     effects.map((q, j) =>
-                      j === i ? (ev.target.value === 'LAYER_BLUR' ? { type: 'LAYER_BLUR', radius: 8 } : { type: 'DROP_SHADOW', color: '#00000040', x: 0, y: 4, blur: 12, spread: 0 }) : q,
+                      j === i
+                        ? ev.target.value === 'LAYER_BLUR'
+                          ? { type: 'LAYER_BLUR', radius: 8 }
+                          : ev.target.value === 'BACKGROUND_BLUR'
+                            ? { type: 'BACKGROUND_BLUR', radius: 16 }
+                            : { type: 'DROP_SHADOW', color: '#00000040', x: 0, y: 4, blur: 12, spread: 0 }
+                        : q,
                     ),
                   )
                 }
               >
                 <option value="DROP_SHADOW">Drop shadow</option>
                 <option value="LAYER_BLUR">Layer blur (export only)</option>
+                <option value="BACKGROUND_BLUR">Background blur</option>
               </select>
               <IconButton active={e.visible === false} title="Toggle" onClick={() => update(effects.map((q, j) => (j === i ? { ...e, visible: e.visible === false } : q)))}>
                 {e.visible === false ? <EyeOff size={13} /> : <Eye size={13} />}

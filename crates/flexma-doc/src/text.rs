@@ -297,7 +297,7 @@ pub fn rich_layout(n: &Node, measure: &mut dyn FnMut(&Node, &str) -> f64) -> Vec
         }
     }
     // Width of chars a..b, piece by piece.
-    let mut width = |a: usize, b: usize, measure: &mut dyn FnMut(&Node, &str) -> f64| -> f64 {
+    let width = |a: usize, b: usize, measure: &mut dyn FnMut(&Node, &str) -> f64| -> f64 {
         let mut w = 0.0;
         let mut i = a;
         while i < b {

@@ -63,12 +63,15 @@ Type defaults:
 "shadow": { "x": 0, "y": 8, "blur": 24, "spread": 0, "color": "#0000001f" }
 "effects": [
   { "type": "DROP_SHADOW", "x": 0, "y": 4, "blur": 12, "spread": 0, "color": "#00000040" },
-  { "type": "LAYER_BLUR", "radius": 8 }
+  { "type": "LAYER_BLUR", "radius": 8 },
+  { "type": "BACKGROUND_BLUR", "radius": 16 }
 ]
+"backgroundBlur": 16
 ```
 
 - `blur` is the softness (0 is a hard copy, like Unity's Shadow). `spread` grows the shadow's shape first, or shrinks it when negative. Several shadows stack, the first one lowest.
 - `LAYER_BLUR`, and shadows on vectors, show in exports and screenshots only.
+- `BACKGROUND_BLUR` (shorthand `backgroundBlur: <radius>`, like CSS `backdrop-filter: blur()`) blurs what's behind a rectangle, frame, ellipse, component or instance, inside its shape, with its fill on top: give it a semi-transparent fill for frosted glass (a modal backdrop, a glass card). It shows in the editor, exports and screenshots.
 
 ## FRAME (auto layout)
 

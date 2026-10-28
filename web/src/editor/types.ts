@@ -182,7 +182,9 @@ export interface Constraints {
 
 export type EffectValue =
   | { type: 'DROP_SHADOW'; color: string; x: number; y: number; blur: number; spread: number; visible?: boolean }
-  | { type: 'LAYER_BLUR'; radius: number; visible?: boolean };
+  | { type: 'LAYER_BLUR'; radius: number; visible?: boolean }
+  /** Blurs what's behind the layer inside its shape (frosted glass). */
+  | { type: 'BACKGROUND_BLUR'; radius: number; visible?: boolean };
 
 export interface Padding {
   top: number;

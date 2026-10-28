@@ -510,6 +510,13 @@ pub enum Effect {
         #[serde(default = "yes", skip_serializing_if = "is_true")]
         visible: bool,
     },
+    /// Blurs what's behind the layer, inside its shape (CSS backdrop-filter:
+    /// blur, frosted glass). Its fill, usually semi-transparent, goes on top.
+    BackgroundBlur {
+        radius: f32,
+        #[serde(default = "yes", skip_serializing_if = "is_true")]
+        visible: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

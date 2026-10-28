@@ -86,19 +86,45 @@ pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(Stri
         bounds = Rect::new(0.0, 0.0, 1.0, 1.0);
     }
     let b = bounds.inflate(opts.padding);
-    let mut w = Writer { doc, opts, defs: String::new(), body: String::new(), next_id: 0 };
-    for n in roots {
-        let parent_world = n.parent.as_deref().map(|p| doc.world_transform(p)).unwrap_or(Affine::IDENTITY);
-        // Nodes write their local transform; a nested root also needs its
-        // parent's, to land in page space like the bounds.
-        let nested = parent_world != Affine::IDENTITY;
-        if nested {
-            let _ = write!(w.body, r#"<g transform="{}">"#, parent_world.to_svg());
+    let mut w = writer(doc, opts, String::new(), None);
+    write_roots(&mut w, &roots);
+    // Background blurs: what's painted before each such layer, drawn again
+    // blurred and clipped to its shape, under it (SVG has no backdrop filter).
+    for (k, id, radius) in std::mem::take(&mut w.backdrops) {
+        let Some(n) = doc.get(&id) else { continue };
+        let mut behind = writer(doc, opts, format!("b{k}_"), Some(id.clone()));
+        if let Some(bg) = opts.background {
+            let _ = write!(
+                behind.body,
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
+                fmt_num(b.x),
+                fmt_num(b.y),
+                fmt_num(b.width),
+                fmt_num(b.height),
+                if opts.linear { bg.to_linear() } else { bg }.to_hex()
+            );
         }
-        w.node(n, &parent_world);
-        if nested {
-            w.body.push_str("</g>");
-        }
+        write_roots(&mut behind, &roots);
+        let inverse = doc.world_transform(&id).invert().unwrap_or(Affine::IDENTITY);
+        let shape = w.shape(n).unwrap_or_else(|| format!(r#"<rect width="{}" height="{}""#, fmt_num(n.width), fmt_num(n.height)));
+        let m = (radius as f64 * 1.5 + 2.0).ceil();
+        let _ = write!(
+            w.defs,
+            r#"{}<g id="bd{k}">{}</g><clipPath id="bdc{k}">{shape}/></clipPath><filter id="bdf{k}" filterUnits="userSpaceOnUse" x="{}" y="{}" width="{}" height="{}" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{}"/></filter>"#,
+            behind.defs,
+            behind.body,
+            fmt_num(-m),
+            fmt_num(-m),
+            fmt_num(n.width.abs() + 2.0 * m),
+            fmt_num(n.height.abs() + 2.0 * m),
+            fmt_num(radius as f64 / 2.0)
+        );
+        let markup = format!(
+            r##"<g transform="{}" clip-path="url(#bdc{k})"><g filter="url(#bdf{k})"><use href="#bd{k}" transform="{}"/></g></g>"##,
+            doc.local_transform(&id).to_svg(),
+            inverse.to_svg()
+        );
+        w.body = w.body.replace(&backdrop_placeholder(k), &markup);
     }
     let mut out = String::new();
     let _ = write!(
@@ -197,6 +223,39 @@ struct Writer<'a> {
     defs: String,
     body: String,
     next_id: usize,
+    /// Prefix for generated ids (a backdrop pass has its own).
+    id_prefix: String,
+    /// Backdrop pass: draw everything painted before this node, then stop.
+    stop_at: Option<NodeId>,
+    stopped: bool,
+    /// Layers with a background blur: (placeholder number, id, radius).
+    backdrops: Vec<(usize, NodeId, f32)>,
+}
+
+/// A writer for `doc` (see `export`).
+fn writer<'a>(doc: &'a Document, opts: &'a SvgOptions<'a>, id_prefix: String, stop_at: Option<NodeId>) -> Writer<'a> {
+    Writer { doc, opts, defs: String::new(), body: String::new(), next_id: 0, id_prefix, stop_at, stopped: false, backdrops: Vec::new() }
+}
+
+/// Write the export's root nodes.
+fn write_roots(w: &mut Writer, roots: &[&Node]) {
+    for n in roots {
+        let parent_world = n.parent.as_deref().map(|p| w.doc.world_transform(p)).unwrap_or(Affine::IDENTITY);
+        // Nodes write their local transform; a nested root also needs its
+        // parent's, to land in page space like the bounds.
+        let nested = parent_world != Affine::IDENTITY;
+        if nested {
+            let _ = write!(w.body, r#"<g transform="{}">"#, parent_world.to_svg());
+        }
+        w.node(n, &parent_world);
+        if nested {
+            w.body.push_str("</g>");
+        }
+    }
+}
+
+fn backdrop_placeholder(k: usize) -> String {
+    format!("<!--flexma-backdrop-{k}-->")
 }
 
 pub fn escape(s: &str) -> String {
@@ -249,7 +308,7 @@ fn rounded_rect_path(w: f64, h: f64, r: [f64; 4]) -> String {
 impl Writer<'_> {
     fn id(&mut self, prefix: &str) -> String {
         self.next_id += 1;
-        format!("{prefix}{}", self.next_id)
+        format!("{}{prefix}{}", self.id_prefix, self.next_id)
     }
 
     /// SVG geometry element (without paint attributes) for a node's own shape.
@@ -622,6 +681,8 @@ impl Writer<'_> {
             .iter()
             .filter(|e| match e {
                 Effect::DropShadow { visible, .. } | Effect::LayerBlur { visible, .. } => *visible,
+                // Drawn before the layer (see `backdrop`), not a filter on it.
+                Effect::BackgroundBlur { .. } => false,
             })
             .collect();
         if effects.is_empty() {
@@ -635,6 +696,7 @@ impl Writer<'_> {
             .map(|e| match e {
                 Effect::DropShadow { x, y, blur, spread, .. } => x.abs().max(y.abs()) as f64 + *blur as f64 * 1.5 + spread.max(0.0) as f64,
                 Effect::LayerBlur { radius, .. } => *radius as f64 * 1.5,
+                Effect::BackgroundBlur { .. } => 0.0,
             })
             .fold(0.0, f64::max);
         let m = (reach + n.width.abs().max(n.height.abs()) * 0.5 + 2.0).ceil();
@@ -678,6 +740,7 @@ impl Writer<'_> {
                     layers.push(format!("s{i}"));
                 }
                 Effect::LayerBlur { radius, .. } => blur = Some(*radius),
+                Effect::BackgroundBlur { .. } => {}
             }
         }
         if !layers.is_empty() {
@@ -724,8 +787,23 @@ impl Writer<'_> {
     }
 
     fn node(&mut self, n: &Node, _parent_world: &Affine) {
-        if !n.visible || !n.kind.is_scene() {
+        if self.stopped || !n.visible || !n.kind.is_scene() {
             return;
+        }
+        if self.stop_at.as_deref() == Some(n.id.as_str()) {
+            self.stopped = true;
+            return;
+        }
+        // Its blurred backdrop goes first, under the layer (see `export`).
+        if self.stop_at.is_none() {
+            if let Some(r) = n.effects.iter().find_map(|e| match e {
+                Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => Some(*radius),
+                _ => None,
+            }) {
+                let k = self.backdrops.len();
+                self.body.push_str(&backdrop_placeholder(k));
+                self.backdrops.push((k, n.id.clone(), r));
+            }
         }
         let local = self.doc.local_transform(&n.id);
         let mut g = String::from("<g");

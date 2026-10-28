@@ -792,6 +792,6 @@ pub fn full_json(n: &Node) -> Value {
 
 pub fn effect_visible(e: &flexma_doc::Effect) -> bool {
     match e {
-        flexma_doc::Effect::DropShadow { visible, .. } | flexma_doc::Effect::LayerBlur { visible, .. } => *visible,
+        flexma_doc::Effect::DropShadow { visible, .. } | flexma_doc::Effect::LayerBlur { visible, .. } | flexma_doc::Effect::BackgroundBlur { visible, .. } => *visible,
     }
 }

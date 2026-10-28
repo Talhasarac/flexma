@@ -162,6 +162,7 @@ const TEX_FORMAT: &str = "rgba8unorm";
 
 const SHADERS: &str = include_str!("shaders/flexma.wgsl");
 const POST_SHADERS: &str = include_str!("shaders/post.wgsl");
+const BLUR_SHADERS: &str = include_str!("shaders/blur.wgsl");
 const BRUSH_SHADERS: &str = include_str!("shaders/brush.wgsl");
 const DAB_SHADERS: &str = include_str!("shaders/dab.wgsl");
 const SMUDGE_SHADERS: &str = include_str!("shaders/smudge.wgsl");
@@ -206,6 +207,9 @@ enum Pipe {
     /// Smudge: pick up into the stroke's buffer, lay it down onto a tile.
     SmudgePick,
     SmudgeStamp,
+    /// Background blur: a blur pass, and the blurred copy onto the scene.
+    Blur(bool),
+    Backdrop(bool),
 }
 
 #[derive(Clone, Copy)]
@@ -220,6 +224,19 @@ enum Op {
     Tex { tex: TexId, slot: u32, label: bool },
     StencilRef(u32),
     Composite,
+    /// Background blur here: the scene pass ends, what it drew is blurred
+    /// (uniform slots across and down, at 1/`down` size), and the next pass
+    /// starts with it drawn inside `parts`. `depth`: the clip depth.
+    Backdrop { parts: Vec<(u32, Option<TexId>)>, depth: u32, slots: [u32; 2], down: u32 },
+    /// The blurred copy (a texture bind group), full screen, stencil-tested.
+    BackdropQuad(JsValue),
+}
+
+/// A texture to render into and sample from: texture, view, bind group.
+struct RenderTex {
+    tex: GpuTexture,
+    view: JsValue,
+    bind: JsValue,
 }
 
 struct TexEntry {
@@ -254,6 +271,11 @@ pub struct GpuBackend {
     format: String,
     module: JsValue,
     post_module: JsValue,
+    blur_module: JsValue,
+    /// Background blur textures: the scene so far, and per small size the
+    /// two blur passes' targets. Format: the scene's.
+    backdrop_src: Option<(u32, u32, bool, RenderTex)>,
+    backdrop_small: HashMap<(u32, u32, bool), (RenderTex, RenderTex)>,
     dab_module: JsValue,
     dab_bgl: JsValue,
     dab_layout: JsValue,
@@ -388,6 +410,7 @@ impl GpuBackend {
         let queue = device.queue();
         let module = device.create_shader_module(&obj! { "label": "flexma", "code": SHADERS });
         let post_module = device.create_shader_module(&obj! { "label": "flexma-post", "code": POST_SHADERS });
+        let blur_module = device.create_shader_module(&obj! { "label": "flexma-blur", "code": BLUR_SHADERS });
         let dab_module = device.create_shader_module(&obj! { "label": "flexma-dab", "code": format!("{BRUSH_SHADERS}\n{DAB_SHADERS}") });
         let smudge_module = device.create_shader_module(&obj! { "label": "flexma-smudge", "code": format!("{BRUSH_SHADERS}\n{SMUDGE_SHADERS}") });
         // Brush bindings: style uniform, clamped and repeating samplers, then
@@ -484,6 +507,9 @@ impl GpuBackend {
             format,
             module,
             post_module,
+            blur_module,
+            backdrop_src: None,
+            backdrop_small: HashMap::new(),
             dab_module,
             dab_bgl,
             dab_layout,
@@ -687,6 +713,26 @@ impl GpuBackend {
                     "primitive": obj! { "topology": if p == Pipe::SmudgePick { "triangle-list" } else { "triangle-strip" } },
                 }
             }
+            Pipe::Blur(linear) => obj! {
+                "label": "backdrop blur",
+                "layout": self.main_layout.clone(),
+                "vertex": obj! { "module": self.blur_module.clone(), "entryPoint": "vs_full", "buffers": arr(vec![]) },
+                "fragment": obj! {
+                    "module": self.blur_module.clone(),
+                    "entryPoint": "fs_blur",
+                    "targets": arr(vec![obj! { "format": if linear { LINEAR_FORMAT } else { self.format.as_str() } }.into()]),
+                },
+                "primitive": obj! { "topology": "triangle-list" },
+            },
+            Pipe::Backdrop(linear) => obj! {
+                "label": "backdrop",
+                "layout": self.post_layout.clone(),
+                "vertex": obj! { "module": self.post_module.clone(), "entryPoint": "vs_full", "buffers": arr(vec![]) },
+                "fragment": obj! { "module": self.post_module.clone(), "entryPoint": "fs_blit", "targets": arr(vec![scene_target(linear, WRITE_ALL)]) },
+                "primitive": obj! { "topology": "triangle-list" },
+                "depthStencil": stencil(Stencil::Test),
+                "multisample": ms(),
+            },
             Pipe::Blit => obj! {
                 "label": "mip blit",
                 "layout": self.post_layout.clone(),
@@ -901,6 +947,16 @@ impl GpuBackend {
                     }
                     pass.draw(4, 1, 0, 0);
                 }
+                Op::Backdrop { .. } => {}
+                Op::BackdropQuad(bind) => {
+                    let pl = self.pipeline(Pipe::Backdrop(linear));
+                    pass.set_pipeline(&pl);
+                    current = Some(Pipe::Backdrop(linear));
+                    bound_tex = None;
+                    bound_inst = None;
+                    pass.set_bind_group(0, bind);
+                    pass.draw(3, 1, 0, 0);
+                }
                 Op::Composite => {
                     let Some(bind) = self.target.as_ref().and_then(|t| t.resolve.as_ref()).map(|r| r.2.clone()) else { continue };
                     let pl = self.pipeline(Pipe::Composite);
@@ -912,6 +968,110 @@ impl GpuBackend {
                     pass.draw(3, 1, 0, 0);
                 }
             }
+        }
+    }
+
+    /// A texture in the scene's format to render into and sample from.
+    fn render_tex(&self, label: &str, w: u32, h: u32, linear: bool) -> RenderTex {
+        let tex = self.device.create_texture(&obj! {
+            "label": label,
+            "size": arr(vec![w.max(1).into(), h.max(1).into()]),
+            "format": if linear { LINEAR_FORMAT } else { self.format.as_str() },
+            "usage": TEX_RENDER | TEX_BINDING,
+        });
+        let view = tex.create_view();
+        let bind = self.tex_bind_group(view.clone());
+        RenderTex { tex, view, bind }
+    }
+
+    /// The scene with background blurs: a pass up to each one, resolved into
+    /// `backdrop_src`, blurred across then down into small textures, and the
+    /// next pass (loading what the last one stored) starts by drawing the
+    /// blurred copy inside the layer's shape.
+    #[allow(clippy::too_many_arguments)]
+    fn scene_with_backdrops(&mut self, enc: &GpuCommandEncoder, ops: &[Op], msaa: JsValue, depth: JsValue, resolve: JsValue, bg: flexma_doc::Color, size: (u32, u32), linear: bool) {
+        let (w, h) = size;
+        if !self.backdrop_src.as_ref().is_some_and(|(sw, sh, l, _)| (*sw, *sh, *l) == (w, h, linear)) {
+            if let Some((_, _, _, old)) = self.backdrop_src.take() {
+                self.trash_tex.push(old.tex);
+            }
+            let t = self.render_tex("backdrop", w, h, linear);
+            self.backdrop_src = Some((w, h, linear, t));
+        }
+        let Some(ubind) = self.uniforms.as_ref().map(|(_, b)| b.clone()) else { return };
+        let (src_view, src_bind) = self.backdrop_src.as_ref().map(|(_, _, _, t)| (t.view.clone(), t.bind.clone())).unwrap();
+        let mut start = 0;
+        let mut prev: Option<(Vec<(u32, Option<TexId>)>, u32, JsValue)> = None;
+        loop {
+            let end = ops[start..].iter().position(|o| matches!(o, Op::Backdrop { .. })).map(|p| start + p);
+            let (first, last) = (start == 0, end.is_none());
+            let load = |first: bool| if first { "clear" } else { "load" };
+            let store = |last: bool| if last { "discard" } else { "store" };
+            let pass = enc.begin_render_pass(&obj! {
+                "colorAttachments": arr(vec![obj! {
+                    "view": msaa.clone(),
+                    "resolveTarget": if last { resolve.clone() } else { src_view.clone() },
+                    "clearValue": arr(vec![(bg.r as f64).into(), (bg.g as f64).into(), (bg.b as f64).into(), 1.0f64.into()]),
+                    "loadOp": load(first),
+                    "storeOp": store(last),
+                }.into()]),
+                "depthStencilAttachment": obj! {
+                    "view": depth.clone(),
+                    "depthClearValue": 1.0f64,
+                    "depthLoadOp": load(first),
+                    "depthStoreOp": store(last),
+                    "stencilClearValue": 0u32,
+                    "stencilLoadOp": load(first),
+                    "stencilStoreOp": store(last),
+                },
+            });
+            pass.set_stencil_reference(prev.as_ref().map(|p| p.1).unwrap_or(0));
+            if let Some((parts, d, blurred)) = prev.take() {
+                let slot = self.scene_slot;
+                let clip = |stencil| parts.iter().map(move |(inst, tex)| Op::Shapes { inst: Inst::Scene, first: *inst, count: 1, tex: *tex, stencil, slot });
+                let mut copy: Vec<Op> = clip(Stencil::Incr).collect();
+                copy.push(Op::StencilRef(d + 1));
+                copy.push(Op::BackdropQuad(blurred));
+                copy.extend(clip(Stencil::Decr));
+                copy.push(Op::StencilRef(d));
+                self.replay(&pass, &copy, true, linear);
+            }
+            self.replay(&pass, &ops[start..end.unwrap_or(ops.len())], true, linear);
+            pass.end();
+            let Some(e) = end else { break };
+            let Op::Backdrop { parts, depth: d, slots, down } = &ops[e] else { break };
+            let key = (w.div_ceil(*down), h.div_ceil(*down), linear);
+            if !self.backdrop_small.contains_key(&key) {
+                if self.backdrop_small.len() >= 4 {
+                    for (_, (a, b)) in self.backdrop_small.drain() {
+                        self.trash_tex.push(a.tex);
+                        self.trash_tex.push(b.tex);
+                    }
+                }
+                let pair = (self.render_tex("backdrop blur a", key.0, key.1, linear), self.render_tex("backdrop blur b", key.0, key.1, linear));
+                self.backdrop_small.insert(key, pair);
+            }
+            let (a, b) = &self.backdrop_small[&key];
+            let steps = [(a.view.clone(), src_bind.clone(), slots[0]), (b.view.clone(), a.bind.clone(), slots[1])];
+            let blurred = b.bind.clone();
+            let pl = self.pipeline(Pipe::Blur(linear));
+            for (target, input, slot) in steps {
+                let bp = enc.begin_render_pass(&obj! {
+                    "colorAttachments": arr(vec![obj! {
+                        "view": target,
+                        "clearValue": arr(vec![0u32.into(), 0u32.into(), 0u32.into(), 0u32.into()]),
+                        "loadOp": "clear",
+                        "storeOp": "store",
+                    }.into()]),
+                });
+                bp.set_pipeline(&pl);
+                bp.set_bind_group_offsets(0, &ubind, &[slot * (SLOT_FLOATS as u32) * 4]);
+                bp.set_bind_group(1, &input);
+                bp.draw(3, 1, 0, 0);
+                bp.end();
+            }
+            prev = Some((parts.clone(), *d, blurred));
+            start = e + 1;
         }
     }
 
@@ -1069,6 +1229,21 @@ impl Backend for GpuBackend {
         self.record(Op::StencilRef(self.depth));
     }
 
+    fn backdrop_blur(&mut self, parts: &[(u32, Option<TexId>)], sigma: f32) {
+        let Some(f) = self.frame.as_ref() else { return };
+        if sigma <= 0.0 || parts.is_empty() || f.width == 0 || f.height == 0 || !self.in_scene {
+            return;
+        }
+        // Blur at a fraction of the size, so a few taps cover a big radius.
+        let down = ((sigma / 4.0).ceil() as u32).clamp(1, 16);
+        let (view, w, sh) = (f.view, f.width, f.height.div_ceil(down));
+        let s = sigma / down as f32;
+        let across = self.push_uniforms(&view, ([0.0; 3], [0.0; 3]), [down as f32 / w as f32, 0.0, s, 0.0], [0.0; 4], [0.0; 4]);
+        let along = self.push_uniforms(&view, ([0.0; 3], [0.0; 3]), [0.0, 1.0 / sh as f32, s, 0.0], [0.0; 4], [0.0; 4]);
+        self.draw_calls += 3;
+        self.scene_ops.push(Op::Backdrop { parts: parts.to_vec(), depth: self.depth, slots: [across, along], down });
+    }
+
     fn draw_mesh(&mut self, mesh: MeshId, m: Rows, color: [f32; 4]) {
         let Some(f) = self.frame.as_ref() else { return };
         let (view, linear) = (f.view, f.linear);
@@ -1149,6 +1324,11 @@ impl Backend for GpuBackend {
             None => canvas_view.clone(),
         };
         let enc = self.device.create_command_encoder();
+        let scene_ops = std::mem::take(&mut self.scene_ops);
+        if scene_ops.iter().any(|o| matches!(o, Op::Backdrop { .. })) {
+            let (msaa, depth) = (t.msaa_view.clone(), t.depth_view.clone());
+            self.scene_with_backdrops(&enc, &scene_ops, msaa, depth, resolve_view, bg, (f.width, f.height), f.linear);
+        } else {
         let scene = enc.begin_render_pass(&obj! {
             "colorAttachments": arr(vec![obj! {
                 "view": t.msaa_view.clone(),
@@ -1168,9 +1348,9 @@ impl Backend for GpuBackend {
             },
         });
         scene.set_stencil_reference(0);
-        let scene_ops = std::mem::take(&mut self.scene_ops);
         self.replay(&scene, &scene_ops, true, f.linear);
         scene.end();
+        }
         let post_ops = std::mem::take(&mut self.post_ops);
         if !post_ops.is_empty() {
             let post = enc.begin_render_pass(&obj! {

@@ -113,6 +113,35 @@ struct LinearTarget {
     resolve_tex: WebGlTexture,
 }
 
+/// Background blur: the scene so far, and two smaller textures it's blurred
+/// through (across, then down).
+struct BackdropTargets {
+    w: i32,
+    h: i32,
+    sw: i32,
+    sh: i32,
+    srgb: bool,
+    src: (WebGlTexture, WebGlFramebuffer),
+    a: (WebGlTexture, WebGlFramebuffer),
+    b: (WebGlTexture, WebGlFramebuffer),
+}
+
+/// A color texture to render into, with its framebuffer.
+fn render_texture(gl: &GL, w: i32, h: i32, srgb: bool) -> Option<(WebGlTexture, WebGlFramebuffer)> {
+    let t = gl.create_texture()?;
+    gl.bind_texture(GL::TEXTURE_2D, Some(&t));
+    gl.tex_storage_2d(GL::TEXTURE_2D, 1, if srgb { GL::SRGB8_ALPHA8 } else { GL::RGBA8 }, w.max(1), h.max(1));
+    gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MIN_FILTER, GL::LINEAR as i32);
+    gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_MAG_FILTER, GL::LINEAR as i32);
+    gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_S, GL::CLAMP_TO_EDGE as i32);
+    gl.tex_parameteri(GL::TEXTURE_2D, GL::TEXTURE_WRAP_T, GL::CLAMP_TO_EDGE as i32);
+    let f = gl.create_framebuffer()?;
+    gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&f));
+    gl.framebuffer_texture_2d(GL::FRAMEBUFFER, GL::COLOR_ATTACHMENT0, GL::TEXTURE_2D, Some(&t), 0);
+    gl.bind_framebuffer(GL::FRAMEBUFFER, None);
+    Some((t, f))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Prog {
     None,
@@ -132,6 +161,13 @@ pub struct GlBackend {
     tex_u: Uniforms,
     composite_prog: WebGlProgram,
     composite_u: Uniforms,
+    blur_prog: WebGlProgram,
+    blur_u: Uniforms,
+    copy_prog: WebGlProgram,
+    copy_u: Uniforms,
+    backdrop: Option<BackdropTargets>,
+    /// The frame's size in device px.
+    frame_size: (i32, i32),
     dab_prog: WebGlProgram,
     dab_u: Uniforms,
     dab_vao: WebGlVertexArrayObject,
@@ -201,6 +237,10 @@ impl GlBackend {
         let mesh_prog = program(&gl, MESH_VS, MESH_FS)?;
         let tex_prog = program(&gl, TEX_VS, TEX_FS)?;
         let composite_prog = program(&gl, COMPOSITE_VS, COMPOSITE_FS)?;
+        let blur_prog = program(&gl, COMPOSITE_VS, BLUR_FS)?;
+        let blur_u = Uniforms::new(&gl, &blur_prog, &["u_tex", "u_step", "u_sigma"]);
+        let copy_prog = program(&gl, COMPOSITE_VS, COPY_FS)?;
+        let copy_u = Uniforms::new(&gl, &copy_prog, &["u_tex"]);
         let shape_u = Uniforms::new(&gl, &shape_prog, &["u_view", "u_px", "u_tex", "u_linear"]);
         let mesh_u = Uniforms::new(&gl, &mesh_prog, &["u_view", "u_m0", "u_m1", "u_color", "u_linear"]);
         let tex_u = Uniforms::new(&gl, &tex_prog, &["u_view", "u_m0", "u_m1", "u_rect", "u_tex", "u_alpha", "u_linear", "u_uv"]);
@@ -263,6 +303,12 @@ impl GlBackend {
             tex_u,
             composite_prog,
             composite_u,
+            blur_prog,
+            blur_u,
+            copy_prog,
+            copy_u,
+            backdrop: None,
+            frame_size: (0, 0),
             dab_prog,
             dab_u,
             dab_vao,
@@ -557,6 +603,7 @@ impl Backend for GlBackend {
         self.screen = p.screen;
         self.px = p.px;
         let (pw, ph) = (p.width as i32, p.height as i32);
+        self.frame_size = (pw, ph);
         // Linear blending: draw the scene into an sRGB target (blends happen in
         // linear light), then encode it onto the canvas before the overlays.
         self.linear_out = p.linear && pw > 0 && ph > 0 && self.bind_linear_target(pw, ph);
@@ -603,6 +650,68 @@ impl Backend for GlBackend {
         gl.color_mask(true, true, true, true);
         gl.stencil_op(GL::KEEP, GL::KEEP, GL::KEEP);
         gl.stencil_func(GL::EQUAL, self.depth, 0xff);
+    }
+
+    fn backdrop_blur(&mut self, parts: &[(u32, Option<TexId>)], sigma: f32) {
+        let (w, h) = self.frame_size;
+        if sigma <= 0.0 || w <= 0 || h <= 0 || parts.is_empty() {
+            return;
+        }
+        // Blur at a fraction of the size, so a few taps cover a big radius.
+        let down = ((sigma / 4.0).ceil() as i32).clamp(1, 16);
+        let (sw, sh) = ((w + down - 1) / down, (h + down - 1) / down);
+        let srgb = self.linear_out;
+        let gl = self.gl.clone();
+        if !self.backdrop.as_ref().is_some_and(|b| (b.w, b.h, b.sw, b.sh, b.srgb) == (w, h, sw, sh, srgb)) {
+            if let Some(old) = self.backdrop.take() {
+                for (t, f) in [old.src, old.a, old.b] {
+                    gl.delete_texture(Some(&t));
+                    gl.delete_framebuffer(Some(&f));
+                }
+            }
+            let (Some(src), Some(a), Some(b)) = (render_texture(&gl, w, h, srgb), render_texture(&gl, sw, sh, srgb), render_texture(&gl, sw, sh, srgb)) else { return };
+            self.backdrop = Some(BackdropTargets { w, h, sw, sh, srgb, src, a, b });
+        }
+        let scene_fbo = if self.linear_out { self.linear_target.as_ref().map(|t| t.msaa_fbo.clone()) } else { None };
+        let t = self.backdrop.as_ref().unwrap();
+        // What's been drawn so far.
+        gl.bind_framebuffer(GL::READ_FRAMEBUFFER, scene_fbo.as_ref());
+        gl.bind_framebuffer(GL::DRAW_FRAMEBUFFER, Some(&t.src.1));
+        gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, GL::COLOR_BUFFER_BIT, GL::NEAREST);
+        // Blurred across, then down.
+        gl.disable(GL::BLEND);
+        gl.disable(GL::STENCIL_TEST);
+        gl.use_program(Some(&self.blur_prog));
+        gl.bind_vertex_array(Some(&self.empty_vao));
+        gl.active_texture(GL::TEXTURE0);
+        gl.uniform1i(self.blur_u.get(0), 0);
+        gl.uniform1f(self.blur_u.get(2), sigma / down as f32);
+        gl.viewport(0, 0, sw, sh);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&t.a.1));
+        gl.bind_texture(GL::TEXTURE_2D, Some(&t.src.0));
+        gl.uniform2f(self.blur_u.get(1), down as f32 / w as f32, 0.0);
+        gl.draw_arrays(GL::TRIANGLES, 0, 3);
+        gl.bind_framebuffer(GL::FRAMEBUFFER, Some(&t.b.1));
+        gl.bind_texture(GL::TEXTURE_2D, Some(&t.a.0));
+        gl.uniform2f(self.blur_u.get(1), 0.0, 1.0 / sh as f32);
+        gl.draw_arrays(GL::TRIANGLES, 0, 3);
+        let blurred = t.b.0.clone();
+        // Back on the scene: the blurred copy, inside the layer's shape.
+        gl.bind_framebuffer(GL::FRAMEBUFFER, scene_fbo.as_ref());
+        gl.viewport(0, 0, w, h);
+        gl.enable(GL::STENCIL_TEST);
+        gl.enable(GL::BLEND);
+        self.current = Prog::None;
+        self.clip(parts, true);
+        gl.use_program(Some(&self.copy_prog));
+        gl.bind_vertex_array(Some(&self.empty_vao));
+        gl.active_texture(GL::TEXTURE0);
+        gl.bind_texture(GL::TEXTURE_2D, Some(&blurred));
+        gl.uniform1i(self.copy_u.get(0), 0);
+        gl.draw_arrays(GL::TRIANGLES, 0, 3);
+        self.current = Prog::None;
+        self.clip(parts, false);
+        self.draw_calls += 3;
     }
 
     fn draw_mesh(&mut self, mesh: MeshId, m: Rows, color: [f32; 4]) {
@@ -1528,6 +1637,39 @@ void main() {{
     )
 }
 
+/// Background blur: one direction of a Gaussian, `u_step` apart (σ in steps).
+pub const BLUR_FS: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_step;
+uniform float u_sigma;
+out vec4 o;
+void main() {
+  float s = max(u_sigma, 0.5);
+  vec4 acc = vec4(0.0);
+  float total = 0.0;
+  for (int i = -16; i <= 16; i++) {
+    float x = float(i);
+    float wt = exp(-0.5 * x * x / (s * s));
+    acc += texture(u_tex, v_uv + u_step * x) * wt;
+    total += wt;
+  }
+  o = acc / total;
+}
+"#;
+
+/// A texture as is (the blurred backdrop onto the scene).
+pub const COPY_FS: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 o;
+void main() {
+  o = texture(u_tex, v_uv);
+}
+"#;
+
 /// Full-screen pass that encodes a linear-light sRGB target for the canvas.
 pub const COMPOSITE_VS: &str = r#"#version 300 es
 out vec2 v_uv;
@@ -1577,7 +1719,7 @@ mod tests {
             "long", "short", "double", "half", "fixed", "unsigned", "superp", "input", "output", "filter", "sizeof", "cast",
             "namespace", "using",
         ];
-        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS), ("DAB_VS", DAB_VS), ("DAB_FS", &dab_fs()), ("PICK_FS", &pick_fs()), ("STAMP_VS", STAMP_VS), ("STAMP_FS", &stamp_fs())] {
+        for (name, src) in [("SHAPE_VS", SHAPE_VS), ("SHAPE_FS", SHAPE_FS), ("MESH_VS", MESH_VS), ("MESH_FS", MESH_FS), ("TEX_VS", TEX_VS), ("TEX_FS", TEX_FS), ("COMPOSITE_VS", COMPOSITE_VS), ("COMPOSITE_FS", COMPOSITE_FS), ("BLUR_FS", BLUR_FS), ("COPY_FS", COPY_FS), ("DAB_VS", DAB_VS), ("DAB_FS", &dab_fs()), ("PICK_FS", &pick_fs()), ("STAMP_VS", STAMP_VS), ("STAMP_FS", &stamp_fs())] {
             for line in src.lines() {
                 let code = line.split("//").next().unwrap_or("");
                 for word in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
