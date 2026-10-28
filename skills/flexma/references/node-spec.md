@@ -12,7 +12,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `name` | string | type name (text: its content) | Shown in the layers panel. |
 | `x`, `y` | number | auto | Position relative to the parent. Ignored inside auto layout (unless `absolute: true`). Leave them out on top-level nodes to auto-place beside existing content. |
 | `width` / `w`, `height` / `h` | number \| `"fill"` \| `"hug"` | 100 | `"fill"` stretches inside an auto-layout parent. `"hug"` (auto-layout frames, text) shrinks to fit the content. |
-| `rotation` | number (deg) | 0 | Clockwise, around the center. |
+| `rotation` | number (deg) | 0 | Clockwise, around the center. Like a CSS transform it doesn't change auto layout: the layer keeps its unrotated slot. A tilted card behind a photo (CSS `absolute inset-0 rotate-3`) is an `absolute` layer with `width`/`height: "fill"` and `rotation: 3`, listed before the photo. |
 | `opacity` | 0..1 | 1 | |
 | `visible` / `hidden` | bool | true / false | |
 | `locked` | bool | false | Locked nodes can't be selected on the canvas. |
