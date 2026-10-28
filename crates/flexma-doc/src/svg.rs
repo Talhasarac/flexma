@@ -196,9 +196,9 @@ fn shadow_shows(e: &Effect) -> bool {
     matches!(e, Effect::DropShadow { visible: true, color, .. } if color.a > 0.0)
 }
 
-/// Spread past this only reaches what parent frames clip away (CSS's
-/// `0 0 0 9999px` overlay trick); shadows draw and export this far at most.
-const MAX_SPREAD: f64 = 4096.0;
+/// How far a spread shadow draws and grows an export: the cap every effect
+/// size has (see `MAX_EFFECT_PX`), for nodes built in code too.
+const MAX_SPREAD: f64 = crate::paint::MAX_EFFECT_PX as f64;
 
 /// Spread drawn with `feMorphology` (layers that aren't boxes, like text).
 /// resvg's morphology costs the region's area times the radius squared, so
@@ -1191,7 +1191,7 @@ mod tests {
         doc.apply(&Op::Create { node: t }).unwrap();
         let (svg, _) = export(&doc, &["f:1".to_string()], &SvgOptions::default()).unwrap();
         assert!(!svg.contains("feMorphology"), "{svg}");
-        assert!(svg.contains(r#"<path transform="translate(-4096 -4096)""#), "{svg}");
+        assert!(svg.contains(r#"<path transform="translate(-16384 -16384)""#), "{svg}");
         assert_eq!(svg.matches("fill-opacity=\"0.5\"").count(), 1, "the transparent shadow is skipped: {svg}");
         let (svg, _) = export(&doc, &["t:1".to_string()], &SvgOptions::default()).unwrap();
         assert!(svg.contains(r#"<feMorphology in="SourceAlpha" operator="dilate" radius="16""#), "{svg}");
