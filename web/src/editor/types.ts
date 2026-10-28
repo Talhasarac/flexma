@@ -87,6 +87,8 @@ export interface ComponentInfo {
   height: number;
   description: string;
   instances: number;
+  /** Its values in a variant set (components sharing its name). */
+  variant?: Record<string, string>;
 }
 
 /** A shared color (FILL) or text style. */

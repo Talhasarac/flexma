@@ -31,7 +31,7 @@ import { FontPicker } from './FontPicker';
 import { StyleChip, StylePickerButton } from './Styles';
 import { useToast } from '../components/Toast';
 import { useComponents, useFontState, usePages, useSelection, useUi, type EditorStore } from './store';
-import type { ConstraintType, Constraints, EffectValue, FillMethod, FillOrigin, ImageFilled, NineSlice, NodeData, Paint } from './types';
+import type { ComponentInfo, ConstraintType, Constraints, EffectValue, FillMethod, FillOrigin, ImageFilled, NineSlice, NodeData, Paint } from './types';
 import { FILL_ORIGINS } from './types';
 import { ColorInput, IconButton, NumberInput, Section, Select, splitAlpha, withAlpha } from './inputs';
 import { BrushPanel } from './BrushPanel';
@@ -278,7 +278,7 @@ function SwapSelect({ store, n }: { store: EditorStore; n: NodeData }) {
       Swap
       <Select
         value={n.componentId}
-        options={components.map((c) => ({ value: c.id, label: c.name }))}
+        options={components.map((c) => ({ value: c.id, label: componentLabel(c) }))}
         onChange={(id) => {
           store.engine.update_nodes(JSON.stringify([{ id: n.id, props: { componentId: id } }]));
           store.poll();
@@ -286,6 +286,12 @@ function SwapSelect({ store, n }: { store: EditorStore; n: NodeData }) {
       />
     </label>
   );
+}
+
+/** A component's name, with its variant values when it's in a set. */
+function componentLabel(c: ComponentInfo) {
+  const v = Object.entries(c.variant ?? {});
+  return v.length ? `${c.name} (${v.map(([k, x]) => `${k}=${x}`).join(', ')})` : c.name;
 }
 
 /** An instance's variant values and component properties. */
@@ -329,7 +335,7 @@ function InstanceProps({ store, n }: { store: EditorStore; n: NodeData }) {
             />
           )}
           {p.type === 'INSTANCE_SWAP' && (
-            <Select value={String(p.value ?? '')} options={components.map((c) => ({ value: c.id, label: c.name }))} onChange={(id) => setProp(name, id)} />
+            <Select value={String(p.value ?? '')} options={components.map((c) => ({ value: c.id, label: componentLabel(c) }))} onChange={(id) => setProp(name, id)} />
           )}
         </label>
       ))}

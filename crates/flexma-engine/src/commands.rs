@@ -1027,6 +1027,7 @@ impl Editor {
                     "height": n.height,
                     "description": n.description,
                     "instances": flexma_doc::components::instances_of(&self.doc, &n.id).len(),
+                    "variant": n.variant,
                 }));
             }
         });
