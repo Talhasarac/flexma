@@ -620,6 +620,10 @@ impl FlexmaEditor {
     pub fn editing_text(&mut self) -> String {
         self.ed.editing_text_json().to_string()
     }
+    /// what: "bold", "italic" or "underline"; start/end in characters.
+    pub fn toggle_text_style(&mut self, start: usize, end: usize, what: &str) {
+        self.ed.toggle_text_style(start, end, what);
+    }
     pub fn set_editing_text(&mut self, text: &str) {
         self.ed.set_editing_text(text);
     }

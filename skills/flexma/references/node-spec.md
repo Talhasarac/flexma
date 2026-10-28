@@ -132,6 +132,7 @@ Sizing rules:
 | Property | Notes |
 |---|---|
 | `text` / `characters` / `content` | The string. `\n` makes a hard line break. |
+| `spans` | Rich text, instead of `text`: `["Anılarını seç, ", { "text": "baskıya dönüştür", "color": "#c9a227", "weight": 800 }]`. Spans change `color`/`fill`, `weight` (or `bold: true`), `italic`, `font`, `underline: true`, `strikethrough: true`, `letterSpacing` and `link` for part of one text, which wraps as one paragraph (inline links, bold words, a two-color headline, a logo with a colored dot). The size stays the layer's. Stored as `textRuns` (character ranges); edits to `text` keep them on their words. |
 | `size` / `fontSize` | px |
 | `weight` / `fontWeight` | 100–900, or `thin`, `light`, `regular`, `medium`, `semibold`, `bold`, `extrabold`, `black` |
 | `font` / `fontFamily` | Default `Inter`. Use a family from `list_fonts` (the workspace's fonts), or add one first: `add_font` for any Google Fonts family, `upload_font` for the user's own .ttf/.otf files. Fonts outside the workspace show as Inter for most people and in exports. |

@@ -273,6 +273,9 @@ fn text_content_hash(n: &Node) -> u64 {
     for (c, x, y, blur, spread) in crate::text::text_shadows(n) {
         (c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits(), f(x), f(y), f(blur), f(spread)).hash(&mut h);
     }
+    if !n.text_runs.is_empty() {
+        format!("{:?}", n.text_runs).hash(&mut h);
+    }
     h.finish()
 }
 

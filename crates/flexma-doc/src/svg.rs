@@ -855,9 +855,15 @@ impl Writer<'_> {
             None => crate::text::fitted(n, &mut |s| crate::text::estimate_width(s, n.font_size, n.letter_spacing, n.font_weight)),
         };
         let n: &Node = &fitted;
-        let lines = match self.opts.measure_text {
-            Some(m) => crate::text::layout_lines(n, &mut |s| m(n, s)),
-            None => crate::text::estimate_layout(n).0,
+        // Rich text: styled pieces per line.
+        let rich = crate::text::has_runs(n).then(|| match self.opts.measure_text {
+            Some(m) => crate::text::rich_layout(n, &mut |st, s| m(st, s)),
+            None => crate::text::rich_layout(n, &mut |st, s| crate::text::estimate_width(s, st.font_size, st.letter_spacing, st.font_weight)),
+        });
+        let lines = match (&rich, self.opts.measure_text) {
+            (Some(r), _) => r.iter().map(crate::text::RichLine::text).collect(),
+            (None, Some(m)) => crate::text::layout_lines(n, &mut |s| m(n, s)),
+            (None, None) => crate::text::estimate_layout(n).0,
         };
         let lh = n.effective_line_height();
         let total_h = lh * lines.len() as f64;
@@ -901,19 +907,64 @@ impl Writer<'_> {
             None => (n.font_size * 0.8, n.font_size * 0.2),
         };
         let mut spans = String::new();
-        for (i, line) in lines.iter().enumerate() {
-            // Baseline: the font's ascent + descent centred in the line box,
-            // like CSS and the editor (`flexma-engine` text.rs).
-            let baseline = y0 + lh * i as f64 + (lh - (asc + desc)) / 2.0 + asc;
-            let content = match self.opts.font_runs {
-                Some(runs) => runs(n, line)
+        let font_runs = self.opts.font_runs;
+        // Text in a node's font, with fallback fonts for characters it lacks.
+        let fallback = |st: &Node, text: &str| -> String {
+            match font_runs {
+                Some(runs) => runs(st, text)
                     .into_iter()
                     .map(|(t, family)| match family {
                         Some(f) => format!(r#"<tspan font-family="'{}'">{}</tspan>"#, escape(&f.replace(['\'', '"', '\\'], "")), escape(&t)),
                         None => escape(&t),
                     })
                     .collect(),
-                None => escape(line),
+                None => escape(text),
+            }
+        };
+        for (i, line) in lines.iter().enumerate() {
+            // Baseline: the font's ascent + descent centred in the line box,
+            // like CSS and the editor (`flexma-engine` text.rs).
+            let baseline = y0 + lh * i as f64 + (lh - (asc + desc)) / 2.0 + asc;
+            let content = match rich.as_ref().and_then(|r| r.get(i)) {
+                Some(rl) => {
+                    let mut out = String::new();
+                    for p in &rl.pieces {
+                        let st = &p.style;
+                        let mut attrs = String::new();
+                        if st.font_family != n.font_family {
+                            let _ = write!(attrs, r#" font-family="'{}', Inter, Helvetica, Arial, sans-serif""#, escape(&st.font_family.replace(['\'', '"', '\\'], "")));
+                        }
+                        if st.font_weight != n.font_weight {
+                            let _ = write!(attrs, r#" font-weight="{}""#, st.font_weight);
+                        }
+                        if st.italic != n.italic {
+                            attrs.push_str(if st.italic { r#" font-style="italic""# } else { r#" font-style="normal""# });
+                        }
+                        if st.letter_spacing != n.letter_spacing {
+                            let _ = write!(attrs, r#" letter-spacing="{}""#, fmt_num(st.letter_spacing));
+                        }
+                        if st.text_decoration != n.text_decoration {
+                            let d = match st.text_decoration.as_deref() {
+                                Some("UNDERLINE") => "underline",
+                                Some("STRIKETHROUGH") => "line-through",
+                                _ => "none",
+                            };
+                            let _ = write!(attrs, r#" text-decoration="{d}""#);
+                        }
+                        if st.fills != n.fills {
+                            if let Some(paint) = st.fills.iter().find(|p| p.is_visible()) {
+                                attrs.push_str(&self.paint_attr(paint, n.width, n.height, "fill").unwrap_or_default());
+                            }
+                        }
+                        if attrs.is_empty() {
+                            out.push_str(&fallback(st, &p.text));
+                        } else {
+                            let _ = write!(out, "<tspan{attrs}>{}</tspan>", fallback(st, &p.text));
+                        }
+                    }
+                    out
+                }
+                None => fallback(n, line),
             };
             let _ = write!(spans, r#"<tspan x="{}" y="{}" xml:space="preserve">{content}</tspan>"#, fmt_num(x), fmt_num(baseline));
         }

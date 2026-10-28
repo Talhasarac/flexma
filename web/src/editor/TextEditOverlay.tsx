@@ -55,6 +55,17 @@ export function TextEditOverlay({ store }: { store: EditorStore }) {
       }}
       onKeyDown={(e) => {
         e.stopPropagation();
+        // Bold / italic / underline the selected characters (rich text).
+        const style = { b: 'bold', i: 'italic', u: 'underline' }[e.key.toLowerCase()];
+        if (style && (e.metaKey || e.ctrlKey) && !e.altKey) {
+          e.preventDefault();
+          const el = e.currentTarget;
+          // Selection in characters, not UTF-16 units.
+          const at = (i: number) => Array.from(el.value.slice(0, i)).length;
+          store.engine.toggle_text_style(at(el.selectionStart), at(el.selectionEnd), style);
+          store.poll();
+          return;
+        }
         if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
           e.preventDefault();
           store.engine.end_text_edit();

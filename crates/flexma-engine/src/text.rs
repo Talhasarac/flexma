@@ -186,6 +186,15 @@ impl TextEngine {
 
     /// Box size the node should have given its auto-resize mode.
     pub fn measure_box(&mut self, n: &Node) -> (f64, f64) {
+        if flexma_doc::text::has_runs(n) {
+            let lines = flexma_doc::text::rich_layout(n, &mut |st, s| self.measure(st, s));
+            let h = (lines.len().max(1) as f64 * n.effective_line_height()).ceil();
+            return match n.text_auto_resize {
+                TextAutoResize::WidthAndHeight => (lines.iter().map(|l| l.width).fold(0.0, f64::max).ceil().max(1.0), h),
+                TextAutoResize::Height => (n.width, h),
+                TextAutoResize::None => (n.width, n.height),
+            };
+        }
         let lines = self.lines(n);
         let lh = n.effective_line_height();
         let h = (lines.len().max(1) as f64 * lh).ceil();
@@ -215,8 +224,11 @@ impl TextEngine {
         let shadows = text_shadows(n);
         let margin = (n.font_size * 0.35 + stroke_reach(stroke) + shadow_reach(&shadows)).ceil().max(2.0);
         let lines = self.lines(n);
+        // Rich text (`textRuns`): styled pieces per line.
+        let rich = flexma_doc::text::has_runs(n).then(|| flexma_doc::text::rich_layout(n, &mut |st, s| self.measure(st, s)));
+        let line_count = rich.as_ref().map(|r| r.len()).unwrap_or(lines.len());
         let lh = n.effective_line_height();
-        let total = lh * lines.len() as f64;
+        let total = lh * line_count as f64;
         let y0 = match n.text_align_vertical {
             TextAlignVertical::Top => 0.0,
             TextAlignVertical::Center => (n.height - total) / 2.0,
@@ -225,8 +237,11 @@ impl TextEngine {
         // The raster covers the box, plus any text that overflows it visibly.
         let (mut x_min, mut y_min, mut x_max, mut y_max) = (0.0, 0.0, w, h);
         if n.text_overflow == TextOverflow::Visible {
-            for line in &lines {
-                let lw = self.measure(n, line);
+            let widths: Vec<f64> = match &rich {
+                Some(r) => r.iter().map(|l| l.width).collect(),
+                None => lines.iter().map(|l| self.measure(n, l)).collect(),
+            };
+            for lw in widths {
                 let x0 = match n.text_align {
                     TextAlign::Left => 0.0,
                     TextAlign::Center => (n.width - lw) / 2.0,
@@ -271,7 +286,36 @@ impl TextEngine {
         if stroke.is_some() {
             ctx.set_fill_style_str("#000");
         }
-        for (i, line) in lines.iter().enumerate() {
+        if let Some(rich) = &rich {
+            ctx.set_text_align("left");
+            for (i, line) in rich.iter().enumerate() {
+                let top = y0 + lh * i as f64;
+                let baseline = top + (lh - (asc + desc)) / 2.0 + asc;
+                let mut px = match n.text_align {
+                    TextAlign::Left => 0.0,
+                    TextAlign::Center => (n.width - line.width) / 2.0,
+                    TextAlign::Right => n.width - line.width,
+                };
+                for p in &line.pieces {
+                    self.set_font(&font_css(&p.style, n.font_size), p.style.letter_spacing);
+                    if stroke.is_none() {
+                        ctx.set_fill_style_str(&css_color(text_color(&p.style)));
+                    }
+                    let _ = ctx.fill_text(&p.text, px, baseline);
+                    let thickness = (n.font_size / 14.0).max(1.0);
+                    let yy = match p.style.text_decoration.as_deref() {
+                        Some("UNDERLINE") => Some(baseline + thickness * 1.5),
+                        Some("STRIKETHROUGH") => Some(baseline - asc * 0.32),
+                        _ => None,
+                    };
+                    if let Some(yy) = yy {
+                        ctx.fill_rect(px, yy, p.width, thickness);
+                    }
+                    px += p.width;
+                }
+            }
+        }
+        for (i, line) in lines.iter().enumerate().filter(|_| rich.is_none()) {
             let top = y0 + lh * i as f64;
             let baseline = top + (lh - (asc + desc)) / 2.0 + asc;
             let _ = ctx.fill_text(line, x, baseline);

@@ -568,6 +568,32 @@ pub struct FontSizeRange {
     pub max: f64,
 }
 
+/// Rich text: a style change for the characters `start..end` (character
+/// offsets, end exclusive) of a TEXT node. Unset fields keep the node's own.
+/// The font size stays the node's, so lines keep one height.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRun {
+    pub start: usize,
+    pub end: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fills: Option<Vec<Paint>>,
+    /// UNDERLINE, STRIKETHROUGH, or NONE to turn the node's off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_decoration: Option<String>,
+    /// Where the text links to (kept for code export; style it yourself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
 /// What a STYLE node holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

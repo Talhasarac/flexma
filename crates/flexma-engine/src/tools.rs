@@ -1441,9 +1441,27 @@ impl Editor {
         let Some(n) = self.doc.get(&id).cloned() else { return };
         let mut props = Map::new();
         props.insert("characters".into(), json!(text));
+        flexma_doc::text::keep_runs(&n, &mut props);
         if n.name.is_empty() || n.name == "Text" || n.name == n.characters.chars().take(40).collect::<String>() {
             props.insert("name".into(), json!(text.chars().take(40).collect::<String>()));
         }
+        let extra = self.text_box_props(&n, &props);
+        props.extend(extra);
+        self.apply_local(vec![Op::Update { id, props }]);
+        self.ui_version += 1;
+    }
+
+    /// Bold, italic or underline the characters `start..end` of the text
+    /// being edited (on unless they all have it).
+    pub fn toggle_text_style(&mut self, start: usize, end: usize, what: &str) {
+        let Some(id) = self.editing_text.clone() else { return };
+        let Some(n) = self.doc.get(&id).cloned() else { return };
+        if start >= end {
+            return;
+        }
+        let runs = flexma_doc::text::toggle_runs(&n, start, end, what);
+        let mut props = Map::new();
+        props.insert("textRuns".into(), json!(runs));
         let extra = self.text_box_props(&n, &props);
         props.extend(extra);
         self.apply_local(vec![Op::Update { id, props }]);

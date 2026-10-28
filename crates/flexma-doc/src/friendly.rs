@@ -120,6 +120,60 @@ fn align(v: &Value) -> Value {
     }
 }
 
+/// Rich text from spans: `[{text:"Anılarını seç, "}, {text:"baskıya dönüştür",
+/// color:"#c9a227", weight:700}]` (a plain string is unstyled). Each span takes
+/// the text style props (font, weight/bold, italic, color/fill, underline,
+/// strikethrough, letterSpacing) and `link`.
+pub fn spans(v: &Value) -> Result<(String, Vec<crate::paint::TextRun>), String> {
+    let list = v.as_array().ok_or("spans must be an array of {text, …} objects or strings")?;
+    let mut text = String::new();
+    let mut runs = Vec::new();
+    for (i, sp) in list.iter().enumerate() {
+        let (t, style) = match sp {
+            Value::String(t) => (t.clone(), Map::new()),
+            Value::Object(o) => {
+                let t = ["text", "characters", "content"].iter().find_map(|k| o.get(*k)).and_then(Value::as_str).ok_or(format!("span {i} needs 'text'"))?;
+                let style: Map<String, Value> = o.iter().filter(|(k, _)| !matches!(k.as_str(), "text" | "characters" | "content")).map(|(k, v)| (k.clone(), v.clone())).collect();
+                (t.to_string(), style)
+            }
+            _ => return Err(format!("span {i} must be a string or an object")),
+        };
+        let start = text.chars().count();
+        text.push_str(&t);
+        let end = text.chars().count();
+        if style.is_empty() || start == end {
+            continue;
+        }
+        let mut run = crate::paint::TextRun { start, end, ..Default::default() };
+        let mut rest = Map::new();
+        for (k, val) in &style {
+            match k.as_str() {
+                "bold" => run.font_weight = Some(if val.as_bool().unwrap_or(false) { 700 } else { 400 }),
+                "underline" if val.as_bool() == Some(true) => run.text_decoration = Some("UNDERLINE".into()),
+                "strikethrough" | "lineThrough" if val.as_bool() == Some(true) => run.text_decoration = Some("STRIKETHROUGH".into()),
+                "link" | "href" | "url" => run.link = val.as_str().map(str::to_string),
+                _ => {
+                    rest.insert(k.clone(), val.clone());
+                }
+            }
+        }
+        let norm = normalize_props(NodeType::Text, &rest).map_err(|e| format!("span {i}: {e}"))?;
+        for (k, val) in norm {
+            match k.as_str() {
+                "fontWeight" => run.font_weight = val.as_u64().map(|w| w as u16),
+                "italic" => run.italic = val.as_bool(),
+                "fontFamily" => run.font_family = val.as_str().map(str::to_string),
+                "letterSpacing" => run.letter_spacing = val.as_f64(),
+                "fills" => run.fills = serde_json::from_value(val).ok(),
+                "textDecoration" => run.text_decoration = Some(val.as_str().unwrap_or("NONE").to_string()),
+                other => return Err(format!("span {i}: '{other}' can't change inside a text (use another text layer for a different size)")),
+            }
+        }
+        runs.push(run);
+    }
+    Ok((text, runs))
+}
+
 /// Normalize friendly props into canonical node props. `kind` is the node type
 /// the props apply to (affects e.g. `color` on text).
 pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map<String, Value>, String> {
@@ -172,6 +226,16 @@ pub fn normalize_props(kind: NodeType, input: &Map<String, Value>) -> Result<Map
                     out.insert("cornerRadius".into(), v.clone());
                 }
             },
+            "spans" => {
+                let (text, runs) = spans(v)?;
+                out.insert("characters".into(), Value::String(text));
+                out.insert("textRuns".into(), serde_json::to_value(runs).unwrap_or_default());
+            }
+            "text" | "content" | "characters" | "value" if v.is_array() => {
+                let (text, runs) = spans(v)?;
+                out.insert("characters".into(), Value::String(text));
+                out.insert("textRuns".into(), serde_json::to_value(runs).unwrap_or_default());
+            }
             "text" | "content" | "characters" | "value" => {
                 out.insert("characters".into(), v.clone());
             }

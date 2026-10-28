@@ -1316,6 +1316,7 @@ impl Ctx {
                 }
                 let mut props = normalize_props(node.kind, &raw).map_err(|e| format!("{id}: {e}"))?;
                 if node.kind == NodeType::Text {
+                    flexma_doc::text::keep_runs(node, &mut props);
                     re_estimate_text(node, &mut props);
                 }
                 // Resizing an auto-layout frame by hand switches it to fixed sizing.
@@ -2525,6 +2526,9 @@ fn node_line(doc: &Document, n: &Node) -> String {
         }
         if n.text_overflow != flexma_doc::TextOverflow::Visible {
             s.push_str(&format!(" overflow {}", format!("{:?}", n.text_overflow).to_lowercase()));
+        }
+        if !n.text_runs.is_empty() {
+            s.push_str(&format!(" rich ({} styled span(s), see textRuns in get_nodes)", n.text_runs.len()));
         }
     }
     if !n.meta.is_empty() {

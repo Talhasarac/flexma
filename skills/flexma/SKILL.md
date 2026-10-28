@@ -78,6 +78,11 @@ Shared color and text styles keep a design consistent: change a style once and e
 - **SVG:** `import_svg` turns SVG markup (a logo, illustration, chart or diagram you wrote or found) into editable vector layers. Give `width` to scale it; `flatten: true` merges same-styled shapes into one layer.
 - **Data:** `fill_with_data` makes one copy of a component (or any layer) per row: `{ component: "User card", columns: 3, rows: [{ "Name": "Ada", "Role": "Engineer", "Avatar": { "image": "<asset id>" } }] }`. Keys are layer names; strings set text, objects set props, `null` hides a layer, `_self` styles the copy. Use it for lists, tables, feeds and grids with realistic content.
 
+## Rich text
+
+- One text layer can mix styles with `spans`: `{ "type": "text", "spans": ["Read the ", { "text": "terms", "color": "#2563eb", "underline": true, "link": "/terms" }, " first."] }`. Use it for inline links, bold words and multi-color headlines instead of placing separate text layers side by side (those break when the line wraps).
+- People style selected characters while editing with Cmd/Ctrl+B, I and U.
+
 ## Images
 
 - **Upload:** call `upload_image` (say how many with `files`) and run the `curl` command it returns once per image. Each upload prints an asset id and a ready-made node. SVG files work too: they become a sharp PNG at the SVG's own size (for a logo band or an illustration). Use `import_svg` instead when the SVG should become editable layers.

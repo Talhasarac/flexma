@@ -365,6 +365,15 @@ impl TextMeasurer {
     /// The box a text node should have for its auto-resize mode, like the
     /// editor's `measure_box` (flexma-engine text.rs).
     pub fn measure_box(&self, n: &flexma_doc::Node) -> (f64, f64) {
+        if flexma_doc::text::has_runs(n) {
+            let lines = flexma_doc::text::rich_layout(n, &mut |st, s| self.measure(st, s));
+            let h = (lines.len().max(1) as f64 * n.effective_line_height()).ceil();
+            return match n.text_auto_resize {
+                flexma_doc::TextAutoResize::WidthAndHeight => (lines.iter().map(|l| l.width).fold(0.0, f64::max).ceil().max(1.0), h),
+                flexma_doc::TextAutoResize::Height => (n.width, h),
+                flexma_doc::TextAutoResize::None => (n.width, n.height),
+            };
+        }
         let lines = flexma_doc::text::layout_lines(n, &mut |s| self.measure(n, s));
         let h = (lines.len().max(1) as f64 * n.effective_line_height()).ceil();
         match n.text_auto_resize {

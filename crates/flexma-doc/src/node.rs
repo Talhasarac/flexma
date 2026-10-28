@@ -208,6 +208,8 @@ define_node! {
     /// Optional per-corner radii `[topLeft, topRight, bottomRight, bottomLeft]`; overrides `cornerRadius`.
     corner_radii: Option<[f64; 4]> = None => "cornerRadii",
     effects: Vec<Effect> = Vec::new() => "effects",
+    /// TEXT: rich text, style changes for character ranges (empty = one style).
+    text_runs: Vec<TextRun> = Vec::new() => "textRuns",
     clips_content: bool = false => "clipsContent",
     /// With `clipsContent`: clip children to the alpha of the fills instead of the
     /// shape, so an image's transparent pixels hide them (Unity's Mask).
