@@ -70,6 +70,9 @@ pub struct Editor {
     /// The paint state, held until every page is here (it keeps only the
     /// layers it knows, and our pending strokes on the others would be lost).
     pub waiting_paint: Option<Value>,
+    /// A frame of the open page has drawn all its visible text. Streamed
+    /// pages wait for this, so the first page shows as fast as a one-page file.
+    pub page_drawn: bool,
     pub last_camera_change: f64,
     pub frame_labels: Vec<(NodeId, Rect)>,
     pub drop_target: Option<NodeId>,
@@ -138,6 +141,7 @@ impl Editor {
             pending_pages: HashSet::new(),
             wanted_page: None,
             waiting_paint: None,
+            page_drawn: false,
             last_camera_change: -1e9,
             frame_labels: vec![],
             drop_target: None,
@@ -201,6 +205,7 @@ impl Editor {
         self.loaded = true;
         self.wanted_page = None;
         self.waiting_paint = None;
+        self.page_drawn = false;
         self.pending_pages = match first {
             Some(first) => self.doc.pages().into_iter().filter(|p| p != first).collect(),
             None => HashSet::new(),
@@ -812,6 +817,7 @@ impl Editor {
         if self.doc.get(page).map(|n| n.kind) == Some(NodeType::Page) && self.scene.page != page {
             self.scene.page = page.to_string();
             self.scene.dirty = true;
+            self.page_drawn = false;
             self.selection.clear();
             self.selection_version += 1;
             self.structure_version += 1;
@@ -895,9 +901,10 @@ impl Editor {
             r.build(&self.doc, &self.scene, &hidden, version);
         }
         let linear = self.doc.get(&self.scene.page).is_some_and(|p| p.linear_blending);
-        r.draw(&self.doc, &self.scene, text, &mut self.paint, self.now_ms, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting);
+        r.draw(&self.doc, &self.scene, text, &mut self.paint, self.now_ms, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting, !self.page_drawn);
         self.last_frame_ms = self.now_ms;
         self.dirty = r.wants_more;
+        self.page_drawn |= !r.text_behind;
         true
     }
 }

@@ -27,6 +27,43 @@ use web_sys::HtmlImageElement;
 const MAX_TEXT_RASTERS_PER_FRAME: usize = 24;
 /// Device pixels of text we are willing to rasterize + upload in one frame.
 const TEXT_PIXEL_BUDGET: usize = 2_000_000;
+/// While a page first opens (nothing to interact with yet), a frame may spend
+/// this long on text instead, so a big page's text fills in about 4x sooner.
+const FIRST_PAINT_TEXT_MS: f64 = 40.0;
+
+/// The text rasters one frame may still make.
+struct TextBudget {
+    rasters: usize,
+    pixels: usize,
+    /// First paint: rasterize until this `performance.now()`, however many.
+    until: Option<(web_sys::Performance, f64)>,
+}
+
+impl TextBudget {
+    fn new(first_paint: bool) -> TextBudget {
+        let perf = web_sys::window().and_then(|w| w.performance()).filter(|_| first_paint);
+        TextBudget {
+            rasters: MAX_TEXT_RASTERS_PER_FRAME,
+            pixels: TEXT_PIXEL_BUDGET,
+            until: perf.map(|p| {
+                let until = p.now() + FIRST_PAINT_TEXT_MS;
+                (p, until)
+            }),
+        }
+    }
+
+    fn spent(&self) -> bool {
+        match &self.until {
+            Some((perf, until)) => perf.now() > *until,
+            None => self.rasters == 0 || self.pixels == 0,
+        }
+    }
+
+    fn take(&mut self, pixels: usize) {
+        self.rasters = self.rasters.saturating_sub(1);
+        self.pixels = self.pixels.saturating_sub(pixels);
+    }
+}
 /// Longest side of a text raster; beyond this, extreme zoom shows slightly soft text.
 const MAX_TEXT_TEXTURE: u32 = 2048;
 /// GPU memory budget for cached text rasters; least-recently-drawn ones are evicted beyond it.
@@ -127,6 +164,8 @@ pub struct Renderer {
     pub max_tex: u32,
     /// The last frame skipped work (text rasters / images) and wants another.
     pub wants_more: bool,
+    /// The last frame left visible text undrawn (its raster budget ran out).
+    pub text_behind: bool,
     /// Draw calls issued by the last frame (diagnostics).
     pub draw_calls: u32,
     /// Display list rebuilds so far (diagnostics: painting shouldn't cause any).
@@ -370,6 +409,7 @@ impl Renderer {
             asset_base: "/api/assets/".into(),
             max_tex,
             wants_more: false,
+            text_behind: false,
             draw_calls: 0,
             builds: 0,
         }
@@ -964,7 +1004,7 @@ impl Renderer {
         self.meshes.get(&n.id)
     }
 
-    fn text_texture(&mut self, n: &Node, text: &mut TextEngine, bucket: f64, allow_raster: bool, budget: &mut (usize, usize)) -> Option<(TexId, [f64; 4])> {
+    fn text_texture(&mut self, n: &Node, text: &mut TextEngine, bucket: f64, allow_raster: bool, budget: &mut TextBudget) -> Option<(TexId, [f64; 4])> {
         let content = text_content_hash(n);
         let frame = self.frame_no;
         if let Some(e) = self.texts.get_mut(&n.id) {
@@ -973,13 +1013,14 @@ impl Renderer {
                 return Some((e.tex, e.rect));
             }
         }
-        if budget.0 == 0 || budget.1 == 0 {
+        if budget.spent() {
             self.wants_more = true;
+            self.text_behind = true;
             return self.texts.get(&n.id).filter(|e| e.content == content).map(|e| (e.tex, e.rect));
         }
-        budget.0 -= 1;
-        let r = text.rasterize(n, bucket, self.max_tex.min(MAX_TEXT_TEXTURE))?;
-        budget.1 = budget.1.saturating_sub((r.px_w as usize) * (r.px_h as usize));
+        let r = text.rasterize(n, bucket, self.max_tex.min(MAX_TEXT_TEXTURE));
+        budget.take(r.as_ref().map_or(0, |r| (r.px_w as usize) * (r.px_h as usize)));
+        let r = r?;
         let old = match self.texts.remove(&n.id) {
             Some(e) => {
                 self.text_bytes = self.text_bytes.saturating_sub(e.bytes);
@@ -1036,9 +1077,11 @@ impl Renderer {
         overlay: &[f32],
         labels: &[Label],
         interacting: bool,
+        first_paint: bool,
     ) {
         self.frame_no += 1;
         self.wants_more = false;
+        self.text_behind = false;
         self.upload_loaded_images();
         // Paint tiles change outside the frame (dabs, rebuilds, snapshots).
         paint.apply_gpu(&mut *self.gpu, now);
@@ -1058,7 +1101,7 @@ impl Renderer {
 
         // Text resolution: power-of-two buckets of device px per unit.
         let bucket = 2f64.powf((cam.zoom * dpr).max(0.05).log2().ceil()).clamp(0.125, 16.0);
-        let mut budget = (MAX_TEXT_RASTERS_PER_FRAME, TEXT_PIXEL_BUDGET);
+        let mut budget = TextBudget::new(first_paint);
 
         let cmds = std::mem::take(&mut self.cmds);
         // Contiguous shape runs are merged into one instanced draw as long as

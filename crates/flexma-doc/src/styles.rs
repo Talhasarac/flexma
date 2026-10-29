@@ -12,7 +12,7 @@ use crate::node::{Node, NodeId, NodeType};
 use crate::ops::Op;
 use crate::paint::StyleType;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Props a TEXT style controls.
 pub const TEXT_PROPS: &[&str] = &["fontFamily", "fontSize", "fontWeight", "italic", "lineHeight", "letterSpacing", "textDecoration"];
@@ -122,12 +122,23 @@ pub fn sync_all(doc: &mut Document) {
     }
 }
 
-/// Layers using a style.
-pub fn uses_of(doc: &Document, style_id: &str) -> usize {
-    let is = |r: &Option<NodeId>| r.as_deref() == Some(style_id);
-    doc.nodes()
-        .filter(|n| !crate::node::is_derived_id(&n.id) && (is(&n.fill_style_id) || is(&n.stroke_style_id) || is(&n.text_style_id)))
-        .count()
+/// Layers using each style, by style id, in one pass (big files list their
+/// styles after every structural change).
+pub fn uses(doc: &Document) -> HashMap<&str, usize> {
+    let mut uses = HashMap::new();
+    for n in doc.nodes() {
+        let refs = [n.fill_style_id.as_deref(), n.stroke_style_id.as_deref(), n.text_style_id.as_deref()];
+        if refs.iter().all(Option::is_none) || crate::node::is_derived_id(&n.id) {
+            continue;
+        }
+        for (i, r) in refs.iter().enumerate() {
+            // A layer counts once, even with a style in two slots.
+            if let Some(r) = r.filter(|r| !refs[..i].contains(&Some(r))) {
+                *uses.entry(r).or_insert(0) += 1;
+            }
+        }
+    }
+    uses
 }
 
 /// Find a style by id or name (case-insensitive).
@@ -240,7 +251,9 @@ mod tests {
         let eff = doc.apply(&Op::update1("s:2", "fontSize", json!(32))).unwrap();
         sync_styles(&mut doc, &eff.changed);
         assert!(doc.get("t:1").unwrap().needs_measure, "text re-measures after a style change");
-        assert_eq!(uses_of(&doc, "s:1"), 1);
+        assert_eq!(uses(&doc).get("s:1"), Some(&1));
+        doc.apply(&Op::update1("r:1", "strokeStyleId", json!("s:1"))).unwrap();
+        assert_eq!(uses(&doc).get("s:1"), Some(&1), "a layer counts once");
         assert_eq!(find(&doc, "brand/primary").as_deref(), Some("s:1"));
     }
 

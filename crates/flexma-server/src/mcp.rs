@@ -1021,6 +1021,7 @@ impl Ctx {
                 if ids.is_empty() {
                     return "No shared styles in this file yet. Create some with create_styles.".to_string();
                 }
+                let uses = flexma_doc::styles::uses(doc);
                 let mut out = String::from("Styles:\n");
                 for id in ids {
                     let Some(st) = doc.get(&id) else { continue };
@@ -1029,7 +1030,7 @@ impl Ctx {
                         st.name,
                         flexma_doc::styles::kind_name(st.style_type),
                         style_value(st),
-                        flexma_doc::styles::uses_of(doc, &id)
+                        uses.get(id.as_str()).copied().unwrap_or(0)
                     ));
                 }
                 out.push_str("Apply with fillStyle / strokeStyle / textStyle: \"<name>\" in create_nodes or update_nodes (null detaches).");

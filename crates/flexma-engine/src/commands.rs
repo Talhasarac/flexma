@@ -713,6 +713,7 @@ impl Editor {
 
     /// The file's styles for the UI: `[{ id, name, type, fills, font props, uses }]`.
     pub fn styles_json(&self) -> Value {
+        let uses = flexma_doc::styles::uses(&self.doc);
         Value::Array(
             self.doc
                 .styles()
@@ -732,7 +733,7 @@ impl Editor {
                         "lineHeight": s.line_height,
                         "letterSpacing": s.letter_spacing,
                         "textDecoration": s.text_decoration,
-                        "uses": flexma_doc::styles::uses_of(&self.doc, &s.id),
+                        "uses": uses.get(s.id.as_str()).copied().unwrap_or(0),
                     })
                 })
                 .collect(),

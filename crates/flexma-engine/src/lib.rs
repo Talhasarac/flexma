@@ -110,6 +110,11 @@ impl FlexmaEditor {
         self.ed.merge_page(&inflate(data)?).map_err(|e| JsValue::from_str(&e))
     }
 
+    /// The open page has drawn all its visible text since it opened.
+    pub fn page_drawn(&self) -> bool {
+        self.ed.page_drawn
+    }
+
     /// The page someone switched to that hasn't arrived yet ("" if none).
     pub fn waiting_for_page(&self) -> String {
         self.ed.wanted_page.clone().unwrap_or_default()

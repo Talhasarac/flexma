@@ -77,6 +77,8 @@ export class EditorStore {
   private draining = false;
   /** Pages still to stream in after the first part. */
   private pagesLeft = 0;
+  /** When the first part loaded (`performance.now()`). */
+  private firstPartAt = 0;
   /** The socket URL `connect` was given, for reconnecting. */
   private url = '';
   /** Whether this socket's document has loaded; nothing is sent before, so
@@ -389,11 +391,16 @@ export class EditorStore {
     if (!this.draining) this.drain();
   }
 
-  /** Handle socket messages in order. After each page that streams in, let
-   * the browser draw before merging the next one. */
+  /** Handle socket messages in order. Streamed pages wait until the open
+   * page is drawn, then merge in the background, letting the browser draw
+   * after each one. */
   private drain() {
     this.draining = true;
     while (this.inbox.length) {
+      if (typeof this.inbox[0] !== 'string' && this.holdPages()) {
+        window.setTimeout(() => this.drain(), 30);
+        return;
+      }
       const m = this.inbox.shift()!;
       if (typeof m === 'string') {
         this.handleMessage(m);
@@ -406,6 +413,16 @@ export class EditorStore {
       }
     }
     this.draining = false;
+  }
+
+  /** Whether the next page frame should wait: merging pages (and what follows
+   * from it: panels, layout) would hold up drawing the open page. Not when
+   * someone opened a page that hasn't arrived, the tab is hidden, or it's
+   * taking long. */
+  private holdPages(): boolean {
+    if (this.pendingInit || this.pagesLeft === 0) return false;
+    if (document.hidden || this.engine.waiting_for_page()) return false;
+    return !this.engine.page_drawn() && performance.now() - this.firstPartAt < 4000;
   }
 
   /** A document frame: after an `init` with `docFrame: "zlib"` the document
@@ -436,6 +453,7 @@ export class EditorStore {
       else this.engine.load_zlib(data, String(init.clientId), canEdit);
     });
     this.pagesLeft = parts - 1;
+    this.firstPartAt = performance.now();
     const held = this.held;
     this.held = [];
     for (const raw of held) this.handleMessage(raw);
