@@ -94,7 +94,13 @@ pub const CLIENT_QUEUE: usize = 2048;
 /// Files with more pages than this load whole (each page is a frame in the queue).
 const MAX_STREAMED_PAGES: usize = 256;
 const SAVE_EVERY: Duration = Duration::from_secs(2);
-const IDLE_CLOSE_SECS: i64 = 90;
+/// How long a room nobody is in stays open: opening a big file again takes
+/// about a second on a one-core server.
+const IDLE_CLOSE_SECS: i64 = 10 * 60;
+/// With the server using more memory than `TIGHT_MEMORY_KB`, idle rooms
+/// close this soon instead (a big file's room holds about 100 MB).
+const IDLE_CLOSE_TIGHT_SECS: i64 = 90;
+const TIGHT_MEMORY_KB: u64 = 400 * 1024;
 const AGENT_PRESENCE_TTL: Duration = Duration::from_secs(12);
 const AUTO_VERSION_SECS: i64 = 15 * 60;
 /// How often a room re-checks its sockets' access even when nothing says it
@@ -574,6 +580,13 @@ pub struct Rooms {
     opening: Mutex<std::collections::HashSet<String>>,
 }
 
+/// The server's resident memory in kB (Linux; None elsewhere).
+fn resident_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
 /// Takes a file out of `Rooms::opening` when its `get` is done with it.
 struct Opening<'a>(&'a Rooms, String);
 
@@ -607,13 +620,14 @@ impl Rooms {
     fn reap_idle(&self) {
         self.actors.lock().unwrap().retain(|(_, a)| !a.is_finished());
         let t = now();
+        let idle_secs = if resident_kb().is_some_and(|kb| kb > TIGHT_MEMORY_KB) { IDLE_CLOSE_TIGHT_SECS } else { IDLE_CLOSE_SECS };
         let mut map = self.rooms.lock().unwrap();
         let idle: Vec<String> = map
             .iter()
             .filter(|(_, h)| {
                 h.tx.is_closed()
                     || (h.stats.clients.load(Ordering::Relaxed) == 0
-                        && t - h.stats.last_active.load(Ordering::Relaxed) > IDLE_CLOSE_SECS)
+                        && t - h.stats.last_active.load(Ordering::Relaxed) > idle_secs)
             })
             .map(|(k, _)| k.clone())
             .collect();
