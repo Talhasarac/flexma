@@ -1,6 +1,6 @@
 //! Opening a file page by page (`flexma_doc::parts::stream`) ends in the
-//! same state as loading it whole. Found by Codex audits of 4e85629 and
-//! f4234fa.
+//! same state as loading it whole, and our edits reach the server as made.
+//! Found by Codex audits of 4e85629, f4234fa and 2567922.
 
 use flexma_doc::{parts, Document, Node, NodeType, Op, ROOT_ID};
 use flexma_engine::editor::Editor;
@@ -37,65 +37,60 @@ fn open_streamed(ed: &mut Editor, doc: &Document, client: &str, between: impl Fn
     }
 }
 
-/// `server` after our next batch of edits reaches it.
+/// `server` after everything we have to send reaches it.
 fn deliver(ed: &mut Editor, server: &Document) -> Document {
     let mut server = server.clone();
-    let batch: serde_json::Value = serde_json::from_str(&ed.take_outgoing().expect("a batch to send")).unwrap();
-    for op in serde_json::from_value::<Vec<Op>>(batch["ops"].clone()).unwrap() {
-        server.apply(&op).unwrap();
+    while let Some(batch) = ed.sync.flush() {
+        let batch: serde_json::Value = serde_json::from_str(&batch).unwrap();
+        for op in serde_json::from_value::<Vec<Op>>(batch["ops"].clone()).unwrap() {
+            server.apply(&op).unwrap();
+        }
     }
     server
 }
 
 #[test]
-fn reconnecting_keeps_unacknowledged_edits_on_other_pages() {
-    let server = sample();
-    let mut ed = Editor::new(None, None);
-    ed.load(&server.to_json(), "old", true).unwrap();
-    // Offline: edit page two, then go back to page one, which reconnects first.
-    ed.set_page("p:2");
-    assert!(ed.apply_local(vec![Op::update1("r:2", "name", json!("offline edit"))]).is_empty());
-    ed.set_page("0:1");
-    open_streamed(&mut ed, &server, "new", |_| {});
-    assert_eq!(ed.doc.get("r:2").unwrap().name, "offline edit");
-    assert!(ed.sync.has_outgoing(), "and it's sent again");
-}
-
-#[test]
-fn reconnecting_keeps_edits_to_components_on_other_pages() {
-    // Components come in the first part and again with their page.
+fn reconnecting_with_unacknowledged_edits_loads_the_whole_file() {
     let mut server = sample();
     add(&mut server, "c:2", NodeType::Component, "p:2");
     add(&mut server, "c:2/r", NodeType::Rectangle, "c:2");
     server.clear_fresh();
     let mut ed = Editor::new(None, None);
     ed.load(&server.to_json(), "old", true).unwrap();
+    // Offline: edit page two and a component there, then go back to page one.
     ed.set_page("p:2");
-    ed.apply_local(vec![Op::update1("c:2", "name", json!("offline edit")), Op::Delete { id: "c:2/r".into() }]);
+    ed.apply_local(vec![Op::update1("r:2", "name", json!("offline edit")), Op::update1("c:2", "name", json!("offline edit")), Op::Delete { id: "c:2/r".into() }]);
     ed.set_page("0:1");
-    open_streamed(&mut ed, &server, "new", |_| {});
-    assert_eq!(ed.doc.get("c:2").unwrap().name, "offline edit");
-    assert!(!ed.doc.contains("c:2/r"), "still deleted");
+    // Streamed, they'd be replayed on part of the file.
+    let (head, _) = parts::stream(&server, "0:1");
+    assert!(ed.load_first(&head, "new", true, "0:1").is_err());
+    assert!(ed.doc.contains("r:2") && ed.has_unacked(), "left as it was");
+    ed.load(&server.to_json(), "new", true).unwrap();
+    let after = deliver(&mut ed, &server);
+    for doc in [&ed.doc, &after] {
+        assert_eq!((doc.get("r:2").unwrap().name.as_str(), doc.get("c:2").unwrap().name.as_str()), ("offline edit", "offline edit"));
+        assert!(!doc.contains("c:2/r"));
+    }
 }
 
 #[test]
-fn reconnecting_again_while_pages_stream_in_keeps_them_too() {
+fn reconnecting_while_pages_stream_in_loads_the_whole_file() {
     let server = sample();
     let mut ed = Editor::new(None, None);
-    ed.load(&server.to_json(), "old", true).unwrap();
-    ed.set_page("p:2");
-    ed.apply_local(vec![Op::update1("r:2", "name", json!("offline edit"))]);
-    ed.set_page("0:1");
-    // The socket drops again before page two arrives.
     let (head, _) = parts::stream(&server, "0:1");
-    ed.load_first(&head, "new", true, "0:1").unwrap();
-    open_streamed(&mut ed, &server, "newer", |_| {});
-    assert_eq!(ed.doc.get("r:2").unwrap().name, "offline edit");
-    assert!(ed.sync.has_outgoing());
+    ed.load_first(&head, "client", true, "0:1").unwrap();
+    // An edit while page two is on its way, then the socket drops.
+    ed.apply_local(vec![Op::update1("0:1", "name", json!("edited"))]);
+    ed.sync.flush();
+    assert!(ed.has_unacked());
+    ed.load(&server.to_json(), "again", true).unwrap();
+    assert!(ed.pending_pages.is_empty() && ed.doc.contains("r:2"));
+    assert_eq!(ed.doc.get("0:1").unwrap().name, "edited");
+    assert_eq!(deliver(&mut ed, &server).get("0:1").unwrap().name, "edited");
 }
 
 #[test]
-fn held_edits_replay_in_order_once_every_page_is_here() {
+fn a_reconnect_replays_edits_in_order() {
     let mut server = sample();
     add(&mut server, "source", NodeType::Frame, "0:1");
     add(&mut server, "rect", NodeType::Rectangle, "source");
@@ -106,34 +101,34 @@ fn held_edits_replay_in_order_once_every_page_is_here() {
     // Offline: move the rectangle to page two, then delete its old frame.
     ed.apply_local(vec![Op::update1("rect", "parent", json!("destination"))]);
     ed.apply_local(vec![Op::Delete { id: "source".into() }]);
-    let (head, rest) = parts::stream(&server, "0:1");
-    ed.load_first(&head, "new", true, "0:1").unwrap();
-    assert!(ed.doc.contains("source") && ed.take_outgoing().is_none(), "held until page two is here");
-    for part in rest {
-        ed.merge_page(&part).unwrap();
-    }
+    ed.load(&server.to_json(), "new", true).unwrap();
     let after = deliver(&mut ed, &server);
     assert_eq!((ed.doc.parent_of("rect"), after.parent_of("rect")), (Some("destination"), Some("destination")));
     assert!(!ed.doc.contains("source") && !after.contains("source"));
 }
 
 #[test]
-fn edits_made_while_pages_arrive_go_out_after_held_ones() {
+fn updates_are_not_merged_across_a_delete() {
     let mut server = sample();
-    add(&mut server, "rect", NodeType::Rectangle, "0:1");
-    add(&mut server, "destination", NodeType::Frame, "p:2");
+    add(&mut server, "frame", NodeType::Frame, "0:1");
+    add(&mut server, "rect", NodeType::Rectangle, "frame");
     server.clear_fresh();
     let mut ed = Editor::new(None, None);
     ed.load(&server.to_json(), "old", true).unwrap();
-    // Sent before the socket dropped, never acknowledged.
-    ed.apply_local(vec![Op::update("rect", json!({ "parent": "destination", "name": "older" }).as_object().unwrap().clone())]);
-    ed.take_outgoing().unwrap();
-    open_streamed(&mut ed, &server, "new", |ed| {
-        ed.apply_local(vec![Op::update1("rect", "name", json!("newer"))]);
-    });
+    // Move the rectangle out, delete the frame, undo that, move it back:
+    // each sent on its own, none acknowledged before the socket dropped.
+    ed.apply_local(vec![Op::update1("rect", "parent", json!("0:1"))]);
+    ed.sync.flush();
+    ed.apply_local(vec![Op::Delete { id: "frame".into() }]);
+    ed.sync.flush();
+    ed.undo();
+    ed.sync.flush();
+    ed.apply_local(vec![Op::update1("rect", "parent", json!("frame"))]);
+    ed.sync.flush();
+    // The replay queues them as one batch.
+    ed.load(&server.to_json(), "new", true).unwrap();
     let after = deliver(&mut ed, &server);
-    assert_eq!((ed.doc.get("rect").unwrap().name.as_str(), after.get("rect").unwrap().name.as_str()), ("newer", "newer"));
-    assert_eq!(after.parent_of("rect"), Some("destination"));
+    assert_eq!((ed.doc.parent_of("rect"), after.parent_of("rect")), (Some("frame"), Some("frame")));
 }
 
 #[test]
@@ -145,7 +140,7 @@ fn edits_sent_while_pages_arrive_survive_their_page_frame() {
     // Page two's frame repeats the component as the server had it.
     open_streamed(&mut ed, &server, "client", |ed| {
         ed.apply_local(vec![Op::update1("c:2", "name", json!("renamed"))]);
-        assert!(ed.take_outgoing().is_some());
+        assert!(ed.sync.flush().is_some());
     });
     assert_eq!(ed.doc.get("c:2").unwrap().name, "renamed");
 }
@@ -157,24 +152,26 @@ fn undoing_a_component_delete_survives_its_page_frame() {
     add(&mut server, "c:2/r", NodeType::Rectangle, "c:2");
     server.clear_fresh();
     let mut ed = Editor::new(None, None);
-    ed.load(&server.to_json(), "old", true).unwrap();
-    ed.apply_local(vec![Op::Delete { id: "c:2/r".into() }]);
-    ed.undo();
-    open_streamed(&mut ed, &server, "new", |_| {});
+    open_streamed(&mut ed, &server, "client", |ed| {
+        ed.apply_local(vec![Op::Delete { id: "c:2/r".into() }]);
+        ed.undo();
+    });
     assert!(ed.doc.contains("c:2/r"));
     assert!(deliver(&mut ed, &server).contains("c:2/r"));
 }
 
 #[test]
-fn a_page_added_offline_is_not_waited_for() {
+fn a_page_added_while_pages_arrive_is_not_waited_for() {
     let server = painted();
-    let mut ed = Editor::new(None, None);
-    ed.load(&server.to_json(), "old", true).unwrap();
-    let offline = ed.add_page("Offline page");
     let state = json!({ "seq": 0, "layers": { "paint:2": { "tiles": [], "strokes": [] } } });
-    open_streamed(&mut ed, &server, "new", |ed| ed.load_paint_state(state.clone()));
+    let mut ed = Editor::new(None, None);
+    let mut added = String::new();
+    open_streamed(&mut ed, &server, "client", |ed| {
+        added = ed.add_page("New page");
+        ed.load_paint_state(state.clone());
+    });
     assert!(ed.pending_pages.is_empty() && ed.waiting_paint.is_none(), "{:?}", ed.pending_pages);
-    assert!(ed.doc.contains(&offline) && deliver(&mut ed, &server).contains(&offline));
+    assert!(ed.doc.contains(&added) && deliver(&mut ed, &server).contains(&added));
 }
 
 #[test]
@@ -203,11 +200,19 @@ fn components_keep_their_place_when_their_page_streams_in() {
     assert_eq!(ed.doc.get("c:2").unwrap().y, 250.0, "the same geometry as the server's document");
 }
 
+/// Paint layers on both pages.
 fn painted() -> Document {
     let mut doc = sample();
+    add(&mut doc, "paint:1", NodeType::Paint, "0:1");
     add(&mut doc, "paint:2", NodeType::Paint, "p:2");
     doc.apply(&Op::update("paint:2", json!({ "width": 256.0, "height": 256.0 }).as_object().unwrap().clone())).unwrap();
+    doc.clear_fresh();
     doc
+}
+
+/// The editor draws between page frames: paint keeps the layers it saw.
+fn render(ed: &mut Editor) {
+    ed.paint.sync_layers(&ed.doc, ed.doc_version);
 }
 
 #[test]
@@ -217,7 +222,10 @@ fn paint_on_a_later_page_survives_arriving_first() {
     let state = json!({ "seq": 1, "layers": { "paint:2": { "tiles": [], "strokes": [{ "seq": 1, "stroke": stroke, "undone": false }] } } });
     let mut ed = Editor::new(None, None);
     // The paint state's request returns before page two's frame.
-    open_streamed(&mut ed, &server, "client", |ed| ed.load_paint_state(state.clone()));
+    open_streamed(&mut ed, &server, "client", |ed| {
+        render(ed);
+        ed.load_paint_state(state.clone());
+    });
     assert!(ed.paint.has_layer("paint:2"));
     assert!(ed.paint.undo("saved-stroke", 0.0), "the saved stroke is there");
 }
@@ -225,7 +233,7 @@ fn paint_on_a_later_page_survives_arriving_first() {
 #[test]
 fn unacknowledged_strokes_on_a_later_page_are_sent_again() {
     let server = painted();
-    let state = json!({ "seq": 0, "layers": { "paint:2": { "tiles": [], "strokes": [] } } });
+    let state = json!({ "seq": 0, "layers": { "paint:1": { "tiles": [], "strokes": [] }, "paint:2": { "tiles": [], "strokes": [] } } });
     let stroke: flexma_doc::raster::Stroke = serde_json::from_value(json!({ "id": "offline-stroke", "layer": "paint:2", "brush": {}, "points": [[50.0, 50.0, 1.0]] })).unwrap();
     let mut ed = Editor::new(None, None);
     ed.load(&server.to_json(), "old", true).unwrap();
@@ -233,7 +241,11 @@ fn unacknowledged_strokes_on_a_later_page_are_sent_again() {
     ed.paint.begin(stroke, 0.0);
     assert_eq!(ed.paint.end().as_deref(), Some("offline-stroke"));
     ed.paint.take_outgoing(); // sent, never acknowledged
-    open_streamed(&mut ed, &server, "new", |ed| ed.load_paint_state(state.clone()));
+    assert!(!ed.has_unacked(), "only paint: the pages stream in");
+    open_streamed(&mut ed, &server, "new", |ed| {
+        render(ed);
+        ed.load_paint_state(state.clone());
+    });
     assert!(ed.paint.take_outgoing().iter().any(|m| m.contains("offline-stroke")));
 }
 
@@ -260,4 +272,36 @@ fn narrowed_instance_text_is_measured_on_load() {
     let text = ed.doc.get("i:1~t:1").unwrap();
     assert!(text.needs_measure && text.width == 150.0 && text.height > 40.0);
     assert!(ed.needs_measure.contains("i:1~t:1"), "queued for the browser to measure");
+}
+
+#[test]
+fn text_on_a_later_page_is_queued_for_measuring() {
+    use flexma_doc::paint::{LayoutMode, SizingMode, StyleType, TextAutoResize};
+    let mut head = sample();
+    let mut style = Node::new("s:1", NodeType::Style);
+    style.parent = Some(ROOT_ID.into());
+    (style.style_type, style.font_size) = (StyleType::Text, 30.0);
+    head.apply(&Op::Create { node: style }).unwrap();
+    let mut instance = Node::new("i:1", NodeType::Instance);
+    instance.parent = Some("0:1".into());
+    (instance.component_id, instance.width) = (Some("c:2".into()), 100.0);
+    head.apply(&Op::Create { node: instance }).unwrap();
+    // Page two brings the instance's component and a styled text.
+    let mut component = Node::new("c:2", NodeType::Component);
+    component.parent = Some("p:2".into());
+    (component.width, component.layout_mode, component.layout_sizing_vertical) = (400.0, LayoutMode::Vertical, SizingMode::Hug);
+    let mut text = Node::new("t:2", NodeType::Text);
+    text.parent = Some("c:2".into());
+    text.characters = "Text that wraps inside a narrower instance".into();
+    (text.width, text.height, text.measured_width) = (400.0, 40.0, Some(400.0));
+    (text.text_auto_resize, text.layout_sizing_horizontal) = (TextAutoResize::Height, SizingMode::Fill);
+    let mut styled = Node::new("styled:2", NodeType::Text);
+    styled.parent = Some("p:2".into());
+    (styled.characters, styled.text_style_id) = ("Styled".into(), Some("s:1".into()));
+    let mut ed = Editor::new(None, None);
+    ed.load_first(&head.to_json(), "client", true, "0:1").unwrap();
+    ed.merge_page(&json!({ "page": "p:2", "nodes": [component, text, styled] }).to_string()).unwrap();
+    for id in ["i:1~t:2", "styled:2"] {
+        assert!(ed.doc.get(id).unwrap().needs_measure && ed.needs_measure.contains(id), "{id}");
+    }
 }

@@ -94,6 +94,7 @@ impl FlexmaEditor {
 
     /// Load the first part of a document whose other pages stream in
     /// (`&pages=stream`) through `merge_zlib`; `first_page` is the one here.
+    /// Fails with unacknowledged edits: load the whole document instead.
     pub fn load_zlib_first(&mut self, data: &[u8], client_id: &str, can_edit: bool, first_page: &str) -> Result<(), JsValue> {
         self.ed.load_first(&inflate(data)?, client_id, can_edit, first_page).map_err(|e| JsValue::from_str(&e))
     }
@@ -230,11 +231,11 @@ impl FlexmaEditor {
 
     /// Next batch of local ops to send (JSON message), if any.
     pub fn take_outgoing(&mut self) -> Option<String> {
-        self.ed.take_outgoing()
+        self.ed.sync.flush()
     }
 
     pub fn has_outgoing(&self) -> bool {
-        self.ed.sync.has_outgoing() || !self.ed.held_ops.is_empty()
+        self.ed.sync.has_outgoing()
     }
 
     pub fn unacked(&self) -> u32 {

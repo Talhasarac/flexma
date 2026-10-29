@@ -67,11 +67,6 @@ pub struct Editor {
     pub pending_pages: HashSet<NodeId>,
     /// A page asked for before it arrived; shown once it's merged.
     pub wanted_page: Option<NodeId>,
-    /// Our unacknowledged edits from before a reconnect whose pages stream
-    /// in: replayed in order once every page is here, as on a whole
-    /// document (on part of it they could fail or apply out of order).
-    /// Our edits aren't sent meanwhile, so those made in between stay after them.
-    pub held_ops: Vec<Op>,
     /// The paint state, held until every page is here (it keeps only the
     /// layers it knows, and our pending strokes on the others would be lost).
     pub waiting_paint: Option<Value>,
@@ -142,7 +137,6 @@ impl Editor {
             needs_measure: HashSet::new(),
             pending_pages: HashSet::new(),
             wanted_page: None,
-            held_ops: Vec::new(),
             waiting_paint: None,
             last_camera_change: -1e9,
             frame_labels: vec![],
@@ -178,17 +172,18 @@ impl Editor {
     }
 
     /// Load the first part of a document (`flexma_doc::parts::stream`): the
-    /// other pages stream in through `merge_page`, `first` is here.
+    /// other pages stream in through `merge_page`, `first` is here. Not with
+    /// unacknowledged edits: those are replayed on a whole document (on part
+    /// of one they could fail or apply out of order).
     pub fn load_first(&mut self, doc_json: &str, client_id: &str, can_edit: bool, first: &str) -> Result<(), String> {
+        if self.has_unacked() {
+            return Err("unacknowledged edits need the whole document".into());
+        }
         self.open(doc_json, client_id, can_edit, Some(first))
     }
 
     fn open(&mut self, doc_json: &str, client_id: &str, can_edit: bool, first: Option<&str>) -> Result<(), String> {
-        // Our edits the server never acknowledged (a reconnect), oldest first.
-        let mut unacked = std::mem::take(&mut self.held_ops);
-        if self.loaded {
-            unacked.extend(self.sync.take_unacked());
-        }
+        let unacked = if self.loaded { self.sync.take_unacked() } else { vec![] };
         let mut doc = Document::from_json(doc_json)?;
         components::sync_all(&mut doc);
         flexma_doc::styles::sync_all(&mut doc);
@@ -206,17 +201,13 @@ impl Editor {
         self.loaded = true;
         self.wanted_page = None;
         self.waiting_paint = None;
-        // The server's other pages, before our edits add any.
         self.pending_pages = match first {
             Some(first) => self.doc.pages().into_iter().filter(|p| p != first).collect(),
             None => HashSet::new(),
         };
+        // Re-apply our edits that the server never acknowledged (reconnect).
         if !unacked.is_empty() && can_edit {
-            if self.pending_pages.is_empty() {
-                self.replay(unacked);
-            } else {
-                self.held_ops = unacked;
-            }
+            self.replay(unacked);
         }
         self.queue_measurements();
         if let Some(first) = first {
@@ -240,18 +231,9 @@ impl Editor {
         self.derive(&mut eff);
     }
 
-    /// The next batch of our edits to send. None while edits from before a
-    /// reconnect wait for their pages, so that these go out after them.
-    pub fn take_outgoing(&mut self) -> Option<String> {
-        if !self.held_ops.is_empty() {
-            return None;
-        }
-        self.sync.flush()
-    }
-
     /// Whether the server has yet to acknowledge some of our edits.
     pub fn has_unacked(&self) -> bool {
-        !self.held_ops.is_empty() || self.sync.unacked().next().is_some()
+        self.sync.unacked().next().is_some()
     }
 
     /// Queue every text still flagged for measuring, instance layers included.
@@ -292,37 +274,31 @@ impl Editor {
             }
         }
         self.pending_pages.remove(&page);
+        // Before the paint state loads: paint caches its layers by version.
+        self.bump_all();
         if self.pending_pages.is_empty() {
             self.finish_stream();
         }
-        self.bump_all();
         if self.wanted_page.as_deref() == Some(page.as_str()) {
             self.set_page(&page);
         }
         Ok(page)
     }
 
-    /// Every page is here. The frames left the server before any of our
-    /// unacknowledged edits reached it and can replace layers those edits
-    /// changed (components come again with their page), so our edits are
-    /// applied again, in order: those held from before a reconnect first,
-    /// then the ones made since, which are sent after them.
+    /// Every page is here. The frames left the server before our edits
+    /// made since reached it, and can replace layers those edits changed
+    /// (components come again with their page): our unacknowledged edits
+    /// are applied again, in order. Then the paint state loads.
     fn finish_stream(&mut self) {
-        let held = std::mem::take(&mut self.held_ops);
-        if held.is_empty() {
-            let sent: Vec<Op> = self.sync.unacked().cloned().collect();
-            if !sent.is_empty() {
-                let mut eff = OpEffect::default();
-                for op in &sent {
-                    if let Ok(e) = self.doc.apply(op) {
-                        eff.merge(e);
-                    }
+        let sent: Vec<Op> = self.sync.unacked().cloned().collect();
+        if !sent.is_empty() {
+            let mut eff = OpEffect::default();
+            for op in &sent {
+                if let Ok(e) = self.doc.apply(op) {
+                    eff.merge(e);
                 }
-                self.derive(&mut eff);
             }
-        } else {
-            let since = self.sync.take_unacked();
-            self.replay(held.into_iter().chain(since).collect());
+            self.derive(&mut eff);
         }
         if let Some(state) = self.waiting_paint.take() {
             self.load_paint_state(state);

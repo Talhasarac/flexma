@@ -22,7 +22,9 @@ impl Sync {
     }
 
     /// Queue a local op, merging consecutive updates of the same node so a 60 Hz
-    /// drag sends one update per flush.
+    /// drag sends one update per flush. Structural changes in between keep
+    /// updates apart: moved before one, an update could do something else (a
+    /// layer moved out of a frame, then the frame deleted and restored).
     pub fn push(&mut self, op: Op) {
         if let Op::Update { id, props } = &op {
             for prev in self.outbox.iter_mut().rev() {
@@ -33,9 +35,9 @@ impl Sync {
                         }
                         return;
                     }
-                    Op::Create { node } if &node.id == id => break,
-                    Op::Delete { id: did } if did == id => break,
-                    _ => {}
+                    Op::Create { .. } | Op::Delete { .. } => break,
+                    Op::Update { props: pprops, .. } if pprops.contains_key("parent") => break,
+                    Op::Update { .. } => {}
                 }
             }
         }

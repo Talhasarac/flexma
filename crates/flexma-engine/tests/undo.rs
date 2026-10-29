@@ -12,7 +12,7 @@ fn add(doc: &mut Document, id: &str, kind: NodeType, parent: &str) {
 
 /// `server` after every edit we haven't sent yet reaches it.
 fn deliver(ed: &mut Editor, server: &mut Document) {
-    while let Some(batch) = ed.take_outgoing() {
+    while let Some(batch) = ed.sync.flush() {
         let batch: serde_json::Value = serde_json::from_str(&batch).unwrap();
         for op in serde_json::from_value::<Vec<Op>>(batch["ops"].clone()).unwrap() {
             server.apply(&op).unwrap();

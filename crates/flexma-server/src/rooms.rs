@@ -614,6 +614,9 @@ impl Rooms {
     pub async fn get(&self, file_id: &str) -> AppResult<RoomHandle> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            // Taken first: a restore or deletion from here on moves it, and
+            // what this reads then isn't opened.
+            let epoch = self.epoch.load(Ordering::SeqCst);
             if self.blocked.lock().unwrap().contains(file_id) {
                 return Err(closed());
             }
@@ -631,7 +634,6 @@ impl Rooms {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
-            let epoch = self.epoch.load(Ordering::SeqCst);
             let fid = file_id.to_string();
             let loaded = self
                 .db
@@ -655,7 +657,7 @@ impl Rooms {
                 }
             }
             // Restored or deleted while we read it: what we read is gone.
-            if self.epoch.load(Ordering::SeqCst) != epoch {
+            if self.epoch.load(Ordering::SeqCst) != epoch || self.blocked.lock().unwrap().contains(file_id) {
                 continue;
             }
             let (tx, rx) = mpsc::channel(4096);
@@ -1568,6 +1570,61 @@ mod access_tests {
         let saved = Document::from_json(&db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(dir);
         assert!(saved.contains("restored") && saved.contains("edit:1"));
+    }
+
+    /// A restore that blocks the file just after an open checked it still
+    /// keeps that open from opening the old file. (The open is held at the
+    /// room map, which it locks after checking the block.)
+    #[tokio::test]
+    async fn opens_racing_a_restore_never_open_the_old_file() {
+        use std::future::Future;
+        let (db, dir) = setup("restore-block").await;
+        let rooms = Rooms::new(db.clone());
+        let read = Arc::new(tokio::sync::Notify::new());
+        let waker = std::task::Waker::from(Arc::new(NotifyWake(read.clone())));
+        let map = rooms.rooms.lock().unwrap();
+        let (other, runtime) = (rooms.clone(), tokio::runtime::Handle::current());
+        let (polled_tx, polled) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _entered = runtime.enter();
+            let mut open = Box::pin(async move { other.get("f").await });
+            let pending = open.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending();
+            polled_tx.send((open, pending)).unwrap();
+        });
+        // Time for the open to pass the check and wait for the map.
+        std::thread::sleep(Duration::from_millis(100));
+        rooms.block("f");
+        drop(map);
+        let (open, pending) = polled.recv_timeout(Duration::from_secs(5)).unwrap();
+        thread.join().unwrap();
+        assert!(pending, "setup: the open checked the block before it was set");
+        read.notified().await;
+        rooms.discard_and_wait("f", Some("reload".into())).await;
+        let opened_while_blocked = open.await.is_ok();
+        db.call(|c| {
+            let mut doc = Document::new_empty();
+            let mut n = flexma_doc::Node::new("restored", flexma_doc::NodeType::Rectangle);
+            n.parent = Some("0:1".into());
+            doc.apply(&Op::Create { node: n }).unwrap();
+            c.execute("UPDATE files SET document = ?1, version = version + 1 WHERE id = 'f'", params![doc.to_json()])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        rooms.unblock("f");
+        let room = rooms.get("f").await.unwrap();
+        let agent = AgentInfo { key: "a".into(), user_id: "u".into(), name: "Agent".into(), color: "#000".into() };
+        let edit = room.mutate(agent, None, |tx| {
+            let mut n = flexma_doc::Node::new("later:1", flexma_doc::NodeType::Rectangle);
+            n.parent = Some("0:1".into());
+            tx.apply(Op::Create { node: n })?;
+            Ok(json!("ok"))
+        });
+        edit.await.unwrap().unwrap();
+        assert!(rooms.shutdown_all().await);
+        let saved = Document::from_json(&db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(!opened_while_blocked && saved.contains("restored") && saved.contains("later:1"));
     }
 
     /// A room whose command queue is full isn't closed as idle, and closing

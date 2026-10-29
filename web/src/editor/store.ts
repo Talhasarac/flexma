@@ -72,6 +72,8 @@ export class EditorStore {
   private draining = false;
   /** Pages still to stream in after the first part. */
   private pagesLeft = 0;
+  /** The socket URL `connect` was given, for reconnecting. */
+  private url = '';
   onFatal: ((message: string) => void) | null = null;
   onReject: ((message: string) => void) | null = null;
   onReload: (() => void) | null = null;
@@ -269,6 +271,7 @@ export class EditorStore {
   // ---------------- network ----------------
 
   connect(url: string) {
+    this.url = url;
     this.closed = false;
     // rAF pauses in background tabs; a timer keeps ops and presence flowing.
     if (!this.flushTimer) this.flushTimer = window.setInterval(() => this.flush(), 50);
@@ -384,6 +387,15 @@ export class EditorStore {
     }
     this.pendingInit = null;
     const parts = Number(init.parts ?? 1);
+    // Edits made while connecting are replayed on the whole document: ask
+    // for it rather than the pages one by one.
+    if (parts > 1 && this.engine.has_unacked()) {
+      const ws = this.socket;
+      this.socket = null;
+      ws?.close();
+      this.connect(this.url);
+      return;
+    }
     this.start(init, (canEdit) => {
       if (parts > 1) this.engine.load_zlib_first(data, String(init.clientId), canEdit, String(init.page));
       else this.engine.load_zlib(data, String(init.clientId), canEdit);
