@@ -673,11 +673,20 @@ impl FlexmaEditor {
         }
     }
 
-    /// Web fonts finished loading: re-measure and re-rasterize text.
     /// Web fonts are loading: hold off measuring text until `fonts_ready`, so
     /// boxes aren't sized for a fallback font.
     pub fn fonts_loading(&mut self) {
         self.ed.fonts_ready = false;
+    }
+
+    /// The workspace's font faces changed (one was added or removed): text
+    /// may draw differently once they load, so all of it is redrawn at the
+    /// next `fonts_ready`.
+    pub fn fonts_changed(&mut self) {
+        self.ed.fonts_ready = false;
+        if let Some(r) = self.ed.renderer.as_mut() {
+            r.fonts_changed();
+        }
     }
 
     /// Re-measure auto-sized text in these families (JSON array), e.g. after
@@ -700,6 +709,8 @@ impl FlexmaEditor {
         self.ed.dirty = true;
     }
 
+    /// Web fonts finished loading: re-measure text, and redraw the text drawn
+    /// before its faces were in.
     pub fn fonts_ready(&mut self) {
         // The font check runs after every document change; when nothing was
         // loading, keep the text drawn (dropping it made big pages redraw
@@ -710,9 +721,10 @@ impl FlexmaEditor {
         self.ed.fonts_ready = true;
         if let Some(t) = self.ed.text.as_mut() {
             t.reset();
+            t.faces_known = true;
         }
         if let Some(r) = self.ed.renderer.as_mut() {
-            r.reset_text();
+            r.fonts_loaded();
             r.invalidate();
         }
         self.ed.dirty = true;

@@ -32,6 +32,7 @@ features = [
   "CanvasRenderingContext2d",
   "ImageData",
   "TextMetrics",
+  "FontFaceSet",
   "WebGl2RenderingContext",
   "WebGlProgram",
   "WebGlShader",

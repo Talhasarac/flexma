@@ -83,7 +83,7 @@ export class FontManager {
     for (const f of faces) fontFaceFor(f, this.url(f));
     // A face came or went: text drawn so far may use the wrong font, so the
     // engine redraws it when the check below reports the fonts ready again.
-    if (this.listed && (keep.size !== had.size || [...keep].some((u) => !had.has(u)))) this.store.engine.fonts_loading();
+    if (this.listed && (keep.size !== had.size || [...keep].some((u) => !had.has(u)))) this.store.engine.fonts_changed();
     this.state = { ...this.state, faces, families: groupByFamily(faces) };
     this.listed = true;
     await this.ensureUsed();

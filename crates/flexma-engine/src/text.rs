@@ -17,6 +17,11 @@ pub struct TextEngine {
     metrics: HashMap<String, (f64, f64)>,
     current_font: String,
     current_ls: f64,
+    /// The page's font faces, to tell whether text drew with its own font.
+    fonts: web_sys::FontFaceSet,
+    /// The workspace's faces are in `fonts` (they were reported ready once).
+    /// Before that, a family with no face yet may still get one.
+    pub faces_known: bool,
 }
 
 pub struct Raster {
@@ -24,6 +29,8 @@ pub struct Raster {
     pub px_h: u32,
     /// Local-space rect covered by the raster (includes a margin for overhang).
     pub rect: [f64; 4],
+    /// Every face the text uses had loaded, so fonts arriving later can't change it.
+    pub settled: bool,
 }
 
 pub fn css_color(c: Color) -> String {
@@ -122,7 +129,15 @@ impl TextEngine {
             metrics: HashMap::new(),
             current_font: String::new(),
             current_ls: f64::NAN,
+            fonts: doc.fonts(),
+            faces_known: false,
         })
+    }
+
+    /// Whether `text` in `font` draws with its own faces: they have loaded,
+    /// or the page has none for it (a system or missing font).
+    fn font_loaded(&self, font: &str, text: &str) -> bool {
+        self.fonts.check_with_text(font, text).unwrap_or(true)
     }
 
     /// Forget cached metrics (call when web fonts finish loading).
@@ -349,7 +364,12 @@ impl TextEngine {
         if !shadows.is_empty() {
             let _ = self.draw_shadows(&shadows, px_w, px_h, scale);
         }
-        Some(Raster { px_w, px_h, rect: [x_min, y_min, lw, lh_box] })
+        let settled = self.faces_known
+            && match &rich {
+                Some(rich) => rich.iter().flat_map(|l| &l.pieces).all(|p| self.font_loaded(&font_css(&p.style, n.font_size), &p.text)),
+                None => self.font_loaded(&font_css(n, n.font_size), &lines.concat()),
+            };
+        Some(Raster { px_w, px_h, rect: [x_min, y_min, lw, lh_box], settled })
     }
 
     /// Put drop shadows under what's on the canvas, like the exports'

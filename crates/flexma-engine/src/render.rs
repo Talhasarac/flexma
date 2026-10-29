@@ -78,6 +78,10 @@ struct TextEntry {
     bytes: usize,
     /// Frame number this texture was last drawn in (for LRU eviction).
     used: u64,
+    /// Drawn with all its faces loaded (`Raster::settled`).
+    settled: bool,
+    /// Fonts changed since: redraw it, showing this one until then.
+    stale: bool,
 }
 
 struct LabelEntry {
@@ -385,14 +389,23 @@ impl Renderer {
         self.built_version = u64::MAX;
     }
 
-    /// Forget all text rasters (fonts changed).
-    pub fn reset_text(&mut self) {
-        for (_, e) in self.texts.drain() {
-            self.gpu.delete_texture(e.tex);
+    /// Fonts finished loading: redraw the text drawn before its faces were
+    /// in. Each keeps showing until its new raster replaces it (dropping them
+    /// all made big pages' text vanish and come back a few rows a frame).
+    pub fn fonts_loaded(&mut self) {
+        for e in self.texts.values_mut() {
+            e.stale |= !e.settled;
         }
-        self.text_bytes = 0;
         for (_, e) in self.labels.drain() {
             self.gpu.delete_texture(e.tex);
+        }
+    }
+
+    /// The font faces themselves changed (one came or went): any text may
+    /// draw differently once they load.
+    pub fn fonts_changed(&mut self) {
+        for e in self.texts.values_mut() {
+            e.settled = false;
         }
     }
 
@@ -955,7 +968,7 @@ impl Renderer {
         let content = text_content_hash(n);
         let frame = self.frame_no;
         if let Some(e) = self.texts.get_mut(&n.id) {
-            if e.content == content && (e.bucket == bucket || !allow_raster) {
+            if e.content == content && ((e.bucket == bucket && !e.stale) || !allow_raster) {
                 e.used = frame;
                 return Some((e.tex, e.rect));
             }
@@ -977,7 +990,7 @@ impl Renderer {
         let tex = self.gpu.upload_texture(old, ImageSource::Canvas(&text.canvas), r.px_w, r.px_h, false)?;
         let bytes = (r.px_w as usize) * (r.px_h as usize) * 4;
         self.text_bytes += bytes;
-        self.texts.insert(n.id.clone(), TextEntry { content, bucket, tex, rect: r.rect, bytes, used: frame });
+        self.texts.insert(n.id.clone(), TextEntry { content, bucket, tex, rect: r.rect, bytes, used: frame, settled: r.settled, stale: false });
         Some((tex, r.rect))
     }
 
