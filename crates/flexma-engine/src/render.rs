@@ -83,7 +83,7 @@ enum Cmd {
     /// A paint layer's tiles.
     Paint { id: NodeId, opacity: f32 },
     /// Stencil clip drawn from one or more instances, each with its image (alpha masks).
-    PushClip { parts: Vec<(u32, Option<String>)> },
+    PushClip { parts: Vec<(u32, Option<String>)>, bounds: flexma_doc::Rect },
     PopClip { parts: Vec<(u32, Option<String>)> },
     /// Background blur: blur what's drawn so far inside the shape of `parts`
     /// (radius in world units), before the layer itself.
@@ -308,6 +308,9 @@ pub struct Renderer {
     /// Device pixels per world unit when the display list was last built.
     build_px: f64,
     pub wake: Rc<Cell<bool>>,
+    /// An image (or a sharper version) finished loading: draw again. Only a
+    /// first version rebuilds the display list (`upload_loaded_images`).
+    pub arrived: Rc<Cell<bool>>,
     pub asset_base: String,
     pub max_tex: u32,
     /// The last frame skipped work (text rasters / images) and wants another.
@@ -556,6 +559,7 @@ impl Renderer {
             loaded: Rc::new(RefCell::new(Vec::new())),
             build_px: 1.0,
             wake,
+            arrived: Rc::new(Cell::new(false)),
             asset_base: "/api/assets/".into(),
             max_tex,
             wants_more: false,
@@ -622,11 +626,11 @@ impl Renderer {
                 }
             }
             let queue = self.loaded.clone();
-            let wake = self.wake.clone();
+            let arrived = self.arrived.clone();
             let id = asset.to_string();
             let done: Rc<dyn Fn(Option<Loaded>)> = Rc::new(move |got| {
                 queue.borrow_mut().push((id.clone(), got));
-                wake.set(true);
+                arrived.set(true);
             });
             let url = format!("{}{}", self.asset_base, asset);
             match version {
@@ -644,7 +648,10 @@ impl Renderer {
         }
     }
 
-    fn upload_loaded_images(&mut self) {
+    /// Upload images that finished loading. Call before deciding whether to
+    /// rebuild: a first version replaces a placeholder (the display list
+    /// changes), a sharper one only swaps the texture.
+    pub fn upload_loaded_images(&mut self) {
         let items: Vec<(String, Option<Loaded>)> = self.loaded.borrow_mut().drain(..).collect();
         for (id, got) in items {
             let uploaded = got.and_then(|Loaded { img, natural, url, full }| {
@@ -842,7 +849,7 @@ impl Renderer {
                     );
                     parts.push((ci, image));
                 }
-                cmds.push(Cmd::PushClip { parts: parts.clone() });
+                cmds.push(Cmd::PushClip { parts: parts.clone(), bounds: world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height)) });
                 clips.push((i + item.span as usize, parts));
             } else if n.kind.is_frame_like() && n.clips_content && item.span > 0 && !content_fits(doc, scene, i, item.span as usize, n, &world) {
                 let ci = (inst.len() / INST_FLOATS) as u32;
@@ -861,7 +868,7 @@ impl Renderer {
                     [0.0; 4],
                     [0.0; 4],
                 );
-                cmds.push(Cmd::PushClip { parts: vec![(ci, None)] });
+                cmds.push(Cmd::PushClip { parts: vec![(ci, None)], bounds: world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height)) });
                 clips.push((i + item.span as usize, vec![(ci, None)]));
             }
         }
@@ -1035,7 +1042,8 @@ impl Renderer {
                         f.fx,
                     );
                     let k = paint.map_or(0.0, |p| image_scale(p, f.colors[1], n.width, n.height, &m));
-                    let bounds = m.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height));
+                    let pad = pad as f64;
+                    let bounds = m.map_rect(&flexma_doc::Rect::new(-pad, -pad, n.width + 2.0 * pad, n.height + 2.0 * pad));
                     cmds.push(Cmd::Image { inst: idx, asset: f.image.clone().unwrap(), k, bounds });
                     continue;
                 }
@@ -1107,7 +1115,8 @@ impl Renderer {
             match image {
                 Some(asset) => {
                     let k = paint.map_or(0.0, |p| image_scale(p, colors[1], n.width, n.height, world));
-                    let bounds = world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height));
+                    let out = n.stroke_weight.max(0.0) + 2.0;
+                    let bounds = world.map_rect(&flexma_doc::Rect::new(-out, -out, n.width + 2.0 * out, n.height + 2.0 * out));
                     cmds.push(Cmd::Image { inst: idx, asset, k, bounds })
                 }
                 None => push_shape(cmds, idx),
@@ -1291,7 +1300,6 @@ impl Renderer {
         self.frame_no += 1;
         self.wants_more = false;
         self.text_behind = false;
-        self.upload_loaded_images();
         // Paint tiles change outside the frame (dabs, rebuilds, snapshots).
         paint.apply_gpu(&mut *self.gpu, now);
         let pw = (css_w * dpr).round().max(0.0) as u32;
@@ -1324,7 +1332,18 @@ impl Renderer {
             };
         }
         let rows = |m: &Affine| ([m.a as f32, m.c as f32, m.e as f32], [m.b as f32, m.d as f32, m.f as f32]);
+        // Inside a clipping frame that's off screen: everything up to its end
+        // is clipped away, so none of it draws (big pages have thousands).
+        let mut hidden_clips = 0usize;
         for cmd in &cmds {
+            if hidden_clips > 0 {
+                match cmd {
+                    Cmd::PushClip { .. } => hidden_clips += 1,
+                    Cmd::PopClip { .. } => hidden_clips -= 1,
+                    _ => {}
+                }
+                continue;
+            }
             match cmd {
                 Cmd::Shapes { start, count } => {
                     pending = match pending {
@@ -1337,13 +1356,16 @@ impl Renderer {
                     };
                 }
                 Cmd::Image { inst, asset, k, bounds } => {
+                    if !bounds.intersects(&visible) {
+                        continue;
+                    }
                     flush_shapes!();
-                    // On screen, at this zoom: a sharper version if this one is too coarse.
-                    let need = if bounds.intersects(&visible) { Need::Fraction(k * cam.zoom * dpr) } else { Need::Have };
-                    let tex = self.image_need(asset, need).map(|(t, _, _)| t);
+                    // At this zoom: a sharper version if this one is too coarse.
+                    let tex = self.image_need(asset, Need::Fraction(k * cam.zoom * dpr)).map(|(t, _, _)| t);
                     self.gpu.draw_shapes(*inst, 1, tex);
                 }
-                Cmd::PushClip { parts } | Cmd::PopClip { parts } => {
+                Cmd::PushClip { bounds, .. } if !bounds.intersects(&visible) => hidden_clips = 1,
+                Cmd::PushClip { parts, .. } | Cmd::PopClip { parts } => {
                     flush_shapes!();
                     let parts = self.clip_parts(parts);
                     self.gpu.clip(&parts, matches!(cmd, Cmd::PushClip { .. }));

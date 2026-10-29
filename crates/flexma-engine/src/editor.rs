@@ -878,9 +878,10 @@ impl Editor {
         }
         self.process_measurements();
         let wake = self.renderer.as_ref().map(|r| r.wake.replace(false)).unwrap_or(false);
+        let arrived = self.renderer.as_ref().map(|r| r.arrived.replace(false)).unwrap_or(false);
         let settled_text = !self.interacting() && self.now_ms - self.last_camera_change < 400.0;
         let paint = std::mem::take(&mut self.paint.dirty) || self.paint.busy() || self.paint.due.replace(false) || self.paint.wake.replace(false);
-        if !self.dirty && !wake && !settled_text && !paint {
+        if !self.dirty && !wake && !arrived && !settled_text && !paint {
             return false;
         }
         self.paint.sync_layers(&self.doc, self.doc_version);
@@ -897,6 +898,7 @@ impl Editor {
             self.dirty = false;
             return false;
         };
+        r.upload_loaded_images();
         if r.built_version != version || wake {
             r.build(&self.doc, &self.scene, &hidden, version, self.cam.zoom * self.dpr);
         }
