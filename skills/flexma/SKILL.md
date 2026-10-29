@@ -35,7 +35,7 @@ The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexm
 3. **Build in sections.** Make one `create_nodes` call per meaningful chunk (a screen shell, a nav bar, a hero, a card grid), with nested `children`. That is atomic, fast, and appears to collaborators as one step. Leave out `x`/`y` on top-level nodes to auto-place new work beside existing content, so you never cover someone's work.
 4. **Check your work visually.** Call `get_screenshot` on the frame you built and actually look at it:
    - Is the alignment right?
-   - Does any text overflow, and are any elements clipped? A shadow that stops at a hard straight edge instead of fading out is cut by a clipping parent (see "Clipping" below).
+   - Does any text overflow, and are any elements clipped? A shadow that stops at a hard straight edge instead of fading out is cut by a clipping parent (see "Clipping" below). In `get_file_tree`, a fill-less frame much bigger than its children is a click trap (see "Keep invisible frames no bigger than their content").
    - Is there enough contrast, and is spacing consistent?
    - Does the hierarchy read clearly?
 
@@ -121,6 +121,11 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
   - Set `clip: false` on frames that only arrange things: auto-layout rows, columns and stacks (a toast list, a card row, a button group, a menu), wrappers and holders. Do it whenever a child has a shadow or glow, or a badge or decoration that pokes out past the edge.
   - Keep `clip: true` where hiding the overflow is the point: screens and artboards, scroll areas and lists that show a window onto longer content, a rounded frame holding a picture (avatars, thumbnails), a progress bar whose fill must stay inside its track, and Unity `Mask` / `RectMask2D`.
   - If a frame must clip and its children have shadows, give it padding at least the shadow's reach (blur plus offset) on each side, so the shadow fades out inside it.
+- **Keep invisible frames no bigger than their content.** A frame catches clicks across its whole box, even where it's transparent, and later siblings sit in front of earlier ones. A screen-wide frame that only exists to center or right-align one panel covers everything under it, so people select the empty frame instead of the layers they see.
+  - To place one thing (a panel at the top center, a card at the top right), put it straight in the screen at its `x`/`y` with `constraints` (`CENTER`, `MAX`), like a Unity anchor, instead of wrapping it in a screen-wide frame with `justify`. In an auto-layout screen, add `absolute: true`.
+  - Wrapper frames (stacks, lists, things that move together) hug their content.
+  - A full-width row is fine when it reads as one visible thing, like a nav bar or toolbar with a fill. Over a game view or a picture, don't stretch empty frames across the screen.
+  - This is for layouts you build. Unity exports mirror the RectTransforms as they are.
 - **Use a spacing scale:** 4, 8, 12, 16, 24, 32, 48, 64. Use a radius scale: 4, 8, 12, 16, 999 for pills.
 - **Use a type scale:**
   - 12 or 13 for captions
