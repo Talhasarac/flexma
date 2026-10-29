@@ -80,6 +80,10 @@ function paintCap(): number {
   return appleMobile ? 1024 : 4096;
 }
 
+/** The WebGPU device the editor draws with (none on WebGL2): the performance
+ * overlay times its GPU work. */
+export let gpuDevice: { queue: { onSubmittedWorkDone(): Promise<unknown> } } | null = null;
+
 /** A new editor drawing on `canvas` with the best available renderer. */
 export async function createEditor(canvas: HTMLCanvasElement, opts: CreateEditorOptions = {}): Promise<FlexmaEditor> {
   await loadEngine();
@@ -118,6 +122,7 @@ export async function createEditor(canvas: HTMLCanvasElement, opts: CreateEditor
         });
         try {
           const editor = FlexmaEditor.withWebGpu(device, context, format, (message: string) => fail(message), paintCap());
+          gpuDevice = device as unknown as typeof gpuDevice;
           // Safari throws from WebGPU calls (on a lost device, say) where
           // Chrome reports an error later. A throw inside the engine leaves it
           // unusable, so the first one switches to WebGL2 like any GPU failure.

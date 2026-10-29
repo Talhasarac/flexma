@@ -324,6 +324,8 @@ pub struct GpuBackend {
     trash_buf: Vec<GpuBuffer>,
     /// Frames in a row that failed validation, and who to tell when it keeps happening.
     bad_frames: Rc<Cell<u32>>,
+    /// Every rejected frame so far (diagnostics).
+    errors: Rc<Cell<u64>>,
     on_error: js_sys::Function,
     wake: Rc<Cell<bool>>,
     /// Checks each frame's error scope (one closure, reused every frame).
@@ -552,6 +554,7 @@ impl GpuBackend {
             trash_tex: Vec::new(),
             trash_buf: Vec::new(),
             bad_frames: Rc::new(Cell::new(0)),
+            errors: Rc::new(Cell::new(0)),
             on_error,
             wake: Rc::new(Cell::new(false)),
             frame_check: None,
@@ -1366,7 +1369,7 @@ impl Backend for GpuBackend {
         }
         self.queue.submit(&arr(vec![enc.finish()]));
         if self.frame_check.is_none() {
-            let (bad, wake, on_error) = (self.bad_frames.clone(), self.wake.clone(), self.on_error.clone());
+            let (bad, wake, on_error, errors) = (self.bad_frames.clone(), self.wake.clone(), self.on_error.clone(), self.errors.clone());
             self.frame_check = Some(Closure::new(move |err: JsValue| {
                 if err.is_null() || err.is_undefined() {
                     bad.set(0);
@@ -1374,6 +1377,7 @@ impl Backend for GpuBackend {
                 }
                 let n = bad.get() + 1;
                 bad.set(n);
+                errors.set(errors.get() + 1);
                 wake.set(true);
                 if n == BAD_FRAMES_BEFORE_FAILURE {
                     let msg = Reflect::get(&err, &"message".into()).ok().and_then(|m| m.as_string()).unwrap_or_default();
@@ -1400,6 +1404,10 @@ impl Backend for GpuBackend {
 
     fn paint_counters(&self) -> [u64; 3] {
         [self.paint_passes, self.paint_submits, self.paint_queue_peak as u64]
+    }
+
+    fn gpu_errors(&self) -> u64 {
+        self.errors.get()
     }
 
     fn attach_wake(&mut self, wake: Rc<Cell<bool>>) {

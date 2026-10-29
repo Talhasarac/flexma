@@ -1,7 +1,7 @@
 // Frame timing for the performance overlay (⇧⌘. or the main menu, `?perf`
 // in the URL), and for debugging from the console: `__flexma.perf.snapshot()`.
 import { useSyncExternalStore } from 'react';
-import type { FlexmaEditor } from '../engine';
+import { gpuDevice, type FlexmaEditor } from '../engine';
 import { readStorage, writeStorage } from '../lib/storage';
 
 export interface PerfSnapshot {
@@ -15,6 +15,15 @@ export interface PerfSnapshot {
   /** The engine's own work per drawn frame (ms): median and worst. */
   engineMs: number;
   worstEngineMs: number;
+  /** From a frame's submission until the GPU finished it (ms), median; -1
+   * when unknown (WebGL2). Close to `frameMs`: the GPU is the slow part. */
+  gpuMs: number;
+  /** Texts drawn into textures per second (zooming redraws visible text). */
+  textRastersPerSec: number;
+  /** Frames the GPU rejected (and redrew), in all. */
+  gpuErrors: number;
+  /** Rebuilds per second by cause. */
+  rebuildsFrom: { gpuRetry: number; invalidated: number; document: number };
   /** Main-thread tasks over 50 ms in the last 5 s, and their total (ms). */
   longTasks: number;
   longTaskMs: number;
@@ -48,7 +57,9 @@ export class PerfMonitor {
   private gaps: { t: number; ms: number }[] = [];
   private long: { t: number; ms: number }[] = [];
   private lastDrawn = 0;
-  private rebuilds: { t: number; n: number } | null = null;
+  private prev: { t: number; rebuilds: number; rasters: number; by: number[] } | null = null;
+  private gpu: { t: number; ms: number }[] = [];
+  private gpuPending = false;
 
   constructor(engine: FlexmaEditor) {
     this.engine = engine;
@@ -70,6 +81,16 @@ export class PerfMonitor {
     }
     this.lastDrawn = t;
     this.frames.push({ t, ms });
+    // One measurement in flight at a time: when the GPU finishes this frame.
+    if (gpuDevice && !this.gpuPending) {
+      this.gpuPending = true;
+      const sent = performance.now();
+      void gpuDevice.queue.onSubmittedWorkDone().then(() => {
+        this.gpuPending = false;
+        this.gpu.push({ t: sent, ms: performance.now() - sent });
+        if (this.gpu.length > RECENT) this.gpu.shift();
+      });
+    }
     while (this.frames.length && this.frames[0].t < t - 1000) this.frames.shift();
   }
 
@@ -78,11 +99,16 @@ export class PerfMonitor {
     const frames = this.frames.filter((f) => f.t >= now - 1000);
     const gaps = this.gaps.filter((g) => g.t >= now - 1000).map((g) => g.ms);
     this.long = this.long.filter((l) => l.t >= now - 5000);
-    const st = JSON.parse(this.engine.stats()) as Record<string, number | string>;
+    const st = JSON.parse(this.engine.stats()) as Record<string, unknown>;
     const n = Number(st.rebuilds ?? 0);
-    const prev = this.rebuilds;
-    this.rebuilds = { t: now, n };
+    const rasters = Number(st.textRasters ?? 0);
+    const byObj = (st.rebuildsBy ?? {}) as Record<string, number>;
+    const by = [byObj.gpuRetry ?? 0, byObj.invalidated ?? 0, byObj.document ?? 0];
+    const prev = this.prev;
+    this.prev = { t: now, rebuilds: n, rasters, by };
+    const perSec = (a: number, b: number) => (prev && now > prev.t ? ((a - b) * 1000) / (now - prev.t) : 0);
     const engineMs = frames.map((f) => f.ms);
+    const gpu = this.gpu.filter((g) => g.t >= now - 1000).map((g) => g.ms);
     return {
       fps: frames.length,
       frameMs: median(gaps),
@@ -92,7 +118,11 @@ export class PerfMonitor {
       longTasks: this.long.length,
       longTaskMs: this.long.reduce((a, l) => a + l.ms, 0),
       drawCalls: Number(st.drawCalls ?? 0),
-      rebuildsPerSec: prev && now > prev.t ? ((n - prev.n) * 1000) / (now - prev.t) : 0,
+      rebuildsPerSec: perSec(n, prev?.rebuilds ?? n),
+      gpuMs: gpuDevice ? median(gpu) : -1,
+      textRastersPerSec: perSec(rasters, prev?.rasters ?? rasters),
+      gpuErrors: Number(st.gpuErrors ?? 0),
+      rebuildsFrom: { gpuRetry: perSec(by[0], prev?.by[0] ?? by[0]), invalidated: perSec(by[1], prev?.by[1] ?? by[1]), document: perSec(by[2], prev?.by[2] ?? by[2]) },
       textMB: Number(st.textMemoryMB ?? 0),
       imageMB: Number(st.imageMemoryMB ?? 0),
       layers: Number(st.nodes ?? 0),

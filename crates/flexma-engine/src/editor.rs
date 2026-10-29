@@ -34,6 +34,9 @@ pub struct Guide {
     pub to: f64,
 }
 
+/// Rebuilds for other people's edits wait this long after the last one (ms).
+const REMOTE_REBUILD_MS: f64 = 100.0;
+
 pub struct Editor {
     pub doc: Document,
     pub scene: Scene,
@@ -73,6 +76,12 @@ pub struct Editor {
     /// A frame of the open page has drawn all its visible text. Streamed
     /// pages wait for this, so the first page shows as fast as a one-page file.
     pub page_drawn: bool,
+    /// Display-list rebuilds by cause: GPU retry, invalidated, document/scene change.
+    pub rebuilds_by: [u64; 3],
+    /// `doc_version` after the last change someone else made (see `render`).
+    pub remote_version: u64,
+    /// When the display list was last rebuilt.
+    pub last_build_ms: f64,
     pub last_camera_change: f64,
     pub frame_labels: Vec<(NodeId, Rect)>,
     pub drop_target: Option<NodeId>,
@@ -142,6 +151,9 @@ impl Editor {
             wanted_page: None,
             waiting_paint: None,
             page_drawn: false,
+            rebuilds_by: [0; 3],
+            remote_version: u64::MAX,
+            last_build_ms: f64::NEG_INFINITY,
             last_camera_change: -1e9,
             frame_labels: vec![],
             drop_target: None,
@@ -349,7 +361,11 @@ impl Editor {
             }
         }
         let laid = self.derive(&mut eff);
+        let before = self.doc_version;
         self.after_effect(&eff, &laid);
+        if self.doc_version != before {
+            self.remote_version = self.doc_version;
+        }
         // Someone (often an agent) just put the first content on the page we're
         // looking at: bring it into view.
         if page_was_empty && !self.doc.children(&self.scene.page).is_empty() && matches!(self.gesture, crate::tools::Gesture::None) {
@@ -899,13 +915,27 @@ impl Editor {
             return false;
         };
         r.upload_loaded_images();
-        if r.built_version != version || wake {
+        // Others' edits (an agent at work sends many a second) rebuild at most
+        // every REMOTE_REBUILD_MS: each rebuild sends the whole page to the GPU.
+        // Our own edits and everything else rebuild at once.
+        let stale = r.built_version != version;
+        let held = stale
+            && !wake
+            && r.built_version != u64::MAX
+            && self.doc_version == self.remote_version
+            && self.now_ms - self.last_build_ms < REMOTE_REBUILD_MS;
+        if (stale && !held) || wake {
+            // Why (diagnostics, see `stats`): a GPU retry, something that
+            // invalidated the list (a first image, fonts, a page), or the document.
+            let why = if wake { 0 } else if r.built_version == u64::MAX { 1 } else { 2 };
+            self.rebuilds_by[why] += 1;
+            self.last_build_ms = self.now_ms;
             r.build(&self.doc, &self.scene, &hidden, version, self.cam.zoom * self.dpr);
         }
         let linear = self.doc.get(&self.scene.page).is_some_and(|p| p.linear_blending);
         r.draw(&self.doc, &self.scene, text, &mut self.paint, self.now_ms, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting, !self.page_drawn);
         self.last_frame_ms = self.now_ms;
-        self.dirty = r.wants_more;
+        self.dirty = r.wants_more || held;
         self.page_drawn |= !r.text_behind;
         true
     }

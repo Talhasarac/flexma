@@ -321,6 +321,8 @@ pub struct Renderer {
     pub draw_calls: u32,
     /// Display list rebuilds so far (diagnostics: painting shouldn't cause any).
     pub builds: u64,
+    /// Text rasters made so far (diagnostics: zooming redraws visible text).
+    pub text_rasters: u64,
 }
 
 fn premul(c: Color, alpha: f32) -> [f32; 4] {
@@ -566,6 +568,7 @@ impl Renderer {
             text_behind: false,
             draw_calls: 0,
             builds: 0,
+            text_rasters: 0,
         }
     }
 
@@ -577,6 +580,10 @@ impl Renderer {
     /// Paint-tile GPU work so far: (render passes, queue submits, queue peak).
     pub fn paint_counters(&self) -> [u64; 3] {
         self.gpu.paint_counters()
+    }
+
+    pub fn gpu_errors(&self) -> u64 {
+        self.gpu.gpu_errors()
     }
 
     pub fn invalidate(&mut self) {
@@ -1232,6 +1239,7 @@ impl Renderer {
             return self.texts.get(&n.id).filter(|e| e.content == content).map(|e| (e.tex, e.rect));
         }
         let r = text.rasterize(n, bucket, self.max_tex.min(MAX_TEXT_TEXTURE));
+        self.text_rasters += 1;
         budget.take(r.as_ref().map_or(0, |r| (r.px_w as usize) * (r.px_h as usize)));
         let r = r?;
         let old = match self.texts.remove(&n.id) {

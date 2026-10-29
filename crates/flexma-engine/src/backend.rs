@@ -167,6 +167,10 @@ pub trait Backend {
     fn paint_counters(&self) -> [u64; 3] {
         [0, 0, 0]
     }
+    /// Frames the GPU rejected so far (each is redrawn; see `attach_wake`).
+    fn gpu_errors(&self) -> u64 {
+        0
+    }
     /// A flag the backend can raise to ask for another frame (e.g. after a
     /// frame failed on the GPU and should be redrawn).
     fn attach_wake(&mut self, _wake: Rc<Cell<bool>>) {}

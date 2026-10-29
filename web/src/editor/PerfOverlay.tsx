@@ -40,10 +40,31 @@ export function PerfOverlay({ store }: { store: EditorStore }) {
         <dd>{idle ? '–' : `${s.frameMs.toFixed(1)} ms, worst ${s.worstFrameMs.toFixed(0)}`}</dd>
         <dt>engine</dt>
         <dd>{idle ? '–' : `${s.engineMs.toFixed(1)} ms, worst ${s.worstEngineMs.toFixed(0)}`}</dd>
+        <dt>gpu</dt>
+        <dd>{s.gpuMs < 0 ? 'n/a (WebGL2)' : idle ? '–' : `${s.gpuMs.toFixed(1)} ms`}</dd>
         <dt>draw calls</dt>
         <dd>{s.drawCalls.toLocaleString()}</dd>
+        <dt>text redraws</dt>
+        <dd>{s.textRastersPerSec.toFixed(0)}/s</dd>
         <dt>rebuilds</dt>
-        <dd>{s.rebuildsPerSec.toFixed(1)}/s</dd>
+        <dd>
+          {s.rebuildsPerSec.toFixed(1)}/s
+          {s.rebuildsPerSec > 0.05 &&
+            ` (${[
+              ['doc', s.rebuildsFrom.document],
+              ['gpu retry', s.rebuildsFrom.gpuRetry],
+              ['other', s.rebuildsFrom.invalidated],
+            ]
+              .filter(([, v]) => (v as number) > 0.05)
+              .map(([k, v]) => `${k} ${(v as number).toFixed(1)}`)
+              .join(', ')})`}
+        </dd>
+        {s.gpuErrors > 0 && (
+          <>
+            <dt>gpu errors</dt>
+            <dd>{s.gpuErrors}</dd>
+          </>
+        )}
         <dt>long tasks</dt>
         <dd>{s.longTasks ? `${s.longTasks} in 5 s (${Math.round(s.longTaskMs)} ms)` : 'none'}</dd>
         <dt>memory</dt>
