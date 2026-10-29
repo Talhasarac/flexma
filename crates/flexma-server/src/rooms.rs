@@ -569,11 +569,30 @@ pub struct Rooms {
     /// Counts restores and deletions: a room read from the database before
     /// one isn't opened (`get` reads the file again).
     epoch: AtomicU64,
+    /// Files a `get` is reading and opening. Another `get` for one waits for
+    /// that room instead of parsing the file a second time.
+    opening: Mutex<std::collections::HashSet<String>>,
+}
+
+/// Takes a file out of `Rooms::opening` when its `get` is done with it.
+struct Opening<'a>(&'a Rooms, String);
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        self.0.opening.lock().unwrap().remove(&self.1);
+    }
 }
 
 impl Rooms {
     pub fn new(db: Db) -> Arc<Rooms> {
-        let rooms = Arc::new(Rooms { db, rooms: Mutex::new(HashMap::new()), blocked: Mutex::new(Default::default()), actors: Mutex::new(Vec::new()), epoch: AtomicU64::new(0) });
+        let rooms = Arc::new(Rooms {
+            db,
+            rooms: Mutex::new(HashMap::new()),
+            blocked: Mutex::new(Default::default()),
+            actors: Mutex::new(Vec::new()),
+            epoch: AtomicU64::new(0),
+            opening: Mutex::new(Default::default()),
+        });
         let reaper = rooms.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -696,6 +715,16 @@ impl Rooms {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
+            // Someone else is opening it (the editor asks for the file before
+            // its socket connects, which starts opening the room): wait for it.
+            if !self.opening.lock().unwrap().insert(file_id.to_string()) {
+                if Instant::now() > deadline {
+                    return Err(closed());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            let _opening = Opening(self, file_id.to_string());
             let fid = file_id.to_string();
             let loaded = self
                 .db
@@ -1861,6 +1890,20 @@ mod access_tests {
         let part: flexma_doc::parts::PagePart = serde_json::from_str(&rest.json).unwrap();
         assert_eq!(part.page, "0:1");
         assert_eq!(part.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["a:1"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two opens of a closed file at once (the editor's file request and
+    /// its socket) share one room, read once.
+    #[tokio::test]
+    async fn opens_at_once_share_one_room() {
+        let (db, dir) = setup("opening").await;
+        let rooms = Rooms::new(db.clone());
+        let (a, b) = tokio::join!(rooms.get("f"), rooms.get("f"));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(a.tx.same_channel(&b.tx));
+        assert!(rooms.opening.lock().unwrap().is_empty());
+        assert_eq!(rooms.actors.lock().unwrap().len(), 1, "one room actor");
         let _ = std::fs::remove_dir_all(dir);
     }
 

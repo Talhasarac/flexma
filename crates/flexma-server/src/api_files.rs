@@ -170,7 +170,14 @@ pub async fn create_file(
 }
 
 pub async fn get_file(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Json<Value>> {
+    let fid = id.clone();
     let v = st.db.call(move |c| get_file_json(c, &user.id, &id)).await?;
+    // The editor asks for this while it loads; its socket follows. Opening
+    // the room now (a second for a big file) overlaps that loading.
+    let rooms = st.rooms.clone();
+    tokio::spawn(async move {
+        let _ = rooms.get(&fid).await;
+    });
     Ok(Json(v))
 }
 
