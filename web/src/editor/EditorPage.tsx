@@ -14,6 +14,8 @@ import { CommentsPanel } from './CommentsLayer';
 import { Canvas } from './Canvas';
 import { Toolbar } from './Toolbar';
 import { FollowFrame, PageLoading, TopBar } from './TopBar';
+import { PerfOverlay } from './PerfOverlay';
+import { togglePerfOverlay, usePerfOverlay } from './perf';
 import { LayersPanel } from './LayersPanel';
 import { PropertiesPanel } from './PropertiesPanel';
 import './editor.css';
@@ -110,12 +112,17 @@ export function Editor({ store, canvas, header, footer }: { store: EditorStore; 
     store.onReload = () => toast.info('This file was restored to an earlier version.', { id: 'reload' });
   }, [store, toast]);
 
-  // Cmd+\ toggles the UI panels (focus mode).
+  // Cmd+\ toggles the UI panels (focus mode), Shift+Cmd+. the performance overlay.
+  const perfShown = usePerfOverlay();
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if ((ev.metaKey || ev.ctrlKey) && ev.key === '\\') {
         ev.preventDefault();
         setPanels((p) => !p);
+      }
+      if ((ev.metaKey || ev.ctrlKey) && ev.shiftKey && ev.code === 'Period') {
+        ev.preventDefault();
+        togglePerfOverlay();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -226,6 +233,7 @@ export function Editor({ store, canvas, header, footer }: { store: EditorStore; 
           <Canvas store={store} canvas={canvas} onContextMenu={onContextMenu} onDropFiles={onDropFiles} />
           <FollowFrame store={store} />
           <PageLoading store={store} />
+          {perfShown && <PerfOverlay store={store} />}
           <Toolbar store={store} />
           {footer}
         </main>

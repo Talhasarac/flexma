@@ -462,6 +462,51 @@
 .page-item.loading {
   color: var(--text-muted);
 }
+/* Performance overlay (⇧⌘.): a dark HUD in either theme, like a game's. */
+.perf-overlay {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 3;
+  pointer-events: none;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: rgb(14 14 18 / 0.82);
+  color: #e6e6ea;
+  font: var(--font-size-xs) / 1.5 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.perf-fps {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.perf-fps span {
+  color: #a5a5ad;
+  font-weight: 400;
+  font-size: var(--font-size-xs);
+}
+.perf-graph {
+  display: block;
+  margin-bottom: 6px;
+  background: rgb(255 255 255 / 0.04);
+}
+.perf-60 {
+  stroke: rgb(255 255 255 / 0.25);
+  stroke-dasharray: 2 2;
+}
+.perf-overlay dl {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0 10px;
+  margin: 0;
+}
+.perf-overlay dt {
+  color: #8d8d96;
+}
+.perf-overlay dd {
+  margin: 0;
+}
 .page-loading {
   position: absolute;
   top: 12px;

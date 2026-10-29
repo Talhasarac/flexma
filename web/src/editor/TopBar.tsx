@@ -14,6 +14,7 @@ import { VersionsDialog } from './VersionsDialog';
 import { MissingFontsButton } from './MissingFonts';
 import { exportPngs, safeName } from './download';
 import { useAuth } from '../lib/auth';
+import { togglePerfOverlay, usePerfOverlay } from './perf';
 
 interface Props {
   store: EditorStore;
@@ -25,6 +26,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
   const ui = useUi(store);
   const status = useStatus(store);
   const saving = useSaving(store);
+  const perfShown = usePerfOverlay();
   const menu = useMenu();
   const toast = useToast();
   const dialogs = useDialogs();
@@ -79,6 +81,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
               { type: 'separator' },
               { label: 'Rename file…', disabled: !ui.canEdit, onSelect: () => void rename() },
               { label: 'Painting tools', checked: store.paintTools, disabled: !ui.canEdit, onSelect: () => void togglePainting() },
+              { label: 'Performance stats', hint: '⇧⌘.', checked: perfShown, onSelect: togglePerfOverlay },
               { label: 'Share…', onSelect: () => setShareOpen(true) },
               { label: 'Version history…', onSelect: () => setVersionsOpen(true) },
               { label: 'Connect AI agents…', onSelect: () => setAgentsOpen(true) },

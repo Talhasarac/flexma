@@ -361,7 +361,9 @@ export function Canvas({ store, canvas, onContextMenu, onDropFiles }: Props) {
       lastCam = '';
     });
     const loop = (t: number) => {
-      engine.frame(t);
+      const start = performance.now();
+      const drew = engine.frame(t);
+      store.perf.record(start, performance.now() - start, drew);
       store.flush();
       store.poll();
       const cam = engine.camera();

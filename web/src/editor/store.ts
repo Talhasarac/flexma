@@ -6,6 +6,7 @@ import type { FlexmaEditor } from '../engine';
 import { api, exportPngUrl, exportSvgUrl, shareUrls, type CommentThread, type ExportOptions, type PngExportOptions } from '../lib/api';
 import type { BrushSettings, ComponentInfo, ConnectionStatus, EditingText, LayerNode, NodeData, PageInfo, Peer, StyleInfo, Tool } from './types';
 import { FontManager } from './fonts';
+import { PerfMonitor } from './perf';
 
 type Listener = () => void;
 
@@ -40,6 +41,8 @@ export interface ServerMessage {
 
 export class EditorStore {
   readonly engine: FlexmaEditor;
+  /** Frame timing (the performance overlay; `__flexma.perf.snapshot()`). */
+  readonly perf: PerfMonitor;
   readonly fileId: string;
   /** Set when the file was opened through a public view-only link. */
   readonly shareToken: string | null;
@@ -135,6 +138,7 @@ export class EditorStore {
   ) {
     const shareToken = opts.shareToken ?? null;
     this.engine = engine;
+    this.perf = new PerfMonitor(engine);
     this.fileId = fileId;
     this.shareToken = shareToken;
     this.workspaceId = opts.workspaceId ?? null;
