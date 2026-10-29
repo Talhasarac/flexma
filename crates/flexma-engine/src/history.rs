@@ -55,10 +55,12 @@ impl History {
         self.open.is_some()
     }
 
-    /// Record inverse ops for an op about to be applied.
+    /// Record inverse ops for an op about to be applied, in the order they
+    /// apply (a deleted subtree's parents first). They're kept reversed,
+    /// since a transaction's inverse is applied back to front.
     pub fn record(&mut self, inverse: Vec<Op>) {
         if let Some(t) = self.open.as_mut() {
-            t.inverse.extend(inverse);
+            t.inverse.extend(inverse.into_iter().rev());
         }
     }
 
