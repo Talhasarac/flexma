@@ -265,8 +265,11 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         } => tracing::info!("closing open connections"),
     }
-    rooms.shutdown_all().await;
-    tracing::info!("files saved");
+    if rooms.shutdown_all().await {
+        tracing::info!("files saved");
+    } else {
+        tracing::error!("some files weren't saved before exiting");
+    }
     // Don't wait for a render still running on the blocking pool.
     std::process::exit(0);
 }

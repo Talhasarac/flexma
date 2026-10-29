@@ -191,7 +191,7 @@ impl Work<'_> {
         let tn = &self.fresh.nodes[t];
         let parent = e.parent.as_deref().and_then(|p| self.doc.get(p));
         let mut skip: HashSet<&str> = skip.clone();
-        skip.extend(["parent", "needsMeasure"]);
+        skip.extend(["parent", "needsMeasure", "measuredWidth"]);
         if !skip.contains("index") && e.parent == tn.parent {
             skip.insert("index");
         }

@@ -262,18 +262,12 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
             };
             let mut h = h.max(0.0);
             let w = w.max(0.0);
-            // Wrapped text given a new width wraps differently: estimate its
-            // height and flag it, so the room (for agent edits) or an editor
-            // measures it exactly. Its old height would leave the box, and
-            // hugging parents, at the old line count. Not inside instances:
-            // syncing one resets its layers to the component's width, so they
-            // would be flagged again after every measurement.
-            let rewrapped = doc.get(c).is_some_and(|cn| {
-                cn.kind == NodeType::Text
-                    && cn.text_auto_resize == crate::paint::TextAutoResize::Height
-                    && (cn.width - w).abs() > 0.01
-                    && !crate::node::is_derived_id(c)
-            });
+            // Wrapped text given a width other than the one it was measured
+            // at wraps differently: estimate its height and flag it, so the
+            // room (for agent edits) or an editor measures it exactly. Its old
+            // height would leave the box, and hugging parents, at the old line
+            // count.
+            let rewrapped = doc.get(c).is_some_and(|cn| rewraps(cn, w));
             if rewrapped {
                 let mut probe = doc.get(c).unwrap().clone();
                 probe.width = w;
@@ -295,6 +289,13 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
     }
 }
 
+/// Wrapping text laid out at a width other than the one its height was
+/// measured at. Text measured before `measuredWidth` existed counts its
+/// current width.
+fn rewraps(n: &Node, w: f64) -> bool {
+    n.kind == NodeType::Text && n.text_auto_resize == crate::paint::TextAutoResize::Height && (n.measured_width.unwrap_or(n.width) - w).abs() > 0.01
+}
+
 /// Absolute children that FILL an axis span the whole frame along it, like
 /// CSS `inset-x-0` (a badge across a card, an overlay).
 fn fill_absolute(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
@@ -311,7 +312,7 @@ fn fill_absolute(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
         if cn.layout_sizing_vertical == SizingMode::Fill {
             (y, h) = (0.0, ph);
         }
-        if cn.kind == NodeType::Text && cn.text_auto_resize == crate::paint::TextAutoResize::Height && (cn.width - w).abs() > 0.01 && !crate::node::is_derived_id(&c) {
+        if rewraps(cn, w) {
             let mut probe = cn.clone();
             probe.width = w;
             h = crate::text::estimate_layout(&probe).2;
@@ -559,28 +560,39 @@ mod tests {
     /// for measuring, so it and its hugging parent grow to the new line count.
     #[test]
     fn measured_instance_text_settles() {
-        // A component with wrapping text, and a narrower instance: the editor
-        // measured its text, and a measurement that agrees changes nothing
-        // (it used to re-sync the instance and flag the text again, forever).
+        // A component's wrapping text, measured at 400 px, in a 150 px
+        // instance: once in the flow and once as an absolute layer spanning
+        // the frame.
         let mut doc = Document::new_empty();
         let mut c = Node::new("c:1", NodeType::Component);
         c.parent = Some("0:1".into());
         (c.layout_mode, c.width, c.layout_sizing_vertical) = (LayoutMode::Vertical, 400.0, SizingMode::Hug);
         doc.apply(&Op::Create { node: c }).unwrap();
-        let mut t = Node::new("t:1", NodeType::Text);
-        t.parent = Some("c:1".into());
-        t.characters = "A paragraph that wraps onto more lines when its column gets narrower".into();
-        (t.font_size, t.line_height, t.width, t.height) = (14.0, Some(20.0), 400.0, 40.0);
-        (t.text_auto_resize, t.layout_sizing_horizontal) = (crate::paint::TextAutoResize::Height, SizingMode::Fill);
-        doc.apply(&Op::Create { node: t }).unwrap();
+        for (id, absolute) in [("t:1", false), ("t:2", true)] {
+            let mut t = Node::new(id, NodeType::Text);
+            t.parent = Some("c:1".into());
+            t.index = id.into();
+            t.characters = "A paragraph that wraps onto more lines when its column gets narrower".into();
+            (t.font_size, t.line_height, t.width, t.height) = (14.0, Some(20.0), 400.0, 40.0);
+            (t.text_auto_resize, t.layout_sizing_horizontal, t.layout_absolute) = (crate::paint::TextAutoResize::Height, SizingMode::Fill, absolute);
+            doc.apply(&Op::Create { node: t }).unwrap();
+        }
         let mut i = Node::new("i:1", NodeType::Instance);
         i.parent = Some("0:1".into());
         (i.component_id, i.width, i.y) = (Some("c:1".into()), 150.0, 200.0);
         doc.apply(&Op::Create { node: i }).unwrap();
         crate::components::sync_all(&mut doc);
         relayout_all(&mut doc);
+        for id in ["i:1~t:1", "i:1~t:2"] {
+            let t = doc.get(id).unwrap();
+            assert!(t.width == 150.0 && t.height > 40.0 && t.needs_measure, "{id}: narrowed text is re-estimated and flagged ({} × {})", t.width, t.height);
+        }
+        // An editor measures it; the measurement lands in the instance's overrides.
         let measure = |doc: &mut Document| {
-            let ops = crate::components::route_ops(doc, vec![Op::update1("i:1~t:1", "needsMeasure", serde_json::json!(false))]);
+            let ops = crate::components::route_ops(
+                doc,
+                ["i:1~t:1", "i:1~t:2"].map(|id| Op::Update { id: id.into(), props: serde_json::json!({ "height": 100.0, "measuredWidth": 150.0, "needsMeasure": false }).as_object().unwrap().clone() }).to_vec(),
+            );
             let mut changed = Vec::new();
             for op in ops {
                 changed.extend(doc.apply(&op).unwrap().changed);
@@ -590,8 +602,10 @@ mod tests {
             changed
         };
         measure(&mut doc);
-        let t = doc.get("i:1~t:1").unwrap();
-        assert!(!t.needs_measure, "not flagged again after the instance re-syncs");
+        for id in ["i:1~t:1", "i:1~t:2"] {
+            let t = doc.get(id).unwrap();
+            assert!(!t.needs_measure && t.height == 100.0, "{id}: settled after the instance re-synced ({} × {})", t.width, t.height);
+        }
         assert!(measure(&mut doc).is_empty(), "the same measurement again changes nothing");
     }
 

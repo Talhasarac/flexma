@@ -733,11 +733,14 @@ impl Writer<'_> {
                 // Blur 0 is a hard copy, as in the filter path.
                 let id = self.id("bs");
                 let m = *blur as f64 * 1.5 + 2.0;
+                // The region is in the shape's own space: the rectangle's
+                // path is translated, the ellipse placed directly.
+                let (ox, oy) = if n.kind == NodeType::Ellipse { (dx, dy) } else { (0.0, 0.0) };
                 let _ = write!(
                     self.defs,
                     r#"<filter id="{id}" filterUnits="userSpaceOnUse" x="{}" y="{}" width="{}" height="{}" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="{}"/></filter>"#,
-                    fmt_num(dx - m),
-                    fmt_num(dy - m),
+                    fmt_num(ox - m),
+                    fmt_num(oy - m),
                     fmt_num(w + 2.0 * m),
                     fmt_num(h + 2.0 * m),
                     fmt_num(*blur as f64 / 2.0)

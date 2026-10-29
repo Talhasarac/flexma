@@ -1794,6 +1794,37 @@ mod asset_scope_tests {
         assert!((120..=136).contains(&p.red()), "half-dark white at the frame's corner: {p:?}");
     }
 
+    /// A blurred, offset spread shadow on a box is drawn whole: its blur
+    /// region sits on the shadow, not shifted by the offset again.
+    #[test]
+    fn offset_blurred_box_shadows_are_not_clipped() {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.width, f.height) = (300.0, 300.0);
+        f.fills = vec![Paint::Solid { color: Color::WHITE, opacity: 1.0, visible: true }];
+        doc.apply(&Op::Create { node: f }).unwrap();
+        for (id, kind) in [("r:1", NodeType::Rectangle), ("e:1", NodeType::Ellipse)] {
+            let mut r = Node::new(id, kind);
+            r.parent = Some("f:1".into());
+            (r.x, r.y, r.width, r.height) = (100.0, if id == "r:1" { 20.0 } else { 160.0 }, 100.0, 100.0);
+            r.fills = vec![Paint::Solid { color: Color::WHITE, opacity: 1.0, visible: true }];
+            r.effects = vec![flexma_doc::Effect::DropShadow { color: Color::BLACK, x: 80.0, y: 0.0, blur: 4.0, spread: 10.0, visible: true }];
+            doc.apply(&Op::Create { node: r }).unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("flexma-offset-shadow-{}", std::process::id()));
+        let paint = PaintSource { data_dir: &dir, file_id: "f", share_token: None };
+        let (svg, _) = export_svg(&doc, &["f:1".to_string()], None, AssetMode::Inline(&dir, &HashSet::new()), None, &paint).unwrap();
+        let (png, w, _) = svg_to_png(&svg, 1.0, 1000, base_fontdb(), false, None).unwrap();
+        assert_eq!(w, 300);
+        let pm = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        // Inside the shadow, past the layer's right edge (x 200).
+        for (x, y) in [(215, 70), (215, 210)] {
+            let p = pm.pixel(x, y).unwrap();
+            assert!(p.red() < 40, "shadow at ({x}, {y}): {p:?}");
+        }
+    }
+
     /// A render taller than one strip comes out the same as a single pass:
     /// clipped, translucent and blurred groups across strip edges, and the
     /// checkerboard.

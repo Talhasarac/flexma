@@ -242,6 +242,11 @@ define_node! {
     /// Set when the text box size is an estimate (e.g. created via MCP); the first
     /// editor that renders it measures it properly and clears the flag.
     needs_measure: bool = false => "needsMeasure",
+    /// The width a wrapping text's height was measured at: auto layout has
+    /// it measured again when it gives the text another width. Inside an
+    /// instance it comes from the instance's overrides, so rebuilding the
+    /// instance (which resets its layers to the component's) isn't a change.
+    measured_width: Option<f64> = None => "measuredWidth",
 
     /// SVG path data in local coordinates (VECTOR nodes).
     path_data: String = String::new() => "pathData",

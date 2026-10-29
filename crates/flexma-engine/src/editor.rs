@@ -566,6 +566,9 @@ impl Editor {
             if (h - n.height).abs() > 0.5 {
                 props.insert("height".into(), json!(h));
             }
+            if n.text_auto_resize == flexma_doc::TextAutoResize::Height {
+                props.insert("measuredWidth".into(), json!(n.width));
+            }
             props.insert("needsMeasure".into(), json!(false));
             ops.push(Op::Update { id, props });
         }
@@ -588,6 +591,9 @@ impl Editor {
         }
         if probe.text_auto_resize != flexma_doc::TextAutoResize::None && (h - probe.height).abs() > 0.01 {
             out.insert("height".into(), json!(h));
+        }
+        if probe.text_auto_resize == flexma_doc::TextAutoResize::Height && probe.measured_width != Some(probe.width) {
+            out.insert("measuredWidth".into(), json!(probe.width));
         }
         if probe.needs_measure {
             out.insert("needsMeasure".into(), json!(false));

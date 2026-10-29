@@ -325,6 +325,9 @@ impl<'a> Tx<'a> {
                 }
                 if m.has_font(n) {
                     props.insert("needsMeasure".into(), json!(false));
+                    if n.text_auto_resize == flexma_doc::TextAutoResize::Height {
+                        props.insert("measuredWidth".into(), json!(n.width));
+                    }
                 }
                 if !props.is_empty() {
                     ops.push(Op::Update { id: id.clone(), props });
@@ -362,7 +365,7 @@ enum Cmd {
     Recheck,
     /// Stop the actor. `discard` skips the final save (used when the stored
     /// document was replaced underneath, e.g. a version restore).
-    Shutdown { notify: Option<String>, discard: bool },
+    Shutdown { notify: Option<String>, discard: bool, done: Option<oneshot::Sender<bool>> },
 }
 
 struct Stats {
@@ -527,7 +530,7 @@ impl Rooms {
             .collect();
         for id in idle {
             if let Some(h) = map.remove(&id) {
-                let _ = h.tx.try_send(Cmd::Shutdown { notify: None, discard: false });
+                let _ = h.tx.try_send(Cmd::Shutdown { notify: None, discard: false, done: None });
             }
         }
     }
@@ -535,7 +538,7 @@ impl Rooms {
     /// Close a room immediately (e.g. the file was deleted).
     pub fn close(&self, file_id: &str, notify: Option<String>) {
         if let Some(h) = self.rooms.lock().unwrap().remove(file_id) {
-            let _ = h.tx.try_send(Cmd::Shutdown { notify, discard: false });
+            let _ = h.tx.try_send(Cmd::Shutdown { notify, discard: false, done: None });
         }
     }
 
@@ -543,11 +546,9 @@ impl Rooms {
     pub async fn discard_and_wait(&self, file_id: &str, notify: Option<String>) {
         let h = self.rooms.lock().unwrap().remove(file_id);
         if let Some(h) = h {
-            let _ = h.tx.send(Cmd::Shutdown { notify, discard: true }).await;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !h.tx.is_closed() && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            let (done, stopped) = oneshot::channel();
+            let _ = h.tx.send(Cmd::Shutdown { notify, discard: true, done: Some(done) }).await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), stopped).await;
         }
     }
 
@@ -560,16 +561,30 @@ impl Rooms {
         }
     }
 
-    pub async fn shutdown_all(&self) {
-        let handles: Vec<RoomHandle> = self.rooms.lock().unwrap().drain().map(|(_, h)| h).collect();
-        for h in handles {
-            let _ = h.tx.send(Cmd::Shutdown { notify: None, discard: false }).await;
-            // Wait for the actor to finish saving.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !h.tx.is_closed() && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    /// Stop every room once it has saved. Returns whether all of them
+    /// confirmed their final save (a room's channel closes before it saves,
+    /// so that alone proves nothing).
+    pub async fn shutdown_all(&self) -> bool {
+        let handles: Vec<(String, RoomHandle)> = self.rooms.lock().unwrap().drain().collect();
+        let mut waiting = Vec::new();
+        for (file_id, h) in handles {
+            let (done, saved) = oneshot::channel();
+            if h.tx.send(Cmd::Shutdown { notify: None, discard: false, done: Some(done) }).await.is_ok() {
+                waiting.push((file_id, saved));
             }
         }
+        let mut all = true;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        for (file_id, saved) in waiting {
+            match tokio::time::timeout_at(deadline, saved).await {
+                Ok(Ok(true)) => {}
+                _ => {
+                    tracing::error!("room {file_id} didn't confirm its final save");
+                    all = false;
+                }
+            }
+        }
+        all
     }
 
     pub fn block(&self, file_id: &str) {
@@ -686,19 +701,23 @@ impl Room {
         let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK_EVERY, RECHECK_EVERY);
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut discarded = false;
+        // Who waits for the final save (shutdown requests carry a reply).
+        let mut confirm: Vec<oneshot::Sender<bool>> = Vec::new();
         loop {
             tokio::select! {
                 cmd = rx.recv() => match cmd {
-                    Some(Cmd::Shutdown { notify, discard }) => {
+                    Some(Cmd::Shutdown { notify, discard, done }) => {
                         discarded = discard;
+                        confirm.extend(done);
                         if discard {
                             self.dirty = false;
                         }
                         rx.close();
                         // Drain anything already queued so callers get answers.
                         while let Ok(cmd) = rx.try_recv() {
-                            if !matches!(cmd, Cmd::Shutdown { .. }) {
-                                self.handle(cmd);
+                            match cmd {
+                                Cmd::Shutdown { done, .. } => confirm.extend(done),
+                                cmd => self.handle(cmd),
                             }
                         }
                         if discard {
@@ -733,16 +752,28 @@ impl Room {
                 _ = recheck.tick() => self.recheck().await,
             }
         }
-        if self.dirty {
+        // The last save; retried, as another write may hold the database.
+        for attempt in 0..3 {
+            if !self.dirty {
+                break;
+            }
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             self.save().await;
         }
+        let mut saved = !self.dirty;
         // Servers from before parts read files.document: keep it current, once
         // per session rather than on every save.
-        if self.saved_parts && !discarded {
+        if self.saved_parts && !discarded && saved {
             let (fid, json, version) = (self.file_id.clone(), self.doc.to_json(), self.version as i64);
             if let Err(e) = self.db.call(move |c| Ok(crate::doc_store::write_whole(c, &fid, &json, version)?)).await {
                 tracing::error!("storing {} whole failed: {}", self.file_id, e.message);
+                saved = false;
             }
+        }
+        for done in confirm {
+            let _ = done.send(saved);
         }
         tracing::debug!("room {} closed", self.file_id);
     }
@@ -1283,6 +1314,32 @@ mod access_tests {
         rooms.get("f").await.unwrap().join(info, out).await.unwrap();
         assert!(rx.recv().await.unwrap().contains(r#""t":"init""#));
         rx
+    }
+
+    /// Shutting down waits for each room's last save, even while another
+    /// write holds the database (the room's channel closes before it saves).
+    #[tokio::test]
+    async fn shutdown_waits_for_the_last_save() {
+        let (db, dir) = setup("shutdown").await;
+        let rooms = Rooms::new(db.clone());
+        let room = rooms.get("f").await.unwrap();
+        let (out, _rx) = mpsc::channel(CLIENT_QUEUE);
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: false, stream_pages: None };
+        let me = room.join(info, out).await.unwrap();
+        let mut a = flexma_doc::Node::new("a:1", flexma_doc::NodeType::Frame);
+        a.parent = Some("0:1".into());
+        room.client_ops(me, 1, vec![Op::Create { node: a }]).await;
+        // Another write holds the database for a while.
+        let busy = db.clone();
+        let holder = tokio::spawn(async move { busy.call(|_| Ok(std::thread::sleep(Duration::from_millis(1500)))).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t = Instant::now();
+        assert!(rooms.shutdown_all().await, "the room confirmed its save");
+        assert!(t.elapsed() >= Duration::from_millis(1200), "returned after the save, not when the channel closed ({:?})", t.elapsed());
+        let saved: String = db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap();
+        assert!(Document::from_json(&saved).unwrap().contains("a:1"), "saved before shutdown returned");
+        holder.await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Rooms save documents in parts and write only the parts that changed;
