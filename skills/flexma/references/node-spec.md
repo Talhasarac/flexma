@@ -84,7 +84,7 @@ Type defaults:
 | `padding` | number \| [v, h] \| [t, r, b, l] \| {top,right,bottom,left} | |
 | `justify` / `primaryAxisAlign` | `start`, `center`, `end`, `space-between` | Along the layout direction. |
 | `alignItems` / `counterAxisAlign` | `start`, `center`, `end`, `stretch` | Across the layout direction. `stretch` works like CSS: children that hug their content (text, auto-layout frames) size the row, then the frames among them and shapes without a cross size (`height` in a row, `width` in a column) stretch to it: equal-height table cells, a blockquote bar beside wrapped text. A single child can also use `height: "fill"` (row) or `width: "fill"` (column). |
-| `clip` / `clipsContent` | bool, `"alpha"`, `"shape"` | Clip children to the frame (default true). `"alpha"` clips to the alpha of the frame's fills instead: see Alpha masks. `overflow: "hidden"` / `"visible"` also works. |
+| `clip` / `clipsContent` | bool, `"alpha"`, `"shape"` | Clip children to the frame (default true). `"alpha"` clips to the alpha of the frame's fills instead: see Alpha masks. `overflow: "hidden"` / `"visible"` also works. Clipping cuts children's shadows too, so use `false` on layout wrappers of shadowed children (see "Clipping" in SKILL.md). |
 | `clipAlpha` | bool | The same as `clip: "alpha"` (turns clipping on). |
 | `hideFill` | bool | Don't draw the fills. They still shape an alpha mask. |
 | `layoutSizingHorizontal` / `layoutSizingVertical` | `FIXED`, `HUG`, `FILL` | Same as `width`/`height: "hug" \| "fill"`. |
