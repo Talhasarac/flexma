@@ -193,7 +193,8 @@ enum Stencil {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Pipe {
     /// Scene pipelines (multisampled, stencil-tested); `true` = linear target.
-    Shape(Stencil, bool),
+    /// Shapes: the last `true` = plain shapes (`fs_shape_plain`, see `plain`).
+    Shape(Stencil, bool, bool),
     Mesh(bool),
     Tex(bool),
     /// Final-pass pipelines on the canvas.
@@ -219,7 +220,7 @@ enum Inst {
 }
 
 enum Op {
-    Shapes { inst: Inst, first: u32, count: u32, tex: Option<TexId>, stencil: Stencil, slot: u32 },
+    Shapes { inst: Inst, first: u32, count: u32, tex: Option<TexId>, stencil: Stencil, slot: u32, plain: bool },
     Mesh { mesh: MeshId, slot: u32 },
     Tex { tex: TexId, slot: u32, label: bool },
     StencilRef(u32),
@@ -304,6 +305,8 @@ pub struct GpuBackend {
     textures: Vec<Option<TexEntry>>,
     meshes: Vec<Option<(GpuBuffer, GpuBuffer, u32)>>,
     scene_inst: Option<Grow>,
+    /// Which scene instances are plain shapes (`set_scene_instances`).
+    plain: Vec<bool>,
     overlay_inst: Option<Grow>,
     uniforms: Option<(Grow, JsValue)>,
     target: Option<Target>,
@@ -538,6 +541,7 @@ impl GpuBackend {
             textures: Vec::new(),
             meshes: Vec::new(),
             scene_inst: None,
+            plain: Vec::new(),
             overlay_inst: None,
             uniforms: None,
             target: None,
@@ -607,13 +611,13 @@ impl GpuBackend {
         };
         let ms = || obj! { "count": SAMPLES };
         let desc = match p {
-            Pipe::Shape(s, linear) => obj! {
-                "label": format!("shape {s:?} {linear}"),
+            Pipe::Shape(s, linear, plain) => obj! {
+                "label": format!("shape {s:?} {linear} {plain}"),
                 "layout": self.main_layout.clone(),
                 "vertex": obj! { "module": self.module.clone(), "entryPoint": "vs_shape", "buffers": shape_buffers() },
                 "fragment": obj! {
                     "module": self.module.clone(),
-                    "entryPoint": "fs_shape",
+                    "entryPoint": if plain { "fs_shape_plain" } else { "fs_shape" },
                     "targets": arr(vec![scene_target(linear, if s == Stencil::Test { WRITE_ALL } else { 0 })]),
                 },
                 "primitive": obj! { "topology": "triangle-strip" },
@@ -807,6 +811,10 @@ impl GpuBackend {
     }
 
     /// Grow-only vertex buffer for instances.
+    fn is_plain(&self, inst: u32) -> bool {
+        self.plain.get(inst as usize).copied().unwrap_or(false)
+    }
+
     fn write_instances(device: &GpuDevice, queue: &GpuQueue, slot: &mut Option<Grow>, trash: &mut Vec<GpuBuffer>, data: &[f32]) {
         let bytes = (data.len() * 4) as u64;
         if bytes == 0 {
@@ -889,8 +897,8 @@ impl GpuBackend {
         for op in ops {
             match op {
                 Op::StencilRef(r) => pass.set_stencil_reference(*r),
-                Op::Shapes { inst, first, count, tex, stencil, slot } => {
-                    let pipe = if scene { Pipe::Shape(*stencil, linear) } else { Pipe::Overlay };
+                Op::Shapes { inst, first, count, tex, stencil, slot, plain } => {
+                    let pipe = if scene { Pipe::Shape(*stencil, linear, *plain) } else { Pipe::Overlay };
                     if current != Some(pipe) {
                         let pl = self.pipeline(pipe);
                         pass.set_pipeline(&pl);
@@ -1031,7 +1039,8 @@ impl GpuBackend {
             pass.set_stencil_reference(prev.as_ref().map(|p| p.1).unwrap_or(0));
             if let Some((parts, d, blurred)) = prev.take() {
                 let slot = self.scene_slot;
-                let clip = |stencil| parts.iter().map(move |(inst, tex)| Op::Shapes { inst: Inst::Scene, first: *inst, count: 1, tex: *tex, stencil, slot });
+                let plain = &self.plain;
+                let clip = |stencil| parts.iter().map(move |(inst, tex)| Op::Shapes { inst: Inst::Scene, first: *inst, count: 1, tex: *tex, stencil, slot, plain: tex.is_none() && plain.get(*inst as usize).copied().unwrap_or(false) });
                 let mut copy: Vec<Op> = clip(Stencil::Incr).collect();
                 copy.push(Op::StencilRef(d + 1));
                 copy.push(Op::BackdropQuad(blurred));
@@ -1192,6 +1201,14 @@ impl Backend for GpuBackend {
 
     fn set_scene_instances(&mut self, data: &[f32]) {
         Self::write_instances(&self.device, &self.queue, &mut self.scene_inst, &mut self.trash_buf, data);
+        // Plain shapes: mode (size.w) 0 with no fill or a solid one (paint.x
+        // 0 or 1), a box shadow (1) or a stencil clip shape (2). Images,
+        // gradients, alpha masks (3) and image shadows (4) need fs_shape.
+        self.plain.clear();
+        self.plain.extend(data.chunks_exact(INST_FLOATS).map(|i| {
+            let (mode, fill) = (i[11], i[36]);
+            (mode < 0.5 && fill < 1.5) || (0.5..2.5).contains(&mode)
+        }));
     }
 
     fn begin_frame(&mut self, p: &FrameParams) {
@@ -1219,14 +1236,30 @@ impl Backend for GpuBackend {
             return;
         }
         let slot = self.scene_slot;
-        self.record(Op::Shapes { inst: Inst::Scene, first, count, tex, stencil: Stencil::Test, slot });
+        if tex.is_some() {
+            self.record(Op::Shapes { inst: Inst::Scene, first, count, tex, stencil: Stencil::Test, slot, plain: false });
+            return;
+        }
+        // Plain and full shapes draw with their own shaders (see `plain`).
+        let end = first + count;
+        let mut at = first;
+        while at < end {
+            let kind = self.is_plain(at);
+            let mut next = at + 1;
+            while next < end && self.is_plain(next) == kind {
+                next += 1;
+            }
+            self.record(Op::Shapes { inst: Inst::Scene, first: at, count: next - at, tex: None, stencil: Stencil::Test, slot, plain: kind });
+            at = next;
+        }
     }
 
     fn clip(&mut self, parts: &[(u32, Option<TexId>)], push: bool) {
         let slot = self.scene_slot;
         let stencil = if push { Stencil::Incr } else { Stencil::Decr };
         for (inst, tex) in parts {
-            self.record(Op::Shapes { inst: Inst::Scene, first: *inst, count: 1, tex: *tex, stencil, slot });
+            let plain = tex.is_none() && self.is_plain(*inst);
+            self.record(Op::Shapes { inst: Inst::Scene, first: *inst, count: 1, tex: *tex, stencil, slot, plain });
         }
         self.depth = if push { self.depth + 1 } else { self.depth.saturating_sub(1) };
         self.record(Op::StencilRef(self.depth));
@@ -1276,7 +1309,7 @@ impl Backend for GpuBackend {
         let (view, px) = (f.view, f.px);
         Self::write_instances(&self.device, &self.queue, &mut self.overlay_inst, &mut self.trash_buf, data);
         let slot = self.push_uniforms(&view, ([0.0; 3], [0.0; 3]), [0.0; 4], [px, 0.0, 1.0, 0.0], [0.0; 4]);
-        self.record(Op::Shapes { inst: Inst::Overlay, first: 0, count: (data.len() / INST_FLOATS) as u32, tex: None, stencil: Stencil::Test, slot });
+        self.record(Op::Shapes { inst: Inst::Overlay, first: 0, count: (data.len() / INST_FLOATS) as u32, tex: None, stencil: Stencil::Test, slot, plain: false });
     }
 
     fn draw_label(&mut self, tex: TexId, rect: [f32; 4]) {

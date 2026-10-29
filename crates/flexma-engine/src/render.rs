@@ -30,33 +30,38 @@ const TEXT_PIXEL_BUDGET: usize = 2_000_000;
 /// While a page first opens (nothing to interact with yet), a frame may spend
 /// this long on text instead, so a big page's text fills in about 4x sooner.
 const FIRST_PAINT_TEXT_MS: f64 = 40.0;
+/// Text a frame may rasterize after first paint, in time (see `TextBudget`).
+const TEXT_MS_PER_FRAME: f64 = 6.0;
 
 /// The text rasters one frame may still make.
 struct TextBudget {
     rasters: usize,
     pixels: usize,
-    /// First paint: rasterize until this `performance.now()`, however many.
+    /// Rasterize until this `performance.now()`. First paint: however many
+    /// (FIRST_PAINT_TEXT_MS); otherwise also within the counts above
+    /// (TEXT_MS_PER_FRAME: Safari draws canvas text on the CPU, a few ms each
+    /// when zoomed in, so 24 of them would stall the frame).
     until: Option<(web_sys::Performance, f64)>,
+    first_paint: bool,
 }
 
 impl TextBudget {
     fn new(first_paint: bool) -> TextBudget {
-        let perf = web_sys::window().and_then(|w| w.performance()).filter(|_| first_paint);
+        let ms = if first_paint { FIRST_PAINT_TEXT_MS } else { TEXT_MS_PER_FRAME };
         TextBudget {
             rasters: MAX_TEXT_RASTERS_PER_FRAME,
             pixels: TEXT_PIXEL_BUDGET,
-            until: perf.map(|p| {
-                let until = p.now() + FIRST_PAINT_TEXT_MS;
+            until: web_sys::window().and_then(|w| w.performance()).map(|p| {
+                let until = p.now() + ms;
                 (p, until)
             }),
+            first_paint,
         }
     }
 
     fn spent(&self) -> bool {
-        match &self.until {
-            Some((perf, until)) => perf.now() > *until,
-            None => self.rasters == 0 || self.pixels == 0,
-        }
+        let late = self.until.as_ref().is_some_and(|(perf, until)| perf.now() > *until);
+        late || (!self.first_paint && (self.rasters == 0 || self.pixels == 0))
     }
 
     fn take(&mut self, pixels: usize) {

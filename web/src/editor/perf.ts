@@ -72,6 +72,11 @@ export class PerfMonitor {
     }
   }
 
+  /** For debugging: resolves once the GPU has finished all work so far (WebGPU; null on WebGL2). */
+  gpuIdle(): Promise<unknown> | null {
+    return gpuDevice ? gpuDevice.queue.onSubmittedWorkDone() : null;
+  }
+
   /** One pass of the render loop: `ms` spent in `engine.frame`, `drew` if it drew. */
   record(t: number, ms: number, drew: boolean) {
     if (!drew) return;

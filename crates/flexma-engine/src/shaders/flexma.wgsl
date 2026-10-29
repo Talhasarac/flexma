@@ -299,6 +299,49 @@ fn shape_sd(p: vec2f, hs: vec2f) -> f32 {
   return sd_round_box(p, hs, V.radii);
 }
 
+// Drop shadow of a box: its blurred SDF (V.fx = (x, y, blur, spread)).
+fn box_shadow(d: f32, aa: f32) -> vec4f {
+  let blur = max(V.fx.z, aa);
+  let sd = d - V.fx.w;
+  let a = 1.0 - smoothstep(-blur * 0.5, blur * 0.5, sd);
+  return V.c0 * a * V.paint.w;
+}
+
+// `col` (the covered fill) with the stroke over it, at the layer's opacity.
+fn stroked(col_in: vec4f, d: f32, aa: f32) -> vec4f {
+  var col = col_in;
+  let sw = V.strokep.x;
+  if (sw > 0.0 && V.stroke.a > 0.0) {
+    let align = V.strokep.y;
+    var sd: f32;
+    if (align < 0.5) {
+      sd = abs(d) - sw * 0.5;
+    } else if (align < 1.5) {
+      sd = abs(d + sw * 0.5) - sw * 0.5;
+    } else {
+      sd = abs(d - sw * 0.5) - sw * 0.5;
+    }
+    var scov: f32;
+    if (sw < aa) {
+      // Hairline: keep a 1px line, fade by thickness.
+      var center: f32;
+      if (align < 0.5) {
+        center = d;
+      } else if (align < 1.5) {
+        center = d + sw * 0.5;
+      } else {
+        center = d - sw * 0.5;
+      }
+      scov = clamp(1.0 - abs(center) / aa, 0.0, 1.0) * (sw / aa);
+    } else {
+      scov = clamp(0.5 - sd / aa, 0.0, 1.0);
+    }
+    let s = V.stroke * scov;
+    col = s + col * (1.0 - s.a);
+  }
+  return col * V.paint.w;
+}
+
 fn shade(dlx: vec2f, dly: vec2f) -> vec4f {
   let hs = max(V.size.xy * 0.5, vec2f(1e-4));
   let p = V.local - hs;
@@ -342,11 +385,7 @@ fn shade(dlx: vec2f, dly: vec2f) -> vec4f {
     return vec4f(0.0);
   }
   if (mode > 0.5 && !alpha_clip) {
-    // Drop shadow: blurred SDF.
-    let blur = max(V.fx.z, aa);
-    let sd = d - V.fx.w;
-    let a = 1.0 - smoothstep(-blur * 0.5, blur * 0.5, sd);
-    return V.c0 * a * V.paint.w;
+    return box_shadow(d, aa);
   }
   var fill = vec4f(0.0);
   let ft = i32(V.paint.x + 0.5);
@@ -367,37 +406,28 @@ fn shade(dlx: vec2f, dly: vec2f) -> vec4f {
     return vec4f(0.0);
   }
   let cov = clamp(0.5 - d / aa, 0.0, 1.0);
-  var col = fill * cov;
-  let sw = V.strokep.x;
-  if (sw > 0.0 && V.stroke.a > 0.0) {
-    let align = V.strokep.y;
-    var sd: f32;
-    if (align < 0.5) {
-      sd = abs(d) - sw * 0.5;
-    } else if (align < 1.5) {
-      sd = abs(d + sw * 0.5) - sw * 0.5;
-    } else {
-      sd = abs(d - sw * 0.5) - sw * 0.5;
+  return stroked(fill * cov, d, aa);
+}
+
+// What shade() does for plain shapes (see `fs_shape_plain`): no fill or a
+// solid one, a box shadow, or a stencil clip shape.
+fn shade_plain() -> vec4f {
+  let hs = max(V.size.xy * 0.5, vec2f(1e-4));
+  let d = shape_sd(V.local - hs, hs);
+  let aa = 1.0 / u.p.x;
+  let mode = V.size.w;
+  if (mode > 1.5) {
+    if (d > 0.0) {
+      discard;
     }
-    var scov: f32;
-    if (sw < aa) {
-      // Hairline: keep a 1px line, fade by thickness.
-      var center: f32;
-      if (align < 0.5) {
-        center = d;
-      } else if (align < 1.5) {
-        center = d + sw * 0.5;
-      } else {
-        center = d - sw * 0.5;
-      }
-      scov = clamp(1.0 - abs(center) / aa, 0.0, 1.0) * (sw / aa);
-    } else {
-      scov = clamp(0.5 - sd / aa, 0.0, 1.0);
-    }
-    let s = V.stroke * scov;
-    col = s + col * (1.0 - s.a);
+    return vec4f(0.0);
   }
-  return col * V.paint.w;
+  if (mode > 0.5) {
+    return box_shadow(d, aa);
+  }
+  let fill = select(vec4f(0.0), V.c0, i32(V.paint.x + 0.5) == 1);
+  let cov = clamp(0.5 - d / aa, 0.0, 1.0);
+  return stroked(fill * cov, d, aa);
 }
 
 @fragment
@@ -408,6 +438,16 @@ fn fs_shape(i: ShapeOut) -> @location(0) vec4f {
   let dlx = dpdx(i.local);
   let dly = dpdy(i.local);
   return to_output(shade(dlx, dly));
+}
+
+// Plain shapes (most of a page: solid fills, strokes, box shadows, clip
+// shapes) with the same math as fs_shape, without its image, gradient and
+// image-shadow code: a shader that small runs several times faster per pixel
+// in Safari.
+@fragment
+fn fs_shape_plain(i: ShapeOut) -> @location(0) vec4f {
+  V = Vary(i.local, i.size, i.radii, i.c0, i.c1, i.c2, i.c3, i.stops, i.paint, i.stroke, i.strokep, i.fx);
+  return to_output(shade_plain());
 }
 
 // ---------------------------------------------------------------- meshes
