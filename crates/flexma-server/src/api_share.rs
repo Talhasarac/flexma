@@ -3,7 +3,7 @@
 //! but not edit or see comments. Turning a link off or regenerating it kicks
 //! everyone who joined through the old one.
 
-use crate::api_files::{export_png_response, export_svg_response, serve_asset, ExportQuery};
+use crate::api_files::{export_png_response, export_svg_response, serve_asset, AssetQuery, ExportQuery};
 use crate::auth::{file_access, AuthUser, Role};
 use crate::db::{now, random_string, ts};
 use crate::error::{AppError, AppResult};
@@ -181,10 +181,10 @@ pub async fn info(State(st): State<AppState>, Path(token): Path<String>) -> AppR
     Ok(Json(v))
 }
 
-pub async fn asset(State(st): State<AppState>, Path((token, aid)): Path<(String, String)>) -> AppResult<Response> {
+pub async fn asset(State(st): State<AppState>, Path((token, aid)): Path<(String, String)>, Query(q): Query<AssetQuery>) -> AppResult<Response> {
     let t = token.clone();
     let (_, ws) = st.db.call(move |c| resolve(c, &t)).await?;
-    serve_asset(&st, &aid, move |_, asset_ws| if asset_ws == ws { Ok(()) } else { Err(AppError::not_found("asset")) }).await
+    serve_asset(&st, &aid, q.max, move |_, asset_ws| if asset_ws == ws { Ok(()) } else { Err(AppError::not_found("asset")) }).await
 }
 
 pub async fn export_svg(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<ExportQuery>) -> AppResult<Response> {

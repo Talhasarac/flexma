@@ -632,13 +632,24 @@ pub async fn export_png_with_link(State(st): State<AppState>, Path(token): Path<
     Ok(res)
 }
 
-pub async fn get_asset(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>) -> AppResult<Response> {
-    let uid = user.id.clone();
-    serve_asset(&st, &id, move |c, ws| require_workspace(c, &uid, ws, Role::Viewer).map(|_| ())).await
+/// `?max=256` or `?max=1024`: a smaller version of a bigger image (see `serve_asset`).
+#[derive(Deserialize, Default)]
+pub struct AssetQuery {
+    pub max: Option<u32>,
 }
 
+pub async fn get_asset(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>, Query(q): Query<AssetQuery>) -> AppResult<Response> {
+    let uid = user.id.clone();
+    serve_asset(&st, &id, q.max, move |c, ws| require_workspace(c, &uid, ws, Role::Viewer).map(|_| ())).await
+}
+
+/// An asset's workspace, MIME type, width, height and bytes on disk.
+type AssetRow = (String, String, Option<u32>, Option<u32>, i64);
+
 /// Serve an uploaded image after `allow(conn, workspace_id)` approves access.
-pub async fn serve_asset<F>(st: &AppState, id: &str, allow: F) -> AppResult<Response>
+/// With `max`, an image bigger than 256 or 1024 px comes smaller: editors
+/// zoomed out load these (`X-Image-Size` tells them the original size).
+pub async fn serve_asset<F>(st: &AppState, id: &str, max: Option<u32>, allow: F) -> AppResult<Response>
 where
     F: FnOnce(&rusqlite::Connection, &str) -> AppResult<()> + Send + 'static,
 {
@@ -646,30 +657,71 @@ where
         return Err(AppError::not_found("asset"));
     }
     let aid = id.to_string();
-    let mime: String = st
+    let (mime, size, bytes_on_disk): (String, Option<(u32, u32)>, u64) = st
         .db
         .call(move |c| {
-            let row: Option<(String, String)> = c
-                .query_row("SELECT workspace_id, mime FROM assets WHERE id = ?1", params![aid], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
+            let row: Option<AssetRow> = c
+                .query_row("SELECT workspace_id, mime, width, height, size FROM assets WHERE id = ?1", params![aid], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
                 })
                 .optional()?;
-            let (ws, mime) = row.ok_or_else(|| AppError::not_found("asset"))?;
+            let (ws, mime, w, h, bytes) = row.ok_or_else(|| AppError::not_found("asset"))?;
             allow(c, &ws).map_err(|_| AppError::not_found("asset"))?;
-            Ok(mime)
+            Ok((mime, w.zip(h).filter(|(w, h)| *w > 0 && *h > 0), bytes.max(0) as u64))
         })
         .await?;
-    let bytes = tokio::fs::read(render::asset_path(&st.cfg.data_dir, id))
-        .await
-        .map_err(|_| AppError::not_found("asset"))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime),
-            (header::CACHE_CONTROL, "private, max-age=31536000, immutable".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    let level = match max {
+        Some(m) if m <= 256 => Some(256),
+        Some(m) if m <= 1024 => Some(1024),
+        _ => None,
+    };
+    // A version not made yet: the original now (as before versions existed,
+    // not kept by the browser), the version made meanwhile for next time.
+    let mut stand_in = false;
+    let smaller: render::Smaller = match (level, size) {
+        (Some(level), Some((w, h))) if w.max(h) > level && (w as u64) * (h as u64) <= render::MAX_SMALLER_SOURCE_PX => {
+            let (dir, aid) = (st.cfg.data_dir.clone(), id.to_string());
+            match tokio::task::spawn_blocking(move || render::cached_smaller(&dir, &aid, level)).await.ok().flatten() {
+                Some(done) => done,
+                None => {
+                    stand_in = true;
+                    make_smaller(st.cfg.data_dir.clone(), id.to_string(), w, h, level, bytes_on_disk);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let (mime, bytes) = match smaller {
+        Some((bytes, mime)) => (mime.to_string(), bytes),
+        None => (mime, tokio::fs::read(render::asset_path(&st.cfg.data_dir, id)).await.map_err(|_| AppError::not_found("asset"))?),
+    };
+    let cache = if stand_in { "private, no-cache" } else { "private, max-age=31536000, immutable" };
+    let mut res = ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache.to_string())], bytes).into_response();
+    if let Some((w, h)) = size {
+        if let Ok(v) = header::HeaderValue::from_str(&format!("{w}x{h}")) {
+            res.headers_mut().insert("x-image-size", v);
+        }
+    }
+    Ok(res)
+}
+
+/// Make a smaller version in the background (see `render::smaller`), once
+/// even when several editors ask for it, as the one render allowed at a time.
+fn make_smaller(dir: std::path::PathBuf, id: String, w: u32, h: u32, level: u32, original_bytes: u64) {
+    static MAKING: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
+    let key = (id.clone(), level);
+    {
+        let mut making = MAKING.lock().unwrap();
+        if making.contains(&key) {
+            return;
+        }
+        making.push(key.clone());
+    }
+    tokio::spawn(async move {
+        let _ = render::run_render(move || render::smaller(&dir, &id, w, h, level, original_bytes)).await;
+        MAKING.lock().unwrap().retain(|k| *k != key);
+    });
 }
 
 #[cfg(test)]

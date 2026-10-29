@@ -898,7 +898,7 @@ impl Editor {
             return false;
         };
         if r.built_version != version || wake {
-            r.build(&self.doc, &self.scene, &hidden, version);
+            r.build(&self.doc, &self.scene, &hidden, version, self.cam.zoom * self.dpr);
         }
         let linear = self.doc.get(&self.scene.page).is_some_and(|p| p.linear_blending);
         r.draw(&self.doc, &self.scene, text, &mut self.paint, self.now_ms, &self.cam, self.css_w, self.css_h, self.dpr, bg, linear, &overlay, &labels, interacting, !self.page_drawn);

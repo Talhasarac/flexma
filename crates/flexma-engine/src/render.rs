@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 use web_sys::HtmlImageElement;
 
 const MAX_TEXT_RASTERS_PER_FRAME: usize = 24;
@@ -76,7 +76,8 @@ const IMAGE_MEMORY_BUDGET: usize = 384 * 1024 * 1024;
 #[derive(Clone, Debug)]
 enum Cmd {
     Shapes { start: u32, count: u32 },
-    Image { inst: u32, asset: String },
+    /// An image fill: `k` world units per image pixel, over `bounds`.
+    Image { inst: u32, asset: String, k: f64, bounds: flexma_doc::Rect },
     Mesh { id: NodeId, fill: Option<[f32; 4]>, stroke: Option<[f32; 4]> },
     Text { id: NodeId, opacity: f32 },
     /// A paint layer's tiles.
@@ -130,8 +131,151 @@ struct LabelEntry {
 
 pub enum ImgState {
     Loading,
-    Ready { tex: TexId, w: f64, h: f64, bytes: usize, used: u64 },
+    /// `w`×`h`: the image's own size. The texture may be a smaller version
+    /// (`frac` of that size); `full` when no sharper one is coming.
+    Ready { tex: TexId, w: f64, h: f64, bytes: usize, used: u64, frac: f64, full: bool, pending: bool },
     Failed,
+}
+
+/// How much of an image's resolution a draw needs, to pick which version
+/// to load: images come in three sizes (256 px, 1024 px, the original) and
+/// zoomed out the small ones do.
+#[derive(Clone, Copy)]
+pub enum Need {
+    /// The original (9-slice and tiles before their size is known, clips).
+    Full,
+    /// Texture pixels per image pixel, from the zoom and how big it's drawn.
+    Fraction(f64),
+    /// Not loaded yet (its size unknown): the device pixels its layer covers.
+    Covers(f64),
+    /// Whatever is loaded (off screen: nothing new).
+    Have,
+}
+
+/// A loaded image: the element, the image's own size when a smaller
+/// version came (`X-Image-Size`), and the object URL to free after upload.
+struct Loaded {
+    img: HtmlImageElement,
+    natural: Option<(f64, f64)>,
+    url: Option<String>,
+    full: bool,
+}
+
+/// The long side of the version `?max=level` gets: halved until it fits.
+fn halved(long: f64, level: f64) -> f64 {
+    let mut l = long.floor().max(1.0);
+    while l > level {
+        l = (l / 2.0).floor().max(1.0);
+    }
+    l
+}
+
+/// World units one image pixel covers on a `w`×`h` layer (for `Need::Fraction`).
+fn image_scale(paint: &Paint, region: [f32; 4], w: f64, h: f64, world: &Affine) -> f64 {
+    let Paint::Image { fit, slice, tile_scale, .. } = paint else { return 0.0 };
+    let (sx, sy) = (w / (region[0] as f64).max(1.0), h / (region[1] as f64).max(1.0));
+    let k = match fit {
+        ImageFit::Fit => sx.min(sy),
+        ImageFit::Tile => *tile_scale as f64,
+        _ => sx.max(sy),
+    };
+    let k = slice.as_ref().map_or(k, |s| k.max(s.scale as f64));
+    k * world_scale(world)
+}
+
+/// How much `m` enlarges (its larger axis).
+fn world_scale(m: &Affine) -> f64 {
+    (m.a * m.a + m.b * m.b).max(m.c * m.c + m.d * m.d).sqrt()
+}
+
+/// The version of an image (`w`×`h` when known) to load for `need`, when
+/// the texture it has (`have` texels on its long side, 0 for none) isn't
+/// enough: `Some(Some(level))` for `?max=level`, `Some(None)` the original.
+fn version_for(need: Need, natural: Option<(f64, f64)>, have: f64) -> Option<Option<u32>> {
+    let long = natural.map(|(w, h)| w.max(h));
+    let texels = match need {
+        Need::Have => return None,
+        Need::Full => f64::INFINITY,
+        Need::Fraction(f) => long.map_or(f64::INFINITY, |l| l * f),
+        Need::Covers(px) => px,
+    };
+    if have > 0.0 && texels <= have {
+        return None;
+    }
+    for level in [256u32, 1024] {
+        let got = match long {
+            // That small already: the original it is.
+            Some(l) if l <= level as f64 => break,
+            Some(l) => halved(l, level as f64),
+            // Unknown size: a version is at least half its level.
+            None => level as f64 / 2.0,
+        };
+        if got >= texels && got > have {
+            return Some(Some(level));
+        }
+    }
+    Some(None)
+}
+
+/// Load `src` into an image element (`url`: an object URL it came from).
+fn load_element(src: &str, natural: Option<(f64, f64)>, url: Option<String>, done: Rc<dyn Fn(Option<Loaded>)>) {
+    let full = url.is_none();
+    let Ok(img) = HtmlImageElement::new() else { return done(None) };
+    let onload = {
+        let (done, img, url) = (done.clone(), img.clone(), url.clone());
+        Closure::once(Box::new(move || done(Some(Loaded { img, natural, url, full }))) as Box<dyn FnOnce()>)
+    };
+    let onerror = Closure::once(Box::new(move || {
+        if let Some(u) = &url {
+            let _ = web_sys::Url::revoke_object_url(u);
+        }
+        done(None)
+    }) as Box<dyn FnOnce()>);
+    img.set_onload(Some(onload.as_ref().unchecked_ref()));
+    img.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+    onload.forget();
+    onerror.forget();
+    img.set_src(src);
+}
+
+/// Fetch a smaller version (`?max=`): its header has the image's own size,
+/// which an image element can't read.
+fn fetch_version(src: &str, done: Rc<dyn Fn(Option<Loaded>)>) {
+    let Some(window) = web_sys::window() else { return done(None) };
+    let failed = {
+        let done = done.clone();
+        Closure::once(move |_: JsValue| done(None))
+    };
+    let fetched = {
+        let done = done.clone();
+        Closure::once(move |v: JsValue| {
+            let Some(resp) = v.dyn_into::<web_sys::Response>().ok().filter(|r| r.ok()) else { return done(None) };
+            let natural = resp.headers().get("x-image-size").ok().flatten().and_then(|s| {
+                let (w, h) = s.split_once('x')?;
+                Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?))
+            });
+            let Ok(blob) = resp.blob() else { return done(None) };
+            let failed = {
+                let done = done.clone();
+                Closure::once(move |_: JsValue| done(None))
+            };
+            let read = {
+                let done = done.clone();
+                Closure::once(move |b: JsValue| {
+                    let Some(url) = b.dyn_into::<web_sys::Blob>().ok().and_then(|b| web_sys::Url::create_object_url_with_blob(&b).ok()) else {
+                        return done(None);
+                    };
+                    load_element(&url.clone(), natural, Some(url), done)
+                })
+            };
+            let _ = blob.then2(&read, &failed);
+            read.forget();
+            failed.forget();
+        })
+    };
+    let _ = window.fetch_with_str(src).then2(&fetched, &failed);
+    fetched.forget();
+    failed.forget();
 }
 
 /// A label quad to draw in screen space (CSS px).
@@ -158,7 +302,11 @@ pub struct Renderer {
     labels: HashMap<String, LabelEntry>,
     frame_no: u64,
     images: HashMap<String, ImgState>,
-    loaded: Rc<RefCell<Vec<(String, Option<HtmlImageElement>)>>>,
+    /// Images' own sizes, kept when their textures are dropped.
+    naturals: HashMap<String, (f64, f64)>,
+    loaded: Rc<RefCell<Vec<(String, Option<Loaded>)>>>,
+    /// Device pixels per world unit when the display list was last built.
+    build_px: f64,
     pub wake: Rc<Cell<bool>>,
     pub asset_base: String,
     pub max_tex: u32,
@@ -404,7 +552,9 @@ impl Renderer {
             labels: HashMap::new(),
             frame_no: 0,
             images: HashMap::new(),
+            naturals: HashMap::new(),
             loaded: Rc::new(RefCell::new(Vec::new())),
+            build_px: 1.0,
             wake,
             asset_base: "/api/assets/".into(),
             max_tex,
@@ -451,30 +601,37 @@ impl Renderer {
 
     // ---------------- images ----------------
 
+    /// An image's texture and own size, loading the original if it has none.
     pub fn image(&mut self, asset: &str) -> Option<(TexId, f64, f64)> {
-        if !self.images.contains_key(asset) {
-            self.images.insert(asset.to_string(), ImgState::Loading);
-            if let Ok(img) = HtmlImageElement::new() {
-                let queue = self.loaded.clone();
-                let wake = self.wake.clone();
-                let id = asset.to_string();
-                let img2 = img.clone();
-                let onload = Closure::once(Box::new(move || {
-                    queue.borrow_mut().push((id, Some(img2)));
-                    wake.set(true);
-                }) as Box<dyn FnOnce()>);
-                let queue = self.loaded.clone();
-                let wake = self.wake.clone();
-                let id = asset.to_string();
-                let onerror = Closure::once(Box::new(move || {
-                    queue.borrow_mut().push((id, None));
-                    wake.set(true);
-                }) as Box<dyn FnOnce()>);
-                img.set_onload(Some(onload.as_ref().unchecked_ref()));
-                img.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-                onload.forget();
-                onerror.forget();
-                img.set_src(&format!("{}{}", self.asset_base, asset));
+        self.image_need(asset, Need::Full)
+    }
+
+    /// An image's texture and own size. Loads a version sharp enough for
+    /// `need` when the texture it has isn't, and shows that one meanwhile.
+    pub fn image_need(&mut self, asset: &str, need: Need) -> Option<(TexId, f64, f64)> {
+        let load = match self.images.get(asset) {
+            None => version_for(need, self.naturals.get(asset).copied(), 0.0),
+            Some(ImgState::Ready { full: false, pending: false, frac, w, h, .. }) => version_for(need, Some((*w, *h)), frac * w.max(*h)),
+            _ => None,
+        };
+        if let Some(version) = load {
+            match self.images.get_mut(asset) {
+                Some(ImgState::Ready { pending, .. }) => *pending = true,
+                _ => {
+                    self.images.insert(asset.to_string(), ImgState::Loading);
+                }
+            }
+            let queue = self.loaded.clone();
+            let wake = self.wake.clone();
+            let id = asset.to_string();
+            let done: Rc<dyn Fn(Option<Loaded>)> = Rc::new(move |got| {
+                queue.borrow_mut().push((id.clone(), got));
+                wake.set(true);
+            });
+            let url = format!("{}{}", self.asset_base, asset);
+            match version {
+                None => load_element(&url, None, None, done),
+                Some(level) => fetch_version(&format!("{url}?max={level}"), done),
             }
         }
         let frame = self.frame_no;
@@ -488,41 +645,66 @@ impl Renderer {
     }
 
     fn upload_loaded_images(&mut self) {
-        let items: Vec<(String, Option<HtmlImageElement>)> = self.loaded.borrow_mut().drain(..).collect();
-        for (id, img) in items {
-            let Some(img) = img else {
-                self.images.insert(id, ImgState::Failed);
+        let items: Vec<(String, Option<Loaded>)> = self.loaded.borrow_mut().drain(..).collect();
+        for (id, got) in items {
+            let uploaded = got.and_then(|Loaded { img, natural, url, full }| {
+                let (nw, nh) = (img.natural_width(), img.natural_height());
+                let long = nw.max(nh);
+                let (tw, th) = if long > MAX_IMAGE_SIDE {
+                    let s = MAX_IMAGE_SIDE as f64 / long as f64;
+                    (((nw as f64) * s).round().max(1.0) as u32, ((nh as f64) * s).round().max(1.0) as u32)
+                } else {
+                    (nw.max(1), nh.max(1))
+                };
+                let tex = if long > MAX_IMAGE_SIDE {
+                    // Downscale big photos before upload to bound GPU memory.
+                    downscale(&img, tw, th).and_then(|c| self.gpu.upload_texture(None, ImageSource::Canvas(&c), tw, th, true))
+                } else {
+                    self.gpu.upload_texture(None, ImageSource::Image(&img), tw, th, true)
+                };
+                if let Some(u) = &url {
+                    let _ = web_sys::Url::revoke_object_url(u);
+                }
+                let (w, h) = natural.unwrap_or((nw as f64, nh as f64));
+                // Nothing sharper to get: the original, or the server sent it whole.
+                let full = full || (nw as f64 >= w && nh as f64 >= h);
+                tex.map(|tex| (tex, tw, th, w, h, full))
+            });
+            let Some((tex, tw, th, w, h, full)) = uploaded else {
+                match self.images.get_mut(&id) {
+                    // A sharper version failed: keep this one, and don't try again.
+                    Some(ImgState::Ready { pending, full, .. }) => {
+                        *pending = false;
+                        *full = true;
+                    }
+                    _ => {
+                        self.images.insert(id, ImgState::Failed);
+                    }
+                }
                 continue;
             };
-            let (nw, nh) = (img.natural_width(), img.natural_height());
-            let long = nw.max(nh);
-            let tex = if long > MAX_IMAGE_SIDE {
-                // Downscale big photos before upload to bound GPU memory.
-                let s = MAX_IMAGE_SIDE as f64 / long as f64;
-                let (w, h) = (((nw as f64) * s).round().max(1.0) as u32, ((nh as f64) * s).round().max(1.0) as u32);
-                downscale(&img, w, h).and_then(|c| self.gpu.upload_texture(None, ImageSource::Canvas(&c), w, h, true))
-            } else {
-                self.gpu.upload_texture(None, ImageSource::Image(&img), nw.max(1), nh.max(1), true)
+            let frac = tw.max(th) as f64 / w.max(h).max(1.0);
+            // RGBA + ~1/3 for the mip chain.
+            let bytes = (tw as f64 * th as f64 * 4.0 * 1.34) as usize;
+            let first = match self.images.remove(&id) {
+                Some(ImgState::Ready { tex: old, .. }) => {
+                    self.gpu.delete_texture(old);
+                    false
+                }
+                _ => true,
             };
-            if let Some(tex) = tex {
-                let (w, h) = (img.natural_width() as f64, img.natural_height() as f64);
-                let s = (MAX_IMAGE_SIDE as f64 / w.max(h).max(1.0)).min(1.0);
-                // RGBA + ~1/3 for the mip chain.
-                let bytes = ((w * s) * (h * s) * 4.0 * 1.34) as usize;
-                self.images.insert(id, ImgState::Ready { tex, w, h, bytes, used: self.frame_no });
+            self.naturals.insert(id.clone(), (w, h));
+            self.images.insert(id, ImgState::Ready { tex, w, h, bytes, used: self.frame_no, frac, full, pending: false });
+            // A placeholder becomes the image; a sharper version just swaps the texture.
+            if first {
                 self.invalidate();
-                self.evict_images();
-            } else {
-                self.images.insert(id, ImgState::Failed);
             }
+            self.evict_images();
         }
     }
 
     pub fn image_size(&self, asset: &str) -> Option<(f64, f64)> {
-        match self.images.get(asset) {
-            Some(ImgState::Ready { w, h, .. }) => Some((*w, *h)),
-            _ => None,
-        }
+        self.naturals.get(asset).copied()
     }
 
     fn evict_images(&mut self) {
@@ -553,7 +735,9 @@ impl Renderer {
 
     // ---------------- display list ----------------
 
-    pub fn build(&mut self, doc: &Document, scene: &Scene, hidden: &HashSet<NodeId>, version: u64) {
+    /// `px`: device pixels per world unit now (for the first version of each image).
+    pub fn build(&mut self, doc: &Document, scene: &Scene, hidden: &HashSet<NodeId>, version: u64, px: f64) {
+        self.build_px = px;
         self.builds += 1;
         self.upload_loaded_images();
         let mut inst: Vec<f32> = Vec::with_capacity(scene.order.len() * INST_FLOATS * 2);
@@ -638,7 +822,8 @@ impl Renderer {
                 let ellipse = n.kind == NodeType::Ellipse;
                 let mut parts = Vec::new();
                 for p in n.fills.iter().filter(|p| p.is_visible()) {
-                    let FillParams { ptype, angle, nstops, colors, stops, fx, image } = self.fill_params(Some(p));
+                    let covers = n.width.max(n.height) * world_scale(&world) * self.build_px;
+                    let FillParams { ptype, angle, nstops, colors, stops, fx, image } = self.fill_params(Some(p), covers);
                     let ci = (inst.len() / INST_FLOATS) as u32;
                     push_instance(
                         &mut inst,
@@ -718,7 +903,8 @@ impl Renderer {
     }
 
     /// Shader parameters for one fill paint (`None`: no fill).
-    fn fill_params(&mut self, paint: Option<&Paint>) -> FillParams {
+    /// `covers`: device pixels the layer covers (sizes an image's first version).
+    fn fill_params(&mut self, paint: Option<&Paint>, covers: f64) -> FillParams {
         let mut colors = [[0.0f32; 4]; 4];
         let mut stops = [0.0f32; 4];
         let mut ptype = 0.0;
@@ -750,7 +936,17 @@ impl Renderer {
                     ImageFit::Stretch => 2.0,
                     ImageFit::Tile => 3.0,
                 };
-                match self.image(asset).map(|(_, w, h)| (w, h)) {
+                // First load: a version for how big the layer shows. 9-slice
+                // and tiles are sized in image pixels, so those start whole.
+                // Later, drawing asks for sharper versions (`Need::Fraction`).
+                let need = if self.images.contains_key(asset) {
+                    Need::Have
+                } else if slice.is_some() || *fit == ImageFit::Tile {
+                    Need::Full
+                } else {
+                    Need::Covers(covers)
+                };
+                match self.image_need(asset, need).map(|(_, w, h)| (w, h)) {
                     Some((iw, ih)) => {
                         // A crop makes the region the image.
                         let (w, h) = match crop.and_then(|c| c.within(iw, ih)) {
@@ -805,7 +1001,8 @@ impl Renderer {
         let shadow_image = if has_shadow && !n.hide_fill {
             let vis: Vec<&Paint> = n.fills.iter().filter(|p| p.is_visible()).collect();
             if !vis.is_empty() && vis.iter().all(|p| matches!(p, Paint::Image { .. })) {
-                Some(self.fill_params(vis.last().copied())).filter(|f| f.image.is_some())
+                let covers = n.width.max(n.height) * world_scale(world) * self.build_px;
+                Some((self.fill_params(vis.last().copied(), covers), vis.last().copied())).filter(|(f, _)| f.image.is_some())
             } else {
                 None
             }
@@ -821,7 +1018,7 @@ impl Renderer {
                 let m = Affine::translate(*x as f64, *y as f64).mul(world);
                 let idx = (inst.len() / INST_FLOATS) as u32;
                 let pad = *blur + spread.max(0.0) + 2.0;
-                if let Some(f) = &shadow_image {
+                if let Some((f, paint)) = &shadow_image {
                     push_instance(
                         inst,
                         &m,
@@ -837,7 +1034,9 @@ impl Renderer {
                         [*blur, *spread, pad, 0.0],
                         f.fx,
                     );
-                    cmds.push(Cmd::Image { inst: idx, asset: f.image.clone().unwrap() });
+                    let k = paint.map_or(0.0, |p| image_scale(p, f.colors[1], n.width, n.height, &m));
+                    let bounds = m.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height));
+                    cmds.push(Cmd::Image { inst: idx, asset: f.image.clone().unwrap(), k, bounds });
                     continue;
                 }
                 push_instance(
@@ -884,7 +1083,8 @@ impl Renderer {
             } else {
                 ([0.0; 4], [0.0; 4])
             };
-            let FillParams { ptype, angle, nstops, colors, stops, fx, image } = self.fill_params(paint);
+            let covers = n.width.max(n.height) * world_scale(world) * self.build_px;
+            let FillParams { ptype, angle, nstops, colors, stops, fx, image } = self.fill_params(paint, covers);
             if ptype == 0.0 && stroke[3] == 0.0 {
                 continue;
             }
@@ -905,7 +1105,11 @@ impl Renderer {
                 fx,
             );
             match image {
-                Some(asset) => cmds.push(Cmd::Image { inst: idx, asset }),
+                Some(asset) => {
+                    let k = paint.map_or(0.0, |p| image_scale(p, colors[1], n.width, n.height, world));
+                    let bounds = world.map_rect(&flexma_doc::Rect::new(0.0, 0.0, n.width, n.height));
+                    cmds.push(Cmd::Image { inst: idx, asset, k, bounds })
+                }
                 None => push_shape(cmds, idx),
             }
         }
@@ -1060,6 +1264,11 @@ impl Renderer {
         self.text_bytes
     }
 
+    /// Texture memory held by images (for diagnostics).
+    pub fn image_memory(&self) -> usize {
+        self.images.values().map(|i| if let ImgState::Ready { bytes, .. } = i { *bytes } else { 0 }).sum()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -1127,9 +1336,11 @@ impl Renderer {
                         None => Some((*start, start + count)),
                     };
                 }
-                Cmd::Image { inst, asset } => {
+                Cmd::Image { inst, asset, k, bounds } => {
                     flush_shapes!();
-                    let tex = self.image(asset).map(|(t, _, _)| t);
+                    // On screen, at this zoom: a sharper version if this one is too coarse.
+                    let need = if bounds.intersects(&visible) { Need::Fraction(k * cam.zoom * dpr) } else { Need::Have };
+                    let tex = self.image_need(asset, need).map(|(t, _, _)| t);
                     self.gpu.draw_shapes(*inst, 1, tex);
                 }
                 Cmd::PushClip { parts } | Cmd::PopClip { parts } => {

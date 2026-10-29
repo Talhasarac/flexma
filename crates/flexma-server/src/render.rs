@@ -655,6 +655,125 @@ pub fn asset_path(data_dir: &Path, id: &str) -> PathBuf {
     data_dir.join("assets").join(id)
 }
 
+/// Images bigger than this many pixels are only served whole (decoding one
+/// to make a smaller version would take too much memory on a small server).
+pub const MAX_SMALLER_SOURCE_PX: u64 = 4096 * 4096;
+
+/// What `?max=` serves for an image: a smaller version (its bytes and MIME
+/// type), or `None` for the original (a version wouldn't be smaller).
+pub type Smaller = Option<(Vec<u8>, &'static str)>;
+
+/// Where `smaller` keeps a version: PNG, JPEG, or a marker that the
+/// original is smaller.
+fn smaller_paths(data_dir: &Path, id: &str, level: u32) -> [(PathBuf, Option<&'static str>); 3] {
+    let dir = data_dir.join("cache").join("sizes");
+    [
+        (dir.join(format!("{id}-{level}.png")), Some("image/png")),
+        (dir.join(format!("{id}-{level}.jpg")), Some("image/jpeg")),
+        (dir.join(format!("{id}-{level}.orig")), None),
+    ]
+}
+
+/// What `smaller` made for this image and level before, if anything.
+pub fn cached_smaller(data_dir: &Path, id: &str, level: u32) -> Option<Smaller> {
+    smaller_paths(data_dir, id, level).into_iter().find_map(|(path, mime)| {
+        let bytes = std::fs::read(&path).ok()?;
+        Some(mime.map(|m| (bytes, m)))
+    })
+}
+
+/// A smaller version of an uploaded image (`w`×`h`, `original_bytes` on
+/// disk): halved until its long side fits `level`, averaging 2×2 pixels like
+/// the editor's mip levels, so zoomed out it looks the same as the original
+/// did. Cached on disk; `None` when it can't be made.
+pub fn smaller(data_dir: &Path, id: &str, w: u32, h: u32, level: u32, original_bytes: u64) -> Option<Smaller> {
+    if let Some(done) = cached_smaller(data_dir, id, level) {
+        return Some(done);
+    }
+    if w.max(h) <= level || (w as u64) * (h as u64) > MAX_SMALLER_SOURCE_PX {
+        return None;
+    }
+    // Decoded 1:1 with nearest sampling: an exact copy of the pixels.
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"><image href="flexma-asset:{id}" width="{w}" height="{h}" image-rendering="optimizeSpeed"/></svg>"#
+    );
+    let allowed = HashSet::from([id.to_string()]);
+    let mut opt = svg_options();
+    opt.image_href_resolver.resolve_string = image_resolver(Some((data_dir, &allowed)));
+    let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
+    let mut pm = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pm.as_mut());
+    while pm.width().max(pm.height()) > level {
+        pm = halve(&pm)?;
+    }
+    let (bytes, mime) = encode_smaller(&pm)?;
+    // A small, well-compressed original (lossy WebP) can beat the version.
+    let made = (bytes.len() as u64) < original_bytes;
+    let [(png, _), (jpg, _), (orig, _)] = smaller_paths(data_dir, id, level);
+    let path = match (made, mime) {
+        (false, _) => orig,
+        (true, "image/jpeg") => jpg,
+        _ => png,
+    };
+    // Written whole or not at all: a reader never sees half a file.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if std::fs::create_dir_all(path.parent()?).is_ok() && std::fs::write(&tmp, if made { &bytes[..] } else { &[] }).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+    Some(made.then_some((bytes, mime)))
+}
+
+/// Opaque images (photos, mostly lossy already) as high-quality JPEG; ones
+/// with transparency (sprites) as PNG, lossless.
+fn encode_smaller(pm: &resvg::tiny_skia::Pixmap) -> Option<(Vec<u8>, &'static str)> {
+    let (w, h) = (pm.width(), pm.height());
+    let mut out = Vec::new();
+    if pm.pixels().iter().all(|p| p.alpha() == 255) {
+        let rgb: Vec<u8> = pm.pixels().iter().flat_map(|p| [p.red(), p.green(), p.blue()]).collect();
+        let mut enc = jpeg_encoder::Encoder::new(&mut out, 90);
+        enc.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
+        enc.encode(&rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb).ok()?;
+        return Some((out, "image/jpeg"));
+    }
+    let rgba: Vec<u8> = pm
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+    let mut enc = png::Encoder::new(&mut out, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Best);
+    enc.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
+    enc.write_header().ok()?.write_image_data(&rgba).ok()?;
+    Some((out, "image/png"))
+}
+
+/// Half the size, each pixel the average of a 2×2 block (premultiplied, so
+/// transparent pixels don't darken edges). Odd sizes round down, like GPU
+/// mip levels.
+fn halve(src: &resvg::tiny_skia::Pixmap) -> Option<resvg::tiny_skia::Pixmap> {
+    let (w, h) = (src.width(), src.height());
+    let (w2, h2) = ((w / 2).max(1), (h / 2).max(1));
+    let mut dst = resvg::tiny_skia::Pixmap::new(w2, h2)?;
+    let s = src.data();
+    let d = dst.data_mut();
+    for y in 0..h2 {
+        let (y0, y1) = (y * 2, (y * 2 + 1).min(h - 1));
+        for x in 0..w2 {
+            let (x0, x1) = (x * 2, (x * 2 + 1).min(w - 1));
+            for c in 0..4 {
+                let p = |xx: u32, yy: u32| s[((yy * w + xx) * 4 + c) as usize] as u32;
+                d[((y * w2 + x) * 4 + c) as usize] = ((p(x0, y0) + p(x1, y0) + p(x0, y1) + p(x1, y1) + 2) / 4) as u8;
+            }
+        }
+    }
+    Some(dst)
+}
+
 pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         Some("image/png")
@@ -1667,6 +1786,48 @@ mod asset_scope_tests {
 
     /// A server render inlines the file's own workspace's images and nothing
     /// else, even when a document names another workspace's asset.
+    /// Smaller versions halve with 2×2 averages (premultiplied: an opaque
+    /// edge against transparency keeps its color), come as PNG with
+    /// transparency and JPEG without, and are cached on disk. When the
+    /// original is smaller still, it is what `?max=` serves.
+    #[test]
+    fn smaller_versions_average_like_mip_levels() {
+        let dir = std::env::temp_dir().join(format!("flexma-smaller-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        // 600×300: the left 301 columns opaque red, the rest transparent.
+        let mut pm = resvg::tiny_skia::Pixmap::new(600, 300).unwrap();
+        let red = resvg::tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap();
+        for y in 0..300 {
+            for x in 0..301 {
+                pm.pixels_mut()[y * 600 + x] = red;
+            }
+        }
+        std::fs::write(dir.join("assets").join("big1"), pm.encode_png().unwrap()).unwrap();
+        assert!(smaller(&dir, "big1", 600, 300, 1024, u64::MAX).is_none(), "already small enough");
+        let (png, mime) = smaller(&dir, "big1", 600, 300, 256, u64::MAX).unwrap().unwrap();
+        assert_eq!(mime, "image/png");
+        let small = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!((small.width(), small.height()), (150, 75), "600 -> 300 -> 150");
+        let px = |x: u32| small.pixel(x, 10).unwrap().demultiply();
+        assert_eq!((px(0).red(), px(0).alpha()), (255, 255));
+        assert_eq!((px(149).alpha()), 0);
+        // Column 75 covers source columns 300..303: one red of four.
+        let edge = px(75);
+        assert_eq!((edge.red(), edge.green(), edge.alpha()), (255, 0, 64), "red, not darkened, a quarter covered");
+        assert_eq!(smaller(&dir, "big1", 600, 300, 256, u64::MAX).unwrap().unwrap().0, png, "from the cache");
+        // Opaque: JPEG.
+        pm.fill(resvg::tiny_skia::Color::from_rgba8(30, 120, 200, 255));
+        std::fs::write(dir.join("assets").join("photo1"), pm.encode_png().unwrap()).unwrap();
+        let (jpg, mime) = smaller(&dir, "photo1", 600, 300, 256, u64::MAX).unwrap().unwrap();
+        assert_eq!((mime, &jpg[..2]), ("image/jpeg", &[0xff, 0xd8][..]));
+        // An original smaller than any version: served as it is, remembered.
+        std::fs::write(dir.join("assets").join("tiny1"), pm.encode_png().unwrap()).unwrap();
+        assert_eq!(smaller(&dir, "tiny1", 600, 300, 256, 10), Some(None));
+        assert_eq!(cached_smaller(&dir, "tiny1", 256), Some(None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn renders_only_inline_the_workspaces_own_images() {
         let dir = std::env::temp_dir().join(format!("flexma-asset-scope-{}", std::process::id()));
