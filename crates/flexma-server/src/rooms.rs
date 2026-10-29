@@ -504,11 +504,14 @@ pub struct Rooms {
     /// out of `rooms` but still saving (closed when idle). Each ends with
     /// whether its last save went through.
     actors: Mutex<Vec<(String, tokio::task::JoinHandle<bool>)>>,
+    /// Counts restores and deletions: a room read from the database before
+    /// one isn't opened (`get` reads the file again).
+    epoch: AtomicU64,
 }
 
 impl Rooms {
     pub fn new(db: Db) -> Arc<Rooms> {
-        let rooms = Arc::new(Rooms { db, rooms: Mutex::new(HashMap::new()), blocked: Mutex::new(Default::default()), actors: Mutex::new(Vec::new()) });
+        let rooms = Arc::new(Rooms { db, rooms: Mutex::new(HashMap::new()), blocked: Mutex::new(Default::default()), actors: Mutex::new(Vec::new()), epoch: AtomicU64::new(0) });
         let reaper = rooms.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -534,16 +537,24 @@ impl Rooms {
             .map(|(k, _)| k.clone())
             .collect();
         for id in idle {
-            if let Some(h) = map.remove(&id) {
-                let _ = h.tx.try_send(Cmd::Shutdown { notify: None, discard: false, done: None });
+            // A room whose queue is full is busy after all, and closes on a
+            // later tick: dropped from the map without Shutdown, it would
+            // run on where nothing can stop it.
+            let full = map.get(&id).is_some_and(|h| matches!(h.tx.try_send(Cmd::Shutdown { notify: None, discard: false, done: None }), Err(mpsc::error::TrySendError::Full(_))));
+            if !full {
+                map.remove(&id);
             }
         }
     }
 
     /// Close a room immediately (e.g. the file was deleted).
     pub fn close(&self, file_id: &str, notify: Option<String>) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         if let Some(h) = self.rooms.lock().unwrap().remove(file_id) {
-            let _ = h.tx.try_send(Cmd::Shutdown { notify, discard: false, done: None });
+            // Sent even when the room's queue is full (`try_send` would drop it).
+            tokio::spawn(async move {
+                let _ = h.tx.send(Cmd::Shutdown { notify, discard: false, done: None }).await;
+            });
         }
     }
 
@@ -592,10 +603,12 @@ impl Rooms {
 
     pub fn block(&self, file_id: &str) {
         self.blocked.lock().unwrap().insert(file_id.to_string());
+        self.epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn unblock(&self, file_id: &str) {
         self.blocked.lock().unwrap().remove(file_id);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     pub async fn get(&self, file_id: &str) -> AppResult<RoomHandle> {
@@ -611,59 +624,64 @@ impl Rooms {
             }
             // A room closing for this file may not have saved yet: open the
             // file once it has, or it would miss that save.
-            if !self.actors.lock().unwrap().iter().any(|(f, a)| f == file_id && !a.is_finished()) {
-                break;
+            if self.actors.lock().unwrap().iter().any(|(f, a)| f == file_id && !a.is_finished()) {
+                if Instant::now() > deadline {
+                    return Err(closed());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
             }
-            if Instant::now() > deadline {
-                return Err(closed());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let fid = file_id.to_string();
-        let loaded = self
-            .db
-            .call(move |c| match crate::doc_store::read(c, &fid)? {
-                Some(stored) => Ok(Some((stored, crate::paint::last_seq(c, &fid)?))),
-                None => Ok(None),
-            })
-            .await?;
-        let (stored, paint_seq) = loaded.ok_or_else(|| AppError::not_found("file"))?;
-        let version = stored.version;
-        let part_hashes = stored.parts.iter().map(|(name, json)| (name.clone(), hash_str(json))).collect();
-        let mut doc = Document::from_json(&stored.json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
-        components::sync_all(&mut doc);
-        flexma_doc::styles::sync_all(&mut doc);
-        layout::relayout_all(&mut doc);
+            let epoch = self.epoch.load(Ordering::SeqCst);
+            let fid = file_id.to_string();
+            let loaded = self
+                .db
+                .call(move |c| match crate::doc_store::read(c, &fid)? {
+                    Some(stored) => Ok(Some((stored, crate::paint::last_seq(c, &fid)?))),
+                    None => Ok(None),
+                })
+                .await?;
+            let (stored, paint_seq) = loaded.ok_or_else(|| AppError::not_found("file"))?;
+            let version = stored.version;
+            let part_hashes = stored.parts.iter().map(|(name, json)| (name.clone(), hash_str(json))).collect();
+            let mut doc = Document::from_json(&stored.json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
+            components::sync_all(&mut doc);
+            flexma_doc::styles::sync_all(&mut doc);
+            layout::relayout_all(&mut doc);
 
-        let mut map = self.rooms.lock().unwrap();
-        if let Some(h) = map.get(file_id) {
-            if !h.tx.is_closed() {
-                return Ok(h.clone());
+            let mut map = self.rooms.lock().unwrap();
+            if let Some(h) = map.get(file_id) {
+                if !h.tx.is_closed() {
+                    return Ok(h.clone());
+                }
             }
+            // Restored or deleted while we read it: what we read is gone.
+            if self.epoch.load(Ordering::SeqCst) != epoch {
+                continue;
+            }
+            let (tx, rx) = mpsc::channel(4096);
+            let stats = Arc::new(Stats { clients: AtomicUsize::new(0), last_active: AtomicI64::new(now()), paint_seq: AtomicU64::new(paint_seq) });
+            let room = Room {
+                file_id: file_id.to_string(),
+                doc,
+                version: version as u64,
+                dirty: false,
+                clients: HashMap::new(),
+                agents: HashMap::new(),
+                agent_undo: HashMap::new(),
+                paint_seq,
+                paint_writer: crate::paint::spawn_writer(self.db.clone()),
+                stroke_authors: HashMap::new(),
+                db: self.db.clone(),
+                stats: stats.clone(),
+                part_hashes,
+                saved_parts: false,
+            };
+            let actor = tokio::spawn(room.run(rx));
+            self.actors.lock().unwrap().push((file_id.to_string(), actor));
+            let h = RoomHandle { tx, stats };
+            map.insert(file_id.to_string(), h.clone());
+            return Ok(h);
         }
-        let (tx, rx) = mpsc::channel(4096);
-        let stats = Arc::new(Stats { clients: AtomicUsize::new(0), last_active: AtomicI64::new(now()), paint_seq: AtomicU64::new(paint_seq) });
-        let room = Room {
-            file_id: file_id.to_string(),
-            doc,
-            version: version as u64,
-            dirty: false,
-            clients: HashMap::new(),
-            agents: HashMap::new(),
-            agent_undo: HashMap::new(),
-            paint_seq,
-            paint_writer: crate::paint::spawn_writer(self.db.clone()),
-            stroke_authors: HashMap::new(),
-            db: self.db.clone(),
-            stats: stats.clone(),
-            part_hashes,
-            saved_parts: false,
-        };
-        let actor = tokio::spawn(room.run(rx));
-        self.actors.lock().unwrap().push((file_id.to_string(), actor));
-        let h = RoomHandle { tx, stats };
-        map.insert(file_id.to_string(), h.clone());
-        Ok(h)
     }
 }
 
@@ -1478,6 +1496,99 @@ mod access_tests {
         assert!(reopen_waited && reopened, "opened after the closing room saved");
         assert!(shutdown_waited && saved, "shut down after the closing room saved");
         assert!(stored.contains("late:1") && stored.contains("late:2"));
+    }
+
+    /// Lets a test run a future until its first wait ends.
+    struct NotifyWake(Arc<tokio::sync::Notify>);
+
+    impl std::task::Wake for NotifyWake {
+        fn wake(self: Arc<Self>) {
+            self.0.notify_one();
+        }
+    }
+
+    /// An open that read the file before a version was restored reads it
+    /// again, rather than opening (and later saving) what was replaced.
+    #[tokio::test]
+    async fn opening_during_a_restore_reads_the_restored_file() {
+        use axum::extract::{Path, State};
+        use std::future::Future;
+        let (db, dir) = setup("restore-race").await;
+        db.call(|c| {
+            let mut doc = Document::new_empty();
+            let mut n = flexma_doc::Node::new("restored", flexma_doc::NodeType::Rectangle);
+            n.parent = Some("0:1".into());
+            doc.apply(&Op::Create { node: n }).unwrap();
+            c.execute("INSERT INTO file_versions (id, file_id, label, document, version, created_by, created_at) VALUES ('v', 'f', 'Checkpoint', ?1, 1, 'u', 0)", params![doc.to_json()])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let rooms = Rooms::new(db.clone());
+        // Run an open until it has read the file.
+        let read = Arc::new(tokio::sync::Notify::new());
+        let waker = std::task::Waker::from(Arc::new(NotifyWake(read.clone())));
+        let mut open = Box::pin(rooms.get("f"));
+        assert!(open.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+        read.notified().await;
+        let cfg = crate::config::Config {
+            addr: "unused".into(),
+            data_dir: dir.clone(),
+            web_dir: dir.clone(),
+            public_url: None,
+            allow_signup: false,
+            instance_name: "test".into(),
+            max_upload_bytes: 1_000_000,
+            secure_cookies: false,
+            setup_token: None,
+            max_export_px: 1024,
+        };
+        let st = crate::state::AppState { cfg: Arc::new(cfg), db: db.clone(), rooms: rooms.clone() };
+        let user = crate::auth::AuthUser {
+            id: "u".into(),
+            email: "u@x".into(),
+            name: "U".into(),
+            is_admin: false,
+            color: "#000".into(),
+            via_token: false,
+            via_oauth: false,
+            token_name: None,
+        };
+        let _ = crate::api_versions::restore(State(st), user, Path(("f".into(), "v".into()))).await.unwrap();
+        let room = open.await.unwrap();
+        let agent = AgentInfo { key: "a".into(), user_id: "u".into(), name: "Agent".into(), color: "#000".into() };
+        let edit = room.mutate(agent, None, |tx| {
+            let mut n = flexma_doc::Node::new("edit:1", flexma_doc::NodeType::Rectangle);
+            n.parent = Some("0:1".into());
+            tx.apply(Op::Create { node: n })?;
+            Ok(json!("ok"))
+        });
+        edit.await.unwrap().unwrap();
+        assert!(rooms.shutdown_all().await);
+        let saved = Document::from_json(&db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(saved.contains("restored") && saved.contains("edit:1"));
+    }
+
+    /// A room whose command queue is full isn't closed as idle, and closing
+    /// it (a deleted file) still reaches it: a room out of the map but never
+    /// told to stop would keep the file from opening again.
+    #[tokio::test]
+    async fn rooms_with_a_full_queue_still_close() {
+        let (db, dir) = setup("full-queue").await;
+        let rooms = Rooms::new(db.clone());
+        let room = rooms.get("f").await.unwrap();
+        // Queued before the room handles any of it, while it still looks idle.
+        while room.tx.try_send(Cmd::Read { f: Box::new(|_, _| {}) }).is_ok() {}
+        room.stats.last_active.store(now() - IDLE_CLOSE_SECS - 1, Ordering::Relaxed);
+        rooms.reap_idle();
+        let again = tokio::time::timeout(Duration::from_secs(5), rooms.get("f")).await.expect("opened").unwrap();
+        assert!(again.tx.same_channel(&room.tx), "still the open room");
+        rooms.close("f", None);
+        let reopened = tokio::time::timeout(Duration::from_secs(5), rooms.get("f")).await.expect("opened again").unwrap();
+        assert!(!reopened.tx.same_channel(&room.tx));
+        assert!(rooms.shutdown_all().await);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A page can have any id, even the shared part's name.

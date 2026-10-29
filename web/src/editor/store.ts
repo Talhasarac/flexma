@@ -276,9 +276,11 @@ export class EditorStore {
     this.notify();
     // The document comes compressed (about a tenth of its JSON), the page
     // being shown first and the others after it, and the engine unpacks it
-    // without the page parsing it first.
+    // without the page parsing it first. With edits the server hasn't
+    // acknowledged, it comes whole, so they're replayed on all of it.
     const page = this.loadedOnce ? this.engine.current_page() : '';
-    const params = 'doc=zlib&pages=stream' + (page ? '&page=' + encodeURIComponent(page) : '');
+    const stream = this.engine.has_unacked() ? '' : '&pages=stream' + (page ? '&page=' + encodeURIComponent(page) : '');
+    const params = 'doc=zlib' + stream;
     const ws = new WebSocket(url + (url.includes('?') ? '&' : '?') + params);
     ws.binaryType = 'arraybuffer';
     this.socket = ws;
@@ -383,8 +385,8 @@ export class EditorStore {
     this.pendingInit = null;
     const parts = Number(init.parts ?? 1);
     this.start(init, (canEdit) => {
-      this.engine.load_zlib(data, String(init.clientId), canEdit);
-      if (parts > 1) this.engine.begin_stream(String(init.page));
+      if (parts > 1) this.engine.load_zlib_first(data, String(init.clientId), canEdit, String(init.page));
+      else this.engine.load_zlib(data, String(init.clientId), canEdit);
     });
     this.pagesLeft = parts - 1;
     const held = this.held;

@@ -92,10 +92,16 @@ impl FlexmaEditor {
         self.load(&inflate(data)?, client_id, can_edit)
     }
 
-    /// After `load_zlib` of a first part (`&pages=stream`): the other pages
-    /// stream in through `merge_zlib`; `first_page` is the one loaded.
-    pub fn begin_stream(&mut self, first_page: &str) {
-        self.ed.begin_stream(first_page);
+    /// Load the first part of a document whose other pages stream in
+    /// (`&pages=stream`) through `merge_zlib`; `first_page` is the one here.
+    pub fn load_zlib_first(&mut self, data: &[u8], client_id: &str, can_edit: bool, first_page: &str) -> Result<(), JsValue> {
+        self.ed.load_first(&inflate(data)?, client_id, can_edit, first_page).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Whether the server has yet to acknowledge some of our edits (a
+    /// reconnect then asks for the whole document to replay them on).
+    pub fn has_unacked(&self) -> bool {
+        self.ed.has_unacked()
     }
 
     /// Merge a page that streamed in (a zlib frame); returns its id.
@@ -224,11 +230,11 @@ impl FlexmaEditor {
 
     /// Next batch of local ops to send (JSON message), if any.
     pub fn take_outgoing(&mut self) -> Option<String> {
-        self.ed.sync.flush()
+        self.ed.take_outgoing()
     }
 
     pub fn has_outgoing(&self) -> bool {
-        self.ed.sync.has_outgoing()
+        self.ed.sync.has_outgoing() || !self.ed.held_ops.is_empty()
     }
 
     pub fn unacked(&self) -> u32 {
