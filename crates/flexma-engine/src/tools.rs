@@ -1573,3 +1573,68 @@ mod constraint_tests {
         assert_eq!(xw(&ed, "wide"), (10.0, 230.0));
     }
 }
+
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+    use flexma_doc::{Color, Document, Paint};
+
+    /// A screen with a pill on the left, a screen-wide wrapper without fill in
+    /// front of it holding a panel on the right, and an empty placeholder frame.
+    fn editor(wrapper_fill: bool) -> Editor {
+        let mut doc = Document::new_empty();
+        let mut screen = Node::new("screen", NodeType::Frame);
+        screen.parent = Some("0:1".into());
+        (screen.width, screen.height) = (1000.0, 500.0);
+        let mut pill = Node::new("pill", NodeType::Rectangle);
+        pill.parent = Some("screen".into());
+        (pill.x, pill.y, pill.width, pill.height) = (20.0, 20.0, 100.0, 40.0);
+        pill.index = "a".into();
+        let mut wrapper = Node::new("wrapper", NodeType::Frame);
+        wrapper.parent = Some("screen".into());
+        (wrapper.width, wrapper.height) = (1000.0, 100.0);
+        wrapper.index = "b".into();
+        wrapper.fills = if wrapper_fill { vec![Paint::solid(Color::WHITE)] } else { vec![] };
+        let mut panel = Node::new("panel", NodeType::Rectangle);
+        panel.parent = Some("wrapper".into());
+        (panel.x, panel.y, panel.width, panel.height) = (800.0, 20.0, 180.0, 60.0);
+        let mut empty = Node::new("empty", NodeType::Frame);
+        empty.parent = Some("screen".into());
+        (empty.x, empty.y, empty.width, empty.height) = (20.0, 300.0, 100.0, 100.0);
+        empty.index = "c".into();
+        empty.fills = vec![];
+        for node in [screen, pill, wrapper, panel, empty] {
+            doc.apply(&Op::Create { node }).unwrap();
+        }
+        let mut ed = Editor::new(None, None);
+        ed.load(&doc.to_json(), "c1", true).unwrap();
+        ed.ensure_scene();
+        ed
+    }
+
+    fn click(ed: &Editor, x: f64, y: f64) -> Option<String> {
+        ed.resolve_click(Vec2::new(x, y), false)
+    }
+
+    #[test]
+    fn clicks_go_through_empty_frames() {
+        let ed = editor(false);
+        // The pill under the wrapper's empty area.
+        assert_eq!(click(&ed, 50.0, 40.0).as_deref(), Some("pill"));
+        // The wrapper's content still selects the wrapper.
+        assert_eq!(click(&ed, 850.0, 50.0).as_deref(), Some("wrapper"));
+        // Empty area over the screen's background: nothing (marquee).
+        assert_eq!(click(&ed, 500.0, 50.0), None);
+        // A frame with no children keeps its whole box.
+        assert_eq!(click(&ed, 50.0, 350.0).as_deref(), Some("empty"));
+        // Deep select reaches the pill too.
+        assert_eq!(ed.resolve_click(Vec2::new(50.0, 40.0), true).as_deref(), Some("pill"));
+    }
+
+    #[test]
+    fn painted_frames_catch_clicks_everywhere() {
+        let ed = editor(true);
+        assert_eq!(click(&ed, 50.0, 40.0).as_deref(), Some("wrapper"));
+        assert_eq!(click(&ed, 500.0, 50.0).as_deref(), Some("wrapper"));
+    }
+}

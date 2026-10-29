@@ -2,7 +2,7 @@
 //! and clip regions. Rebuilt lazily when the document changes.
 
 use flexma_doc::path;
-use flexma_doc::{Affine, Document, Node, NodeId, NodeType, Rect, Vec2};
+use flexma_doc::{Affine, Document, Effect, Node, NodeId, NodeType, Rect, Vec2};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -103,10 +103,13 @@ impl Scene {
         r
     }
 
-    /// All nodes whose own shape is under `p`, front-most first.
+    /// All nodes whose own shape is under `p`, front-most first. A nested
+    /// frame with nothing painted on its box is hit only over its children,
+    /// so clicks on its empty area reach the layers under it (like Unity,
+    /// where only graphics catch clicks).
     pub fn hits_at(&self, doc: &Document, p: Vec2, tol: f64) -> Vec<NodeId> {
         let mut out = Vec::new();
-        for it in self.order.iter().rev() {
+        for (i, it) in self.order.iter().enumerate().rev() {
             let Some(b) = self.aabb.get(&it.id) else { continue };
             if !b.inflate(tol).contains(p) {
                 continue;
@@ -117,11 +120,32 @@ impl Scene {
                 }
             }
             let Some(n) = doc.get(&it.id) else { continue };
-            if self.hit_shape(n, p, tol) {
-                out.push(it.id.clone());
+            if !self.hit_shape(n, p, tol) {
+                continue;
             }
+            if it.depth > 0 && see_through(n) && !self.over_child(i, p, tol) {
+                continue;
+            }
+            out.push(it.id.clone());
         }
         out
+    }
+
+    /// Whether `p` is over one of the visible children of `order[i]`, or it has none.
+    fn over_child(&self, i: usize, p: Vec2, tol: f64) -> bool {
+        let end = i + self.order[i].span as usize;
+        let mut j = i + 1;
+        if j > end {
+            return true;
+        }
+        while j <= end {
+            let child = &self.order[j];
+            if self.aabb.get(&child.id).is_some_and(|b| b.inflate(tol).contains(p)) {
+                return true;
+            }
+            j += child.span as usize + 1;
+        }
+        false
     }
 
     pub fn hit_shape(&self, n: &Node, p: Vec2, tol: f64) -> bool {
@@ -157,6 +181,15 @@ impl Scene {
             _ => l.x >= -tol && l.y >= -tol && l.x <= w + tol && l.y <= h + tol,
         }
     }
+}
+
+/// A frame that draws nothing on its own box: no fill, stroke, drop shadow
+/// or background blur.
+fn see_through(n: &Node) -> bool {
+    n.kind.is_frame_like()
+        && (n.hide_fill || n.visible_fills().next().is_none())
+        && (n.stroke_weight <= 0.0 || n.visible_strokes().next().is_none())
+        && !n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, .. } | Effect::BackgroundBlur { visible: true, .. }))
 }
 
 pub fn intersect(a: &Rect, b: &Rect) -> Rect {
