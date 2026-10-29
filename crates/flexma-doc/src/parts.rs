@@ -9,7 +9,8 @@ use crate::node::{is_derived_id, Node, NodeId, NodeType, ROOT_ID};
 use serde::Deserialize;
 use std::collections::HashSet;
 
-/// The shared part's name; page parts are named by their page's id.
+/// The shared part's name. Page parts are named `page:<id>` (see
+/// `Parts::named`), so no page id can collide with it.
 pub const SHARED: &str = "shared";
 
 /// A document's stored nodes, each in exactly one part, parents before
@@ -21,9 +22,9 @@ pub struct Parts<'a> {
 }
 
 impl<'a> Parts<'a> {
-    /// Every part with its name, shared first.
-    pub fn named(&self) -> impl Iterator<Item = (&str, &[&'a Node])> {
-        std::iter::once((SHARED, self.shared.as_slice())).chain(self.pages.iter().map(|(p, nodes)| (p.as_str(), nodes.as_slice())))
+    /// Every part with its storage name, shared first.
+    pub fn named(&self) -> impl Iterator<Item = (String, &[&'a Node])> {
+        std::iter::once((SHARED.to_string(), self.shared.as_slice())).chain(self.pages.iter().map(|(p, nodes)| (format!("page:{p}"), nodes.as_slice())))
     }
 }
 
@@ -129,6 +130,38 @@ pub fn page_part_json(page: &str, nodes: &[&Node]) -> String {
     format!(r#"{{"page":{},"nodes":{}}}"#, serde_json::to_string(page).unwrap_or_default(), to_json(nodes))
 }
 
+/// Every stored layer on a page, its components included, parents first.
+pub fn page_nodes<'a>(doc: &'a Document, page: &str) -> Vec<&'a Node> {
+    let mut out = Vec::new();
+    for c in doc.children(page) {
+        if !is_derived_id(c) {
+            subtree(doc, c, &mut out);
+        }
+    }
+    out
+}
+
+fn subtree<'a>(doc: &'a Document, id: &str, out: &mut Vec<&'a Node>) {
+    let Some(n) = doc.get(id) else { return };
+    out.push(n);
+    for c in doc.children(id) {
+        if !is_derived_id(c) {
+            subtree(doc, c, out);
+        }
+    }
+}
+
+/// What an editor opening `first` receives: the first part as a document,
+/// then each other page. Those carry the page's components again: the
+/// first part has them without their neighbours, so laying it out can move
+/// them, and the page's own copy puts them back where the server has them.
+pub fn stream(doc: &Document, first: &str) -> (String, Vec<String>) {
+    let parts = split(doc);
+    let head = format!(r#"{{"nodes":{}}}"#, to_json(&first_part(doc, &parts, first)));
+    let rest = parts.pages.iter().filter(|(p, _)| p != first).map(|(p, _)| page_part_json(p, &page_nodes(doc, p))).collect();
+    (head, rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +203,7 @@ mod tests {
         let parts = split(&doc);
         assert_eq!(ids(&parts.shared), ["0:0", "0:1", "c:1", "t:1", "p:2", "s:1"]);
         assert_eq!(parts.pages.iter().map(|(p, n)| (p.as_str(), ids(n))).collect::<Vec<_>>(), [("0:1", vec!["f:1".to_string(), "r:1".into()]), ("p:2", vec!["f:2".into(), "i:1".into()])]);
+        assert_eq!(parts.named().map(|(name, _)| name).collect::<Vec<_>>(), ["shared", "page:0:1", "page:p:2"], "page parts can't be named like the shared one");
         // The parts assemble into the same document.
         let json = assemble(parts.named().map(|(_, n)| to_json(n)).collect::<Vec<_>>().iter().map(String::as_str));
         let back = Document::from_json(&json).unwrap();
@@ -190,10 +224,10 @@ mod tests {
         assert!(partial.contains("i:1~t:1"), "the instance expands from the shared component");
         assert!(!partial.contains("r:1"));
         // Page 1 streams in afterwards.
-        let parts = split(&doc);
-        let (page, nodes) = &parts.pages[0];
-        let part: PagePart = serde_json::from_str(&page_part_json(page, nodes)).unwrap();
+        let (_, rest) = stream(&doc, "p:2");
+        let part: PagePart = serde_json::from_str(&rest[0]).unwrap();
         assert_eq!(part.page, "0:1");
+        assert_eq!(part.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["f:1", "c:1", "t:1", "r:1"], "with its component");
         partial.merge_nodes(part.nodes);
         assert_eq!(partial.snapshot().nodes.len(), doc.snapshot().nodes.len());
         assert_eq!(partial.children("f:1"), doc.children("f:1"));

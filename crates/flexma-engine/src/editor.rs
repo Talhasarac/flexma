@@ -67,6 +67,12 @@ pub struct Editor {
     pub pending_pages: HashSet<NodeId>,
     /// A page asked for before it arrived; shown once it's merged.
     pub wanted_page: Option<NodeId>,
+    /// Our unacknowledged edits that a reload couldn't apply because their
+    /// layers are on pages still streaming in; tried again as pages merge.
+    pub deferred_ops: Vec<Op>,
+    /// The paint state, held until every page is here (it keeps only the
+    /// layers it knows, and our pending strokes on the others would be lost).
+    pub waiting_paint: Option<Value>,
     pub last_camera_change: f64,
     pub frame_labels: Vec<(NodeId, Rect)>,
     pub drop_target: Option<NodeId>,
@@ -134,6 +140,8 @@ impl Editor {
             needs_measure: HashSet::new(),
             pending_pages: HashSet::new(),
             wanted_page: None,
+            deferred_ops: Vec::new(),
+            waiting_paint: None,
             last_camera_change: -1e9,
             frame_labels: vec![],
             drop_target: None,
@@ -164,7 +172,11 @@ impl Editor {
     // ---------------- loading & remote ----------------
 
     pub fn load(&mut self, doc_json: &str, client_id: &str, can_edit: bool) -> Result<(), String> {
-        let unacked = if self.loaded { self.sync.take_unacked() } else { vec![] };
+        // Edits still waiting for their page (reconnected while streaming) are older than the rest.
+        let mut unacked = std::mem::take(&mut self.deferred_ops);
+        if self.loaded {
+            unacked.extend(self.sync.take_unacked());
+        }
         let mut doc = Document::from_json(doc_json)?;
         components::sync_all(&mut doc);
         flexma_doc::styles::sync_all(&mut doc);
@@ -182,13 +194,19 @@ impl Editor {
         self.loaded = true;
         self.pending_pages.clear();
         self.wanted_page = None;
+        self.deferred_ops.clear();
+        self.waiting_paint = None;
         // Re-apply our edits that the server never acknowledged (reconnect).
+        // One whose layer isn't here may be on a page still streaming in.
         if !unacked.is_empty() && can_edit {
             let mut changed = Vec::new();
             for op in unacked {
-                if let Ok(eff) = self.doc.apply(&op) {
-                    changed.extend(eff.changed);
-                    self.sync.push(op);
+                match self.doc.apply(&op) {
+                    Ok(eff) => {
+                        changed.extend(eff.changed);
+                        self.sync.push(op);
+                    }
+                    Err(_) => self.deferred_ops.push(op),
                 }
             }
             let synced = components::sync_instances(&mut self.doc, &changed, &[]);
@@ -198,13 +216,29 @@ impl Editor {
             layout::relayout(&mut self.doc, &changed);
             self.doc.clear_fresh();
         }
-        self.doc.walk(flexma_doc::ROOT_ID, &mut |n| {
+        self.queue_measurements();
+        self.bump_all();
+        Ok(())
+    }
+
+    /// Queue every text still flagged for measuring, instance layers included.
+    fn queue_measurements(&mut self) {
+        for n in self.doc.nodes() {
             if n.kind == NodeType::Text && n.needs_measure {
                 self.needs_measure.insert(n.id.clone());
             }
-        });
-        self.bump_all();
-        Ok(())
+        }
+    }
+
+    /// The file's paint state; held while pages are still streaming in.
+    pub fn load_paint_state(&mut self, state: Value) {
+        if !self.pending_pages.is_empty() {
+            self.waiting_paint = Some(state);
+            return;
+        }
+        self.paint.sync_layers(&self.doc, self.doc_version);
+        self.paint.load(&state);
+        self.dirty = true;
     }
 
     /// After loading a first part (`flexma_doc::parts::first_part`): the
@@ -221,19 +255,56 @@ impl Editor {
         let part: flexma_doc::parts::PagePart = serde_json::from_str(json).map_err(|e| e.to_string())?;
         let page = part.page;
         let mut changed = self.doc.merge_nodes(part.nodes);
-        let synced = components::sync_instances(&mut self.doc, &changed, &[]);
+        // The part was sent before any of our unacknowledged edits reached
+        // the server, and it can bring layers we already had (components):
+        // apply our edits to those again.
+        let merged: HashSet<&str> = changed.iter().map(String::as_str).collect();
+        let redo: Vec<Op> = self
+            .sync
+            .unacked()
+            .filter(|op| match op {
+                Op::Update { id, .. } | Op::Delete { id } => merged.contains(id.as_str()),
+                Op::Create { .. } => false,
+            })
+            .cloned()
+            .collect();
+        let mut removed = Vec::new();
+        for op in redo {
+            if let Ok(eff) = self.doc.apply(&op) {
+                changed.extend(eff.changed);
+                removed.extend(eff.removed);
+            }
+        }
+        let synced = components::sync_instances(&mut self.doc, &changed, &removed);
         changed.extend(synced);
         let styled = flexma_doc::styles::sync_styles(&mut self.doc, &changed);
         changed.extend(styled);
         layout::relayout(&mut self.doc, &changed);
         self.doc.clear_fresh();
-        for id in &changed {
-            if self.doc.get(id).is_some_and(|n| n.kind == NodeType::Text && n.needs_measure) {
-                self.needs_measure.insert(id.clone());
+        self.pending_pages.remove(&page);
+        // Our edits that waited for this page; once every page is here, any
+        // left can't apply (the server would reject them too).
+        if !self.deferred_ops.is_empty() {
+            let mut eff = OpEffect::default();
+            for op in std::mem::take(&mut self.deferred_ops) {
+                match self.doc.apply(&op) {
+                    Ok(e) => {
+                        self.sync.push(op);
+                        eff.merge(e);
+                    }
+                    Err(_) if !self.pending_pages.is_empty() => self.deferred_ops.push(op),
+                    Err(_) => {}
+                }
+            }
+            self.derive(&mut eff);
+        }
+        self.queue_measurements();
+        self.bump_all();
+        if self.pending_pages.is_empty() {
+            if let Some(state) = self.waiting_paint.take() {
+                self.load_paint_state(state);
             }
         }
-        self.pending_pages.remove(&page);
-        self.bump_all();
         if self.wanted_page.as_deref() == Some(page.as_str()) {
             self.set_page(&page);
         }

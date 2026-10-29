@@ -780,9 +780,7 @@ impl FlexmaEditor {
     /// The file's paint state (`GET /api/files/:id/paint`).
     pub fn load_paint(&mut self, json: &str) {
         let Ok(v) = serde_json::from_str::<Value>(json) else { return };
-        self.ed.paint.sync_layers(&self.ed.doc, self.ed.doc_version);
-        self.ed.paint.load(&v);
-        self.ed.dirty = true;
+        self.ed.load_paint_state(v);
     }
 
     /// URL prefix of paint tiles: `{base}/{layer}/{x}/{y}`.

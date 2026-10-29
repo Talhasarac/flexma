@@ -500,11 +500,15 @@ pub struct Rooms {
     rooms: Mutex<HashMap<String, RoomHandle>>,
     /// Files temporarily unavailable (e.g. while a version is being restored).
     blocked: Mutex<std::collections::HashSet<String>>,
+    /// Every room actor still running, by file, including rooms already
+    /// out of `rooms` but still saving (closed when idle). Each ends with
+    /// whether its last save went through.
+    actors: Mutex<Vec<(String, tokio::task::JoinHandle<bool>)>>,
 }
 
 impl Rooms {
     pub fn new(db: Db) -> Arc<Rooms> {
-        let rooms = Arc::new(Rooms { db, rooms: Mutex::new(HashMap::new()), blocked: Mutex::new(Default::default()) });
+        let rooms = Arc::new(Rooms { db, rooms: Mutex::new(HashMap::new()), blocked: Mutex::new(Default::default()), actors: Mutex::new(Vec::new()) });
         let reaper = rooms.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -517,6 +521,7 @@ impl Rooms {
     }
 
     fn reap_idle(&self) {
+        self.actors.lock().unwrap().retain(|(_, a)| !a.is_finished());
         let t = now();
         let mut map = self.rooms.lock().unwrap();
         let idle: Vec<String> = map
@@ -561,25 +566,23 @@ impl Rooms {
         }
     }
 
-    /// Stop every room once it has saved. Returns whether all of them
-    /// confirmed their final save (a room's channel closes before it saves,
-    /// so that alone proves nothing).
+    /// Stop every room and wait until each actor has finished its final
+    /// save, rooms already closing (when idle) included. Returns whether all
+    /// of the saves went through. (A room's channel closes before it saves,
+    /// so that alone proves nothing.)
     pub async fn shutdown_all(&self) -> bool {
-        let handles: Vec<(String, RoomHandle)> = self.rooms.lock().unwrap().drain().collect();
-        let mut waiting = Vec::new();
-        for (file_id, h) in handles {
-            let (done, saved) = oneshot::channel();
-            if h.tx.send(Cmd::Shutdown { notify: None, discard: false, done: Some(done) }).await.is_ok() {
-                waiting.push((file_id, saved));
-            }
+        let handles: Vec<RoomHandle> = self.rooms.lock().unwrap().drain().map(|(_, h)| h).collect();
+        for h in handles {
+            let _ = h.tx.send(Cmd::Shutdown { notify: None, discard: false, done: None }).await;
         }
+        let actors = std::mem::take(&mut *self.actors.lock().unwrap());
         let mut all = true;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        for (file_id, saved) in waiting {
-            match tokio::time::timeout_at(deadline, saved).await {
+        for (file_id, actor) in actors {
+            match tokio::time::timeout_at(deadline, actor).await {
                 Ok(Ok(true)) => {}
                 _ => {
-                    tracing::error!("room {file_id} didn't confirm its final save");
+                    tracing::error!("room {file_id} didn't finish its final save");
                     all = false;
                 }
             }
@@ -596,13 +599,25 @@ impl Rooms {
     }
 
     pub async fn get(&self, file_id: &str) -> AppResult<RoomHandle> {
-        if self.blocked.lock().unwrap().contains(file_id) {
-            return Err(closed());
-        }
-        if let Some(h) = self.rooms.lock().unwrap().get(file_id) {
-            if !h.tx.is_closed() {
-                return Ok(h.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.blocked.lock().unwrap().contains(file_id) {
+                return Err(closed());
             }
+            if let Some(h) = self.rooms.lock().unwrap().get(file_id) {
+                if !h.tx.is_closed() {
+                    return Ok(h.clone());
+                }
+            }
+            // A room closing for this file may not have saved yet: open the
+            // file once it has, or it would miss that save.
+            if !self.actors.lock().unwrap().iter().any(|(f, a)| f == file_id && !a.is_finished()) {
+                break;
+            }
+            if Instant::now() > deadline {
+                return Err(closed());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let fid = file_id.to_string();
         let loaded = self
@@ -644,7 +659,8 @@ impl Rooms {
             part_hashes,
             saved_parts: false,
         };
-        tokio::spawn(room.run(rx));
+        let actor = tokio::spawn(room.run(rx));
+        self.actors.lock().unwrap().push((file_id.to_string(), actor));
         let h = RoomHandle { tx, stats };
         map.insert(file_id.to_string(), h.clone());
         Ok(h)
@@ -695,7 +711,8 @@ fn msg(v: Value) -> Msg {
 }
 
 impl Room {
-    async fn run(mut self, mut rx: mpsc::Receiver<Cmd>) {
+    /// The room's actor. Ends with whether its last save went through.
+    async fn run(mut self, mut rx: mpsc::Receiver<Cmd>) -> bool {
         let mut tick = tokio::time::interval(SAVE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK_EVERY, RECHECK_EVERY);
@@ -776,6 +793,7 @@ impl Room {
             let _ = done.send(saved);
         }
         tracing::debug!("room {} closed", self.file_id);
+        saved
     }
 
     fn peers(&self) -> Vec<Peer> {
@@ -821,12 +839,8 @@ impl Room {
                     // queued now, so no ops come between them.
                     let pages = self.doc.pages();
                     let first = first.filter(|p| pages.contains(p)).unwrap_or_else(|| pages[0].clone());
-                    let parts = flexma_doc::parts::split(&self.doc);
-                    let head = flexma_doc::parts::first_part(&self.doc, &parts, &first);
-                    let mut frames = vec![Msg::Doc(Arc::from(format!(r#"{{"nodes":{}}}"#, flexma_doc::parts::to_json(&head))))];
-                    for (page, nodes) in parts.pages.iter().filter(|(p, _)| *p != first) {
-                        frames.push(Msg::Doc(Arc::from(flexma_doc::parts::page_part_json(page, nodes))));
-                    }
+                    let (head, rest) = flexma_doc::parts::stream(&self.doc, &first);
+                    let frames: Vec<Msg> = std::iter::once(head).chain(rest).map(|f| Msg::Doc(Arc::from(f))).collect();
                     init["docFrame"] = json!("zlib");
                     init["page"] = json!(first);
                     init["parts"] = json!(frames.len());
@@ -1192,7 +1206,7 @@ impl Room {
         let version = self.version as i64;
         let fid = self.file_id.clone();
         // Every part's JSON; only those that differ from what's stored are written.
-        let parts: Vec<(String, String)> = flexma_doc::parts::split(&self.doc).named().map(|(name, nodes)| (name.to_string(), flexma_doc::parts::to_json(nodes))).collect();
+        let parts: Vec<(String, String)> = flexma_doc::parts::split(&self.doc).named().map(|(name, nodes)| (name, flexma_doc::parts::to_json(nodes))).collect();
         let hashes: HashMap<String, u64> = parts.iter().map(|(name, json)| (name.clone(), hash_str(json))).collect();
         let changed: Vec<bool> = parts.iter().map(|(name, _)| self.part_hashes.get(name) != hashes.get(name)).collect();
         let res = self
@@ -1383,11 +1397,11 @@ mod access_tests {
         room.client_ops(me.clone(), 1, vec![node("p:2", Page, flexma_doc::ROOT_ID, "Two"), node("a:1", Frame, "0:1", "A"), node("b:1", Frame, "p:2", "B")]).await;
         room.flush().await.unwrap();
         // The first save writes every part.
-        assert_eq!(writes(&db).await, ["0:1", "p:2", "shared"]);
+        assert_eq!(writes(&db).await, ["page:0:1", "page:p:2", "shared"]);
         // A change on page two writes page two only.
         room.client_ops(me.clone(), 2, vec![Op::update1("b:1", "name", json!("B2"))]).await;
         room.flush().await.unwrap();
-        assert_eq!(writes(&db).await, ["p:2"]);
+        assert_eq!(writes(&db).await, ["page:p:2"]);
         let (version, parts_version): (i64, Option<i64>) = db.call(|c| Ok(c.query_row("SELECT version, parts_version FROM files WHERE id = 'f'", [], |r| Ok((r.get(0)?, r.get(1)?)))?)).await.unwrap();
         assert_eq!(Some(version), parts_version);
         // Reopened from its parts; closing stored it whole as well.
@@ -1404,6 +1418,163 @@ mod access_tests {
         let rooms = Rooms::new(db.clone());
         let has = rooms.get("f").await.unwrap().read(|d, _| d.contains("b:1")).await.unwrap();
         assert!(!has, "the whole document wins over older parts");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A room closing because it was idle can still be saving an edit that
+    /// arrived just before (its first try can fail, and it retries a second
+    /// later): opening the file again reads it after that save, and shutting
+    /// down waits for it.
+    #[tokio::test]
+    async fn closing_rooms_finish_saving_first() {
+        let (db, dir) = setup("closing").await;
+        sql(
+            &db,
+            "CREATE TABLE failing (x);
+             CREATE TRIGGER fail_insert BEFORE INSERT ON file_parts WHEN EXISTS (SELECT 1 FROM failing) BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+             CREATE TRIGGER fail_update BEFORE UPDATE ON file_parts WHEN EXISTS (SELECT 1 FROM failing) BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .await;
+        let rooms = Rooms::new(db.clone());
+        // An agent's edit is queued as the reaper finds the room idle (the
+        // room marks itself active only once it handles the edit), and the
+        // room's first try at saving it fails.
+        let close_after_edit = |id: &'static str| {
+            let rooms = rooms.clone();
+            async move {
+                let room = rooms.get("f").await.unwrap();
+                sql(&rooms.db, "INSERT INTO failing VALUES (1)").await;
+                room.stats.last_active.store(now() - IDLE_CLOSE_SECS - 1, Ordering::Relaxed);
+                let (reply, edited) = oneshot::channel();
+                let agent = AgentInfo { key: "a".into(), user_id: "u".into(), name: "Agent".into(), color: "#000".into() };
+                let f = Box::new(move |tx: &mut Tx| {
+                    let mut n = flexma_doc::Node::new(id, flexma_doc::NodeType::Rectangle);
+                    n.parent = Some("0:1".into());
+                    tx.apply(Op::Create { node: n })?;
+                    Ok(json!("ok"))
+                });
+                room.tx.try_send(Cmd::Mutate { agent, fonts: None, f, reply }).unwrap();
+                rooms.reap_idle();
+                edited.await.unwrap().unwrap();
+                assert!(rooms.rooms.lock().unwrap().is_empty(), "closed as idle");
+            }
+        };
+        close_after_edit("late:1").await;
+        let again = rooms.clone();
+        let reopen = tokio::spawn(async move { again.get("f").await.unwrap().read(|d, _| d.contains("late:1")).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let reopen_waited = !reopen.is_finished();
+        sql(&db, "DELETE FROM failing").await;
+        let reopened = reopen.await.unwrap();
+        close_after_edit("late:2").await;
+        let all = rooms.clone();
+        let shutdown = tokio::spawn(async move { all.shutdown_all().await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let shutdown_waited = !shutdown.is_finished();
+        sql(&db, "DELETE FROM failing").await;
+        let saved = shutdown.await.unwrap();
+        let stored = Document::from_json(&db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(reopen_waited && reopened, "opened after the closing room saved");
+        assert!(shutdown_waited && saved, "shut down after the closing room saved");
+        assert!(stored.contains("late:1") && stored.contains("late:2"));
+    }
+
+    /// A page can have any id, even the shared part's name.
+    #[tokio::test]
+    async fn a_page_named_like_the_shared_part_is_kept() {
+        let (db, dir) = setup("shared-page").await;
+        let rooms = Rooms::new(db.clone());
+        let room = rooms.get("f").await.unwrap();
+        let (out, _rx) = mpsc::channel(CLIENT_QUEUE);
+        let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: false, stream_pages: None };
+        let me = room.join(info, out).await.unwrap();
+        let mut page = flexma_doc::Node::new(flexma_doc::parts::SHARED, flexma_doc::NodeType::Page);
+        page.parent = Some(flexma_doc::ROOT_ID.into());
+        let mut rect = flexma_doc::Node::new("r:1", flexma_doc::NodeType::Rectangle);
+        rect.parent = Some("0:1".into());
+        room.client_ops(me, 1, vec![Op::Create { node: page }, Op::Create { node: rect }]).await;
+        room.flush().await.unwrap();
+        assert!(rooms.shutdown_all().await);
+        let json = db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        let stored = Document::from_json(&json).unwrap();
+        assert!(stored.contains(flexma_doc::parts::SHARED) && stored.contains("r:1"), "{json}");
+    }
+
+    /// Version history, restoring, duplicating and thumbnails read the parts
+    /// while `files.document` is behind them.
+    #[tokio::test]
+    async fn versions_copies_and_thumbnails_use_the_parts() {
+        use axum::extract::{Path, State};
+        use axum::Json;
+        let (db, dir) = setup("parts-api").await;
+        let rooms = Rooms::new(db.clone());
+        let cfg = crate::config::Config {
+            addr: "unused".into(),
+            data_dir: dir.clone(),
+            web_dir: dir.clone(),
+            public_url: None,
+            allow_signup: false,
+            instance_name: "test".into(),
+            max_upload_bytes: 1_000_000,
+            secure_cookies: false,
+            setup_token: None,
+            max_export_px: 1024,
+        };
+        let st = crate::state::AppState { cfg: Arc::new(cfg), db: db.clone(), rooms: rooms.clone() };
+        let user = || crate::auth::AuthUser {
+            id: "u".into(),
+            email: "u@x".into(),
+            name: "U".into(),
+            is_admin: false,
+            color: "#000".into(),
+            via_token: false,
+            via_oauth: false,
+            token_name: None,
+        };
+        // The room drops a client whose socket is gone, so the socket comes back too.
+        let open = || async {
+            let (out, socket) = mpsc::channel(CLIENT_QUEUE);
+            let info = JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: false, stream_pages: None };
+            let room = rooms.get("f").await.unwrap();
+            let me = room.join(info, out).await.unwrap();
+            (room, me, socket)
+        };
+        let name = |json: &str| Document::from_json(json).unwrap().get("r:1").map(|n| n.name.clone()).unwrap_or_default();
+        let whole = || async { db.call(|c| Ok(c.query_row::<String, _, _>("SELECT document FROM files WHERE id = 'f'", [], |r| r.get(0))?)).await.unwrap() };
+        let (room, me, _socket) = open().await;
+        let mut rect = flexma_doc::Node::new("r:1", flexma_doc::NodeType::Rectangle);
+        rect.parent = Some("0:1".into());
+        (rect.name, rect.width, rect.height) = ("saved".into(), 100.0, 100.0);
+        rect.fills = vec![flexma_doc::Paint::solid(flexma_doc::Color::BLACK)];
+        room.client_ops(me.clone(), 1, vec![Op::Create { node: rect }]).await;
+        room.flush().await.unwrap();
+        assert_eq!(name(&whole().await), "", "the whole copy waits for the room to close");
+        let auto: String = db.call(|c| Ok(c.query_row("SELECT document FROM file_versions WHERE file_id = 'f' AND label IS NULL", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(name(&auto), "saved");
+        let req = serde_json::from_value(json!({ "label": "checkpoint" })).unwrap();
+        let Json(checkpoint) = crate::api_versions::create(State(st.clone()), user(), Path("f".into()), Json(req)).await.unwrap();
+        room.client_ops(me, 2, vec![Op::update1("r:1", "name", json!("current"))]).await;
+        room.flush().await.unwrap();
+        let Json(copy) = crate::api_files::duplicate_file(State(st.clone()), user(), Path("f".into())).await.unwrap();
+        assert_eq!(name(&crate::api_files::current_doc_json(&st, copy["id"].as_str().unwrap()).await.unwrap()), "current");
+        crate::api_files::thumbnail_response(&st, "f").await.unwrap();
+        let png: Option<Vec<u8>> = db.call(|c| Ok(c.query_row("SELECT thumbnail_png FROM files WHERE id = 'f' AND thumbnail_version = version", [], |r| r.get(0))?)).await.unwrap();
+        assert!(png.is_some(), "a thumbnail of the current parts");
+        let vid = checkpoint["id"].as_str().unwrap().to_string();
+        let _ = crate::api_versions::restore(State(st.clone()), user(), Path(("f".into(), vid))).await.unwrap();
+        assert_eq!(name(&crate::api_files::current_doc_json(&st, "f").await.unwrap()), "saved");
+        let before: String = db.call(|c| Ok(c.query_row("SELECT document FROM file_versions WHERE file_id = 'f' AND label = 'Before restore'", [], |r| r.get(0))?)).await.unwrap();
+        assert_eq!(name(&before), "current");
+        // A late whole-document write from the closed room loses to the restore.
+        db.call(|c| Ok(crate::doc_store::write_whole(c, "f", r#"{"nodes":[]}"#, 2)?)).await.unwrap();
+        assert_eq!(name(&db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap()), "saved");
+        let (room, me, _socket) = open().await;
+        room.client_ops(me, 1, vec![Op::update1("r:1", "name", json!("after restore"))]).await;
+        assert!(rooms.shutdown_all().await);
+        let stored = db.call(|c| crate::doc_store::read_json(c, "f")).await.unwrap();
+        assert_eq!((name(&stored), name(&whole().await)), ("after restore".into(), "after restore".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

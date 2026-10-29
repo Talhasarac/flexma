@@ -123,6 +123,11 @@ impl Sync {
         }
     }
 
+    /// Every local op not yet acknowledged, oldest first.
+    pub fn unacked(&self) -> impl Iterator<Item = &Op> {
+        self.inflight.iter().flat_map(|(_, _, ops)| ops).chain(&self.outbox)
+    }
+
     /// After a reconnect: everything not yet acknowledged, to be re-applied on
     /// top of the fresh server snapshot and resent.
     pub fn take_unacked(&mut self) -> Vec<Op> {
