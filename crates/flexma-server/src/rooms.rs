@@ -24,7 +24,31 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Clone, Debug)]
 pub enum Msg {
     Text(Arc<str>),
-    Doc(Arc<str>),
+    Doc(Arc<DocFrame>),
+}
+
+/// A document frame. Joins share them until the document changes (see
+/// `Frames`), so a file opened again is neither rebuilt nor recompressed.
+#[derive(Debug)]
+pub struct DocFrame {
+    json: String,
+    zlib: std::sync::OnceLock<axum::body::Bytes>,
+}
+
+impl DocFrame {
+    pub fn new(json: String) -> Arc<DocFrame> {
+        Arc::new(DocFrame { json, zlib: std::sync::OnceLock::new() })
+    }
+
+    /// The compressed frame, if a socket already made it.
+    pub fn compressed(&self) -> Option<axum::body::Bytes> {
+        self.zlib.get().cloned()
+    }
+
+    /// Compress it (tens of milliseconds for a big file: not on the async workers).
+    pub fn compress(&self) -> axum::body::Bytes {
+        self.zlib.get_or_init(|| crate::ws::zlib(self.json.as_bytes()).into()).clone()
+    }
 }
 
 impl std::ops::Deref for Msg {
@@ -33,8 +57,28 @@ impl std::ops::Deref for Msg {
     /// The frame's JSON (for `Doc`, the document before compression).
     fn deref(&self) -> &str {
         match self {
-            Msg::Text(t) | Msg::Doc(t) => t,
+            Msg::Text(t) => t,
+            Msg::Doc(f) => &f.json,
         }
+    }
+}
+
+/// A room's document frames as of `version`: the first part for each page
+/// someone opened, each page's frame and the whole document.
+#[derive(Default)]
+struct Frames {
+    version: u64,
+    heads: HashMap<NodeId, Arc<DocFrame>>,
+    pages: HashMap<NodeId, Arc<DocFrame>>,
+    whole: Option<Arc<DocFrame>>,
+}
+
+/// Run CPU-heavy work without holding up the other tasks on this async
+/// worker (the server may have only one): they move to another thread.
+fn heavy<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
     }
 }
 
@@ -663,10 +707,19 @@ impl Rooms {
             let (stored, paint_seq) = loaded.ok_or_else(|| AppError::not_found("file"))?;
             let version = stored.version;
             let part_hashes = stored.parts.iter().map(|(name, json)| (name.clone(), hash_str(json))).collect();
-            let mut doc = Document::from_json(&stored.json).map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
-            components::sync_all(&mut doc);
-            flexma_doc::styles::sync_all(&mut doc);
-            layout::relayout_all(&mut doc);
+            // Most of a big file's open (about a second for 10 MB on one
+            // core): off the async workers, so other files keep going.
+            let json = stored.json;
+            let doc = tokio::task::spawn_blocking(move || {
+                let mut doc = Document::from_json(&json)?;
+                components::sync_all(&mut doc);
+                flexma_doc::styles::sync_all(&mut doc);
+                layout::relayout_all(&mut doc);
+                Ok::<_, String>(doc)
+            })
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?
+            .map_err(|e| AppError::internal(format!("corrupt document {file_id}: {e}")))?;
 
             let mut map = self.rooms.lock().unwrap();
             if let Some(h) = map.get(file_id) {
@@ -695,6 +748,7 @@ impl Rooms {
                 stats: stats.clone(),
                 part_hashes,
                 saved_parts: false,
+                frames: Frames::default(),
             };
             let actor = tokio::spawn(room.run(rx));
             self.actors.lock().unwrap().push((file_id.to_string(), actor));
@@ -733,6 +787,7 @@ struct Room {
     part_hashes: HashMap<String, u64>,
     /// This room saved parts, so on closing it stores the whole document too.
     saved_parts: bool,
+    frames: Frames,
 }
 
 /// A part's JSON fingerprint, to tell which parts a save must write (kept
@@ -869,26 +924,38 @@ impl Room {
                 });
                 // The document is most of what a client downloads on open: as
                 // its own frame it goes compressed (about a tenth of the size).
-                let frames = if !info.doc_frame {
+                if self.frames.version != self.version {
+                    self.frames = Frames { version: self.version, ..Frames::default() };
+                }
+                let sent = if !info.doc_frame {
                     init["doc"] = json!(self.doc.snapshot());
-                    Vec::new()
+                    out.try_send(msg(init)).is_ok()
                 } else if let Some(first) = info.stream_pages.filter(|_| self.doc.pages().len() <= MAX_STREAMED_PAGES) {
                     // The page they open (with what every page needs) comes
                     // first and shows at once; the other pages follow. All are
                     // queued now, so no ops come between them.
                     let pages = self.doc.pages();
                     let first = first.filter(|p| pages.contains(p)).unwrap_or_else(|| pages[0].clone());
-                    let (head, rest) = flexma_doc::parts::stream(&self.doc, &first);
-                    let frames: Vec<Msg> = std::iter::once(head).chain(rest).map(|f| Msg::Doc(Arc::from(f))).collect();
+                    let doc = &self.doc;
+                    let head = self.frames.heads.entry(first.clone()).or_insert_with(|| heavy(|| DocFrame::new(flexma_doc::parts::head(doc, &first)))).clone();
                     init["docFrame"] = json!("zlib");
                     init["page"] = json!(first);
-                    init["parts"] = json!(frames.len());
-                    frames
+                    init["parts"] = json!(pages.len());
+                    // Out before the others are built, so its socket can send it meanwhile.
+                    out.try_send(msg(init)).is_ok() && out.try_send(Msg::Doc(head)).is_ok() && {
+                        let cached = &mut self.frames.pages;
+                        let rest: Vec<Arc<DocFrame>> = heavy(|| {
+                            pages.iter().filter(|p| **p != first).map(|p| cached.entry(p.clone()).or_insert_with(|| DocFrame::new(flexma_doc::parts::page_frame(doc, p))).clone()).collect()
+                        });
+                        rest.into_iter().all(|f| out.try_send(Msg::Doc(f)).is_ok())
+                    }
                 } else {
                     init["docFrame"] = json!("zlib");
-                    vec![Msg::Doc(Arc::from(self.doc.to_json()))]
+                    let doc = &self.doc;
+                    let whole = self.frames.whole.get_or_insert_with(|| heavy(|| DocFrame::new(doc.to_json()))).clone();
+                    out.try_send(msg(init)).is_ok() && out.try_send(Msg::Doc(whole)).is_ok()
                 };
-                if out.try_send(msg(init)).is_err() || frames.into_iter().any(|f| out.try_send(f).is_err()) {
+                if !sent {
                     return;
                 }
                 self.broadcast(msg(json!({ "t": "presence", "peer": peer })), None);
@@ -1788,12 +1855,52 @@ mod access_tests {
         let init: Value = serde_json::from_str(&next(&mut rx).await.unwrap()).unwrap();
         assert_eq!((init["page"].as_str(), init["parts"].as_u64()), (Some("p:2"), Some(2)));
         let Some(Msg::Doc(first)) = next(&mut rx).await else { panic!("the first part") };
-        let first = Document::from_json(&first).unwrap();
+        let first = Document::from_json(&first.json).unwrap();
         assert!(first.contains("b:1") && !first.contains("a:1") && first.contains("0:1"), "page two, and every page in the list");
         let Some(Msg::Doc(rest)) = next(&mut rx).await else { panic!("page one") };
-        let part: flexma_doc::parts::PagePart = serde_json::from_str(&rest).unwrap();
+        let part: flexma_doc::parts::PagePart = serde_json::from_str(&rest.json).unwrap();
         assert_eq!(part.page, "0:1");
         assert_eq!(part.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["a:1"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Opening a file again reuses its frames (and their compression) until
+    /// the document changes; after a change, frames show it.
+    #[tokio::test]
+    async fn joins_share_frames_until_the_document_changes() {
+        let (db, dir) = setup("frames").await;
+        let rooms = Rooms::new(db.clone());
+        let room = rooms.get("f").await.unwrap();
+        let info = || JoinInfo { user_id: "u".into(), name: "U".into(), color: "#000".into(), role: Role::Editor, credential: Credential::Session(sha256_hex("s")), doc_frame: true, stream_pages: Some(None) };
+        async fn frames(rx: &mut mpsc::Receiver<Msg>) -> Vec<Arc<DocFrame>> {
+            let init: Value = serde_json::from_str(&next(rx).await.unwrap()).unwrap();
+            let mut out = Vec::new();
+            for _ in 0..init["parts"].as_u64().unwrap() {
+                let Some(Msg::Doc(f)) = next(rx).await else { panic!("a document frame") };
+                out.push(f);
+            }
+            out
+        }
+        // This one stays connected to edit.
+        let (out, mut mine) = mpsc::channel(CLIENT_QUEUE);
+        let me = room.join(info(), out).await.unwrap();
+        let first = frames(&mut mine).await;
+        first[0].compress();
+        let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
+        room.join(info(), out).await.unwrap();
+        let again = frames(&mut rx).await;
+        assert!(first.iter().zip(&again).all(|(a, b)| Arc::ptr_eq(a, b)), "the same frames");
+        assert!(again[0].compressed().is_some(), "compressed once");
+        let mut a = flexma_doc::Node::new("a:1", flexma_doc::NodeType::Frame);
+        a.parent = Some("0:1".into());
+        a.name = "added".into();
+        room.client_ops(me, 1, vec![Op::Create { node: a }]).await;
+        let (out, mut rx) = mpsc::channel(CLIENT_QUEUE);
+        room.join(info(), out).await.unwrap();
+        let after = frames(&mut rx).await;
+        drop(mine);
+        assert!(!Arc::ptr_eq(&first[0], &after[0]));
+        assert!(after[0].json.contains("added"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1810,15 +1917,15 @@ mod access_tests {
         assert_eq!(init["t"], "init");
         assert_eq!(init["docFrame"], "zlib");
         assert!(init.get("doc").is_none());
-        let Some(Msg::Doc(json)) = next(&mut rx).await else { panic!("the document frame") };
-        let doc = Document::from_json(&json).unwrap();
+        let Some(Msg::Doc(frame)) = next(&mut rx).await else { panic!("the document frame") };
+        let doc = Document::from_json(&frame.json).unwrap();
         assert!(!doc.pages().is_empty());
         // What the writer sends unpacks to the same JSON.
-        let packed = crate::ws::zlib(json.as_bytes());
-        assert!(packed.len() < json.len());
+        let packed = frame.compress();
+        assert!(packed.len() < frame.json.len());
         let mut back = String::new();
         std::io::Read::read_to_string(&mut flate2::read::ZlibDecoder::new(&packed[..]), &mut back).unwrap();
-        assert_eq!(back, &*json);
+        assert_eq!(back, frame.json);
         let _ = std::fs::remove_dir_all(dir);
     }
 

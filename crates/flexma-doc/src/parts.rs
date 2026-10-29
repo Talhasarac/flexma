@@ -156,10 +156,18 @@ fn subtree<'a>(doc: &'a Document, id: &str, out: &mut Vec<&'a Node>) {
 /// first part has them without their neighbours, so laying it out can move
 /// them, and the page's own copy puts them back where the server has them.
 pub fn stream(doc: &Document, first: &str) -> (String, Vec<String>) {
-    let parts = split(doc);
-    let head = format!(r#"{{"nodes":{}}}"#, to_json(&first_part(doc, &parts, first)));
-    let rest = parts.pages.iter().filter(|(p, _)| p != first).map(|(p, _)| page_part_json(p, &page_nodes(doc, p))).collect();
-    (head, rest)
+    let rest = doc.pages().iter().filter(|p| *p != first).map(|p| page_frame(doc, p)).collect();
+    (head(doc, first), rest)
+}
+
+/// The first part as a document (see `stream`).
+pub fn head(doc: &Document, first: &str) -> String {
+    format!(r#"{{"nodes":{}}}"#, to_json(&first_part(doc, &split(doc), first)))
+}
+
+/// A page's frame after the first part (see `stream`).
+pub fn page_frame(doc: &Document, page: &str) -> String {
+    page_part_json(page, &page_nodes(doc, page))
 }
 
 #[cfg(test)]

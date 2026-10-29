@@ -62,7 +62,7 @@ fn style<'a>(doc: &'a Document, id: &Option<NodeId>, ty: StyleType) -> Option<&'
 
 /// Copy a layer's style values in. Returns true if anything changed.
 fn resolve(doc: &mut Document, id: &str) -> bool {
-    let Some(node) = doc.get(id).cloned() else { return false };
+    let Some(node) = doc.get(id) else { return false };
     let mut next = node.clone();
     if let Some(s) = style(doc, &node.fill_style_id, StyleType::Fill) {
         next.fills = s.fills.clone();
@@ -85,7 +85,9 @@ fn resolve(doc: &mut Document, id: &str) -> bool {
             }
         }
     }
-    if serde_json::to_value(&next).ok() == serde_json::to_value(&node).ok() {
+    // Compared field by field: every layer with a style goes through here
+    // when a file opens, and converting both to JSON doubled the open.
+    if next == *node {
         return false;
     }
     doc.replace_unchecked(next);

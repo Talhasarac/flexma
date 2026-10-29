@@ -192,10 +192,15 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
                             break;
                         }
                     }
-                    Some(Msg::Doc(json)) => {
-                        // Tens of milliseconds for a big file: not on the async workers.
-                        let Ok(bytes) = tokio::task::spawn_blocking(move || zlib(json.as_bytes())).await else { break };
-                        if sink.send(Message::Binary(bytes.into())).await.is_err() {
+                    Some(Msg::Doc(frame)) => {
+                        let bytes = match frame.compressed() {
+                            Some(b) => b,
+                            None => match tokio::task::spawn_blocking(move || frame.compress()).await {
+                                Ok(b) => b,
+                                Err(_) => break,
+                            },
+                        };
+                        if sink.send(Message::Binary(bytes)).await.is_err() {
                             break;
                         }
                     }
