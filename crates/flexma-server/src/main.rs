@@ -215,6 +215,7 @@ async fn main() {
         .layer(DefaultBodyLimit::max(cfg.max_upload_bytes + 1024 * 1024));
 
     let index = cfg.web_dir.join("index.html");
+    rooms::set_web_index(&index);
     let app = Router::new()
         .nest("/api", api)
         .route("/mcp", post(mcp::handle).get(mcp::get_not_allowed).delete(mcp::get_not_allowed))

@@ -47,9 +47,47 @@ pub struct SocketQuery {
     pages: Option<String>,
     #[serde(default)]
     page: Option<String>,
+    /// The editor's build (`rooms::web_build`); "" from a dev server.
+    #[serde(default)]
+    build: Option<String>,
 }
 
+/// Which editor build a socket comes from, against the one being served.
+/// Two builds can disagree on automatic fixes (text measuring) and correct
+/// each other forever, so only the served one edits.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Build {
+    /// The one being served, or nothing to compare (no web app, a dev server).
+    Current,
+    /// Another one: it delivers its edits and reloads, or is stopped.
+    Other,
+    /// From before editors sent their build: stopped at once.
+    Unknown,
+}
+
+impl Build {
+    /// `sent` by an editor, against the `served` one.
+    fn of(served: &str, sent: Option<&str>) -> Build {
+        match sent {
+            _ if served.is_empty() => Build::Current,
+            None => Build::Unknown,
+            Some(b) if b.is_empty() || b == served => Build::Current,
+            Some(_) => Build::Other,
+        }
+    }
+}
+
+/// What an editor from another build gets before its socket closes.
+const OUTDATED: &str = r#"{"t":"error","error":"Flexma was updated. Reload the page to keep editing.","fatal":true}"#;
+
+/// How long an editor from another build may stay to deliver its edits.
+const OUTDATED_GRACE: Duration = Duration::from_secs(15);
+
 impl SocketQuery {
+    fn build(&self) -> Build {
+        Build::of(&crate::rooms::web_build(), self.build.as_deref())
+    }
+
     fn doc_frame(&self) -> bool {
         self.doc.as_deref() == Some("zlib")
     }
@@ -91,9 +129,10 @@ pub async fn handler(
     let fid = file_id.clone();
     let (_, _, role) = st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer)).await?;
     let room = st.rooms.get(&file_id).await?;
+    let build = q.build();
     Ok(ws.max_message_size(64 * 1024 * 1024).on_upgrade(move |socket| async move {
         let info = JoinInfo { user_id: user.id, name: user.name, color: user.color, role, credential, doc_frame: q.doc_frame(), stream_pages: q.stream_pages() };
-        run(socket, room, info).await;
+        run(socket, room, info, build).await;
     }))
 }
 
@@ -107,6 +146,7 @@ pub async fn share_handler(
     let t = token.clone();
     let (file_id, _) = st.db.call(move |c| crate::api_share::resolve(c, &t)).await?;
     let room = st.rooms.get(&file_id).await?;
+    let build = q.build();
     Ok(ws.max_message_size(1024 * 1024).on_upgrade(move |socket| async move {
         let info = JoinInfo {
             user_id: format!("guest:{}", crate::db::random_string(6)),
@@ -117,13 +157,19 @@ pub async fn share_handler(
             doc_frame: q.doc_frame(),
             stream_pages: q.stream_pages(),
         };
-        run(socket, room, info).await;
+        run(socket, room, info, build).await;
     }))
 }
 
-pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info: JoinInfo) {
+pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info: JoinInfo, build: Build) {
     let (mut sink, mut stream) = socket.split();
+    if build == Build::Unknown {
+        let _ = sink.send(Message::Text(OUTDATED.into())).await;
+        let _ = sink.close().await;
+        return;
+    }
     let (out_tx, mut out_rx) = mpsc::channel::<Msg>(crate::rooms::CLIENT_QUEUE);
+    let own = out_tx.clone();
     let client_id = match room.join(info, out_tx).await {
         Ok(id) => id,
         Err(e) => {
@@ -135,7 +181,7 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
     };
 
     // Writer: room -> socket, plus keepalive pings.
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(Duration::from_secs(25));
         ping.tick().await;
         loop {
@@ -165,8 +211,21 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
         let _ = sink.close().await;
     });
 
-    // Reader: socket -> room.
-    while let Some(Ok(m)) = stream.next().await {
+    // Reader: socket -> room. Another build gets a while to deliver its edits.
+    let deadline = (build == Build::Other).then(|| tokio::time::Instant::now() + OUTDATED_GRACE);
+    let mut outdated = false;
+    loop {
+        let next = match deadline {
+            Some(at) => tokio::select! {
+                m = stream.next() => m,
+                _ = tokio::time::sleep_until(at) => {
+                    outdated = true;
+                    break;
+                }
+            },
+            None => stream.next().await,
+        };
+        let Some(Ok(m)) = next else { break };
         let text = match m {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -212,6 +271,25 @@ pub(crate) async fn run(socket: WebSocket, room: crate::rooms::RoomHandle, info:
         }
     }
     room.leave(client_id);
+    if outdated {
+        let _ = own.send(Msg::Text(OUTDATED.into())).await;
+        drop(own);
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut writer).await;
+    }
     writer.abort();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_served_build_edits() {
+        let served = "index-B.js";
+        assert!(Build::of(served, Some("index-B.js")) == Build::Current);
+        assert!(Build::of(served, Some("index-A.js")) == Build::Other);
+        assert!(Build::of(served, None) == Build::Unknown, "an editor from before builds were sent");
+        assert!(Build::of(served, Some("")) == Build::Current, "a dev server's editor");
+        assert!(Build::of("", None) == Build::Current, "no web app to compare with");
+    }
+}

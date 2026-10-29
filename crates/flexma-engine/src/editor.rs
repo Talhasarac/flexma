@@ -259,8 +259,14 @@ impl Editor {
     /// Merge a page that streamed in after the first part. Its instances
     /// expand, styles apply and auto layout runs, as when a file loads.
     pub fn merge_page(&mut self, json: &str) -> Result<NodeId, String> {
-        let part: flexma_doc::parts::PagePart = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let mut part: flexma_doc::parts::PagePart = serde_json::from_str(json).map_err(|e| e.to_string())?;
         let page = part.page;
+        // The part left the server before any of our unacknowledged edits
+        // reached it (and can repeat layers we have: components come again
+        // with their page). Layers those edits touched keep our copy, and
+        // ones we deleted stay deleted, with what was inside them.
+        let touched: HashSet<&str> = self.sync.unacked().map(Op::target).collect();
+        part.nodes.retain(|n| !touched.contains(n.id.as_str()));
         let mut changed = self.doc.merge_nodes(part.nodes);
         let synced = components::sync_instances(&mut self.doc, &changed, &[]);
         changed.extend(synced);
@@ -285,21 +291,8 @@ impl Editor {
         Ok(page)
     }
 
-    /// Every page is here. The frames left the server before our edits
-    /// made since reached it, and can replace layers those edits changed
-    /// (components come again with their page): our unacknowledged edits
-    /// are applied again, in order. Then the paint state loads.
+    /// Every page is here: the paint state can load.
     fn finish_stream(&mut self) {
-        let sent: Vec<Op> = self.sync.unacked().cloned().collect();
-        if !sent.is_empty() {
-            let mut eff = OpEffect::default();
-            for op in &sent {
-                if let Ok(e) = self.doc.apply(op) {
-                    eff.merge(e);
-                }
-            }
-            self.derive(&mut eff);
-        }
         if let Some(state) = self.waiting_paint.take() {
             self.load_paint_state(state);
         }

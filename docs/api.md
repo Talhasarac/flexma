@@ -180,11 +180,13 @@ There is no limit on the number of tokens or concurrent MCP connections.
 JSON text frames, plus the document as one binary frame when asked for.
 
 Server → client:
-- `{ t: "init", clientId, version, role, doc: DocSnapshot, peers: [peer] }`. With `?doc=zlib` on the socket URL, `init` has `docFrame: "zlib"` instead of `doc`, and the next frame is binary: the `DocSnapshot` JSON compressed with zlib (about a tenth of its size). Adding `&pages=stream` (and optionally `&page=<pageId>`) splits it: `init` also has `page` and `parts: n`, the first binary frame is a `DocSnapshot` with that page, every page node, the styles and every component (with the frames they sit in), and the next `n - 1` frames are the other pages, `{ page, nodes }` each, before any other message. A page's `nodes` include its components again; they replace the copies from the first frame. The editor leaves `&pages=stream` out when it reconnects with edits the server hasn't acknowledged, so it can replay them on the whole document. The editor asks for both.
+- `{ t: "init", clientId, version, role, doc: DocSnapshot, peers: [peer] }`. With `?doc=zlib` on the socket URL, `init` has `docFrame: "zlib"` instead of `doc`, and the next frame is binary: the `DocSnapshot` JSON compressed with zlib (about a tenth of its size). Adding `&pages=stream` (and optionally `&page=<pageId>`) splits it: `init` also has `page` and `parts: n`, the first binary frame is a `DocSnapshot` with that page, every page node, the styles and every component (with the frames they sit in), and the next `n - 1` frames are the other pages, `{ page, nodes }` each, before any other message. A page's `nodes` include its components again; they replace the copies from the first frame. The editor leaves `&pages=stream` out when it reconnects with edits the server hasn't acknowledged, so it can replay them on the whole document. The editor asks for both. `init.build` names the web build being served (its main script, `index-<hash>.js`).
 - `{ t: "ops", from: clientId, batch: n, ops: [op] }` — `from` equal to your clientId means it is the ack of your batch `n`
 - `{ t: "reject", batch: n, error }` (followed by corrective `ops` from `"server"`)
 - `{ t: "presence", peer }`, `{ t: "leave", clientId }`
-- `{ t: "error", error, fatal? }` (`fatal`: stop reconnecting, e.g. the share link was turned off)
+- `{ t: "error", error, fatal? }` (`fatal`: stop reconnecting, e.g. the share link was turned off, or the editor is another build)
+
+The web editor sends `&build=<its main script>`. A socket without `build` gets a fatal error at once, and one from another build is closed with one after 15 seconds, time to deliver its edits (the editor reloads itself meanwhile): two builds can correct each other's automatic fixes forever. An empty `build` (a dev server) is let in.
 
 Client → server:
 - `{ t: "ops", batch: n, ops: [op] }`

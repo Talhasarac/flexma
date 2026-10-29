@@ -381,6 +381,24 @@ pub struct RoomHandle {
     stats: Arc<Stats>,
 }
 
+/// The web app's `index.html`, set once at startup.
+static WEB_INDEX: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_web_index(path: &std::path::Path) {
+    let _ = WEB_INDEX.set(path.to_path_buf());
+}
+
+/// The web app being served, named by its main script (`index-<hash>.js`,
+/// which changes with any part of it), or "" without one. Read on each use,
+/// so it follows the files. Editors from another build are stopped (see
+/// `ws::Build`), and `init` carries it so one left open across a deploy
+/// reloads.
+pub fn web_build() -> String {
+    let Some(html) = WEB_INDEX.get().and_then(|p| std::fs::read_to_string(p).ok()) else { return String::new() };
+    let script = html.split('"').find(|s| s.contains("/assets/index-") && s.ends_with(".js"));
+    script.and_then(|s| s.rsplit('/').next()).unwrap_or_default().to_string()
+}
+
 fn closed() -> AppError {
     AppError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "document is reloading, please retry")
 }
@@ -847,6 +865,7 @@ impl Room {
                     "version": self.version,
                     "role": info.role.as_str(),
                     "peers": self.peers(),
+                    "build": web_build(),
                 });
                 // The document is most of what a client downloads on open: as
                 // its own frame it goes compressed (about a tenth of the size).

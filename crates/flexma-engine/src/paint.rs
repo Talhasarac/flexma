@@ -873,6 +873,11 @@ impl PaintState {
     }
 
     /// Messages to send to the room (JSON strings), oldest first.
+    /// Our strokes still on their way: being painted, unsent or unacknowledged.
+    pub fn in_flight(&self) -> bool {
+        self.active.is_some() || !self.pending.is_empty() || !self.outbox.is_empty()
+    }
+
     pub fn take_outgoing(&mut self) -> Vec<String> {
         if let Some(a) = &self.active {
             if a.stroke.points.len() > self.live_sent {

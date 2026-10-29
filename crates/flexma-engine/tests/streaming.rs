@@ -146,6 +146,30 @@ fn edits_sent_while_pages_arrive_survive_their_page_frame() {
 }
 
 #[test]
+fn a_layer_moved_into_a_restored_frame_stays_there() {
+    let mut server = sample();
+    add(&mut server, "frame", NodeType::Frame, "0:1");
+    add(&mut server, "rect", NodeType::Rectangle, "0:1");
+    server.clear_fresh();
+    let mut ed = Editor::new(None, None);
+    let mut sent = String::new();
+    open_streamed(&mut ed, &server, "client", |ed| {
+        ed.set_selection(vec!["frame".into()]);
+        ed.delete_selection();
+        ed.undo();
+        ed.move_layer("rect", "frame", 0);
+        sent = ed.sync.flush().unwrap();
+    });
+    assert_eq!(ed.doc.parent_of("rect"), Some("frame"));
+    let mut after = server.clone();
+    let batch: serde_json::Value = serde_json::from_str(&sent).unwrap();
+    for op in serde_json::from_value::<Vec<Op>>(batch["ops"].clone()).unwrap() {
+        after.apply(&op).unwrap();
+    }
+    assert_eq!(after.parent_of("rect"), Some("frame"));
+}
+
+#[test]
 fn undoing_a_component_delete_survives_its_page_frame() {
     let mut server = sample();
     add(&mut server, "c:2", NodeType::Component, "p:2");

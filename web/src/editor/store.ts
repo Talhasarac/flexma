@@ -15,6 +15,11 @@ const BRUSH_KEY = (eraser: boolean) => (eraser ? 'flexma:eraser' : 'flexma:brush
 /** The pen's pressure curve, per browser (it's about the user's hand and tablet). */
 const CURVE_KEY = 'flexma:pressureCurve';
 const PRESENCE_INTERVAL_MS = 50;
+/** This page's build: its main script, which the server names its build by
+ * too (`init.build`). Empty from a dev server. */
+const OWN_BUILD = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/index-"]')?.getAttribute('src')?.split('/').pop() ?? '';
+/** The build this tab last reloaded for, so a reload that can't help isn't repeated. */
+const RELOADED_KEY = 'flexma:reloadedFor';
 
 interface UiState {
   tool: Tool;
@@ -74,6 +79,12 @@ export class EditorStore {
   private pagesLeft = 0;
   /** The socket URL `connect` was given, for reconnecting. */
   private url = '';
+  /** Whether this socket's document has loaded; nothing is sent before, so
+   * edits left from the last socket are queued again first. */
+  private live = false;
+  /** The server's build when it isn't this page's: the tab reloads once its
+   * edits are in (two builds can correct each other's automatic fixes forever). */
+  private outdated = '';
   onFatal: ((message: string) => void) | null = null;
   onReject: ((message: string) => void) | null = null;
   onReload: (() => void) | null = null;
@@ -273,6 +284,7 @@ export class EditorStore {
   connect(url: string) {
     this.url = url;
     this.closed = false;
+    this.live = false;
     // rAF pauses in background tabs; a timer keeps ops and presence flowing.
     if (!this.flushTimer) this.flushTimer = window.setInterval(() => this.flush(), 50);
     this.status = 'connecting';
@@ -283,7 +295,7 @@ export class EditorStore {
     // acknowledged, it comes whole, so they're replayed on all of it.
     const page = this.loadedOnce ? this.engine.current_page() : '';
     const stream = this.engine.has_unacked() ? '' : '&pages=stream' + (page ? '&page=' + encodeURIComponent(page) : '');
-    const params = 'doc=zlib' + stream;
+    const params = 'doc=zlib' + stream + '&build=' + encodeURIComponent(OWN_BUILD);
     const ws = new WebSocket(url + (url.includes('?') ? '&' : '?') + params);
     ws.binaryType = 'arraybuffer';
     this.socket = ws;
@@ -309,6 +321,26 @@ export class EditorStore {
     };
   }
 
+  /** Load the served build, once per build: if the page that comes back is
+   * still another build, this one stops instead of editing with it. */
+  private reloadForUpdate() {
+    const build = this.outdated;
+    this.outdated = '';
+    let again = true;
+    try {
+      again = sessionStorage.getItem(RELOADED_KEY) !== build;
+      sessionStorage.setItem(RELOADED_KEY, build);
+    } catch {
+      again = false;
+    }
+    if (again) {
+      window.location.reload();
+      return;
+    }
+    this.close();
+    this.onFatal?.('Flexma was updated. Reload the page to keep editing.');
+  }
+
   close() {
     this.closed = true;
     window.clearInterval(this.flushTimer);
@@ -324,6 +356,9 @@ export class EditorStore {
     this.clientId = String(msg.clientId);
     this.role = String(msg.role);
     load(this.role !== 'viewer');
+    this.live = true;
+    const build = String(msg.build ?? '');
+    this.outdated = build && OWN_BUILD && build !== OWN_BUILD ? build : '';
     void this.loadPaint();
     this.activeAt.clear();
     this.setPeers(((msg.peers as Peer[]) ?? []).filter((p) => p.clientId !== this.clientId));
@@ -541,7 +576,11 @@ export class EditorStore {
   flush(force = false) {
     const now = performance.now();
     const ws = this.socket;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !this.live) return;
+    if (this.outdated && !this.engine.has_unacked() && !this.engine.paint_in_flight()) {
+      this.reloadForUpdate();
+      return;
+    }
     if (force || now - this.lastSend >= SEND_INTERVAL_MS) {
       const out = this.engine.take_outgoing();
       if (out) {

@@ -770,6 +770,11 @@ impl FlexmaEditor {
         self.ed.paint.painting()
     }
 
+    /// Whether some of our strokes haven't reached the room yet.
+    pub fn paint_in_flight(&self) -> bool {
+        self.ed.paint.in_flight()
+    }
+
     /// Paint messages to send to the room, newline-separated (empty: none).
     pub fn take_paint_messages(&mut self) -> String {
         self.ed.paint.take_outgoing().join("\n")
