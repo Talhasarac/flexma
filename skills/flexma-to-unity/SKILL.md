@@ -62,6 +62,7 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 ```
 
 - It uses the saved token and returns a summary: the prefabs, warnings, and each frame's match with Flexma.
+- **Import only the frames you need, a few at a time.** Each run downloads, builds and checks every frame it names: a whole file at once takes minutes and gigabytes of editor memory (a 20-frame run has crashed the editor), and a problem is harder to tell apart. Other frames' prefabs stay as they are, and their images are kept.
 - Big imports can outlast the tool call. The import keeps running; read `Library/FlexmaImport/FILE_ID/report.txt` when it's done.
 - Output goes to `Assets/Flexma/FILE_ID/`:
   - `Screens/<frame>.prefab`
@@ -120,7 +121,8 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 
 ### 6. Re-import after design changes
 
-- Run the same call again. Layers are matched by their Flexma id, so the prefab updates in place.
+- Import again **only the frames the change touches**: the frame that holds the changed layer, or, for a changed component, the frames with its instances (`find_nodes` finds them). Never the whole file for one change.
+- Layers are matched by their Flexma id, so the prefab updates in place.
   - Components and child objects added in Unity stay.
   - Layers deleted in Flexma are removed, with anything added under them.
 - Run the check again and compare with the last numbers.
@@ -128,18 +130,18 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 
 ### 7. After the importer changes
 
-When this skill's scripts change (a Flexma update) or the export rules do, earlier imports keep their old images until imported again:
+When this skill's scripts change (a Flexma update) or the export rules do, earlier imports keep their old images until their frames are imported again. That's fine: don't re-import the whole file for it.
 
 1. Copy every script over the project's copies (step 1) and let Unity compile.
-2. Import **every frame of the file** in one run, so all prefabs and images follow the new rules and images nothing uses any more are deleted.
-3. Compare the `images:` line and each frame's match with the last import.
-4. Render the game's own screens again (step 5). Game code may depend on how a layer was drawn: a layer that became plain has no sprite any more.
+2. Re-import a frame when you next work on it, or when the user sees a problem the update fixes there: that frame (and frames with the same problem), a few at a time. Images nothing uses any more are deleted on every import, whichever frames it covers.
+3. Compare the `images:` line and those frames' match with the last import.
+4. Render the game's screens built from those frames again (step 5). Game code may depend on how a layer was drawn: a layer that became plain has no sprite any more.
 
 ## Moving a code-built UI to the prefabs
 
 When the game already builds its UI in code (a UI kit, `new GameObject` + `Image`), replace it screen by screen:
 
-1. **Import every frame first**, including component sheets and frames that only show states ("Components", "Missing states"); their layers are where states and templates come from.
+1. **Import each screen's frames when you get to that screen**: its own frame, and the component sheets and state frames ("Components", "Missing states") it takes states and templates from.
 2. **Keep the game's side.** Keep the class names, public methods, events and fields other code and editor checks use (they may find fields by reflection). Only the building code changes: build from `Load`/`Take` instead of `new GameObject`.
 3. **Keep the game's strings.** Use its localized strings and number formats over the design's sample words; they have translations. New strings go in untranslated in the project's source language; never edit translation tables unless asked.
 4. **Gaps in the design** (a state or widget the game needs that no frame shows) reuse the closest piece of the design's kit, cloned and filled, and get listed for the user to design. Don't draw new looks in code.
@@ -212,8 +214,8 @@ These make imports exact and keep them working as the game changes. The `flexma`
 | A text uses TextMeshPro's default font | Its font isn't in the Flexma workspace; add it in Flexma and import again |
 | Everything is a little too big or small in the game | The Canvas Scaler's reference resolution isn't the frame's size |
 | Dark text looks greenish in the game | The canvas lacks Vertex Color Always In Gamma Color Space |
-| A ghost of the design's backdrop shows in a scrim or panel | Old importer or an old import; update the scripts and import every frame again (step 7) |
-| Many near-identical images, or big images for scrims | Same: update the scripts and import every frame again (step 7); unused images are deleted |
+| A ghost of the design's backdrop shows in a scrim or panel | Old importer or an old import; update the scripts and import that frame again (step 7) |
+| Many near-identical images, or big images for scrims | Same: update the scripts and import those frames again (step 7); unused images are deleted |
 | `The variable m_Sprite of Image has not been assigned` in game code | The code reads the sprite of a layer that is now plain; use its `color`, or design the piece as plain rectangles |
 | Stray shapes where a dim or spotlight should be flat | Code stretched an image cut to a shape into other boxes; design it as plain rectangles |
 | A screen matches below ~99% | Read the "differs at" layers and the side-by-side; check warnings |
