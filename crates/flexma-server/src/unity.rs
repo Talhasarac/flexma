@@ -537,18 +537,35 @@ fn correct_for_linear(pm: &Pixmap, canvas: &Pixmap, px: i32, py: i32) -> Vec<(us
                 continue;
             }
             let (pc, bc) = (p.demultiply(), b.demultiply());
-            let af = a as f32 / 255.0;
-            let fix = |c: u8, bg: u8| {
-                let (c, bg) = (c as f32 / 255.0, bg as f32 / 255.0);
-                let target = Color::srgb_to_linear(c * af + bg * (1.0 - af));
-                let want = ((target - (1.0 - af) * Color::srgb_to_linear(bg)) / af).clamp(0.0, 1.0);
-                (Color::linear_to_srgb(want) * 255.0).round() as u8
-            };
-            let c = ColorU8::from_rgba(fix(pc.red(), bc.red()), fix(pc.green(), bc.green()), fix(pc.blue(), bc.blue()), a);
-            out.push((i, c.premultiply()));
+            let (c, a) = linear_match([pc.red(), pc.green(), pc.blue()], [bc.red(), bc.green(), bc.blue()], a);
+            out.push((i, ColorU8::from_rgba(c[0], c[1], c[2], a).premultiply()));
         }
     }
     out
+}
+
+/// The color and alpha (sRGB, 0–255) that Unity's linear blend turns into
+/// what the design's sRGB blend makes of `color` at `alpha` over `backdrop`.
+/// Usually only the color changes; a dark see-through layer over something
+/// bright would need a color darker than black, so its alpha goes up too.
+fn linear_match(color: [u8; 3], backdrop: [u8; 3], alpha: u8) -> ([u8; 3], u8) {
+    use flexma_doc::Color;
+    let a0 = alpha as f32 / 255.0;
+    let lin = |v: u8| Color::srgb_to_linear(v as f32 / 255.0);
+    let target: [f32; 3] = std::array::from_fn(|k| Color::srgb_to_linear((color[k] as f32 * a0 + backdrop[k] as f32 * (1.0 - a0)) / 255.0));
+    let back: [f32; 3] = std::array::from_fn(|k| lin(backdrop[k]));
+    let mut a = a0;
+    for k in 0..3 {
+        let need = (target[k] - (1.0 - a) * back[k]) / a;
+        if need < 0.0 && back[k] > 0.0 {
+            a = a.max(1.0 - target[k] / back[k]);
+        } else if need > 1.0 && back[k] < 1.0 {
+            a = a.max((target[k] - back[k]) / (1.0 - back[k]));
+        }
+    }
+    let a = a.clamp(a0, 1.0);
+    let c = std::array::from_fn(|k| (Color::linear_to_srgb(((target[k] - (1.0 - a) * back[k]) / a).clamp(0.0, 1.0)) * 255.0).round() as u8);
+    (c, (a * 255.0).round() as u8)
 }
 
 fn file_safe(id: &str) -> String {
@@ -690,6 +707,22 @@ mod tests {
         let (svg, _) = flexma_doc::svg::export(&doc, &[id], &opts).unwrap();
         let (pm, _) = crate::render::svg_to_pixmap(&svg, 2.0, 4096, crate::render::base_fontdb(), false, None).unwrap();
         assert!(pm.pixels().iter().filter(|p| p.alpha() == 255).count() > 70_000, "{svg}");
+    }
+
+    /// Unity's linear blend of a corrected pixel lands on the design's sRGB
+    /// blend, also for a dark scrim over something bright (its alpha rises).
+    #[test]
+    fn corrected_pixels_blend_like_the_design() {
+        use flexma_doc::Color;
+        for (color, backdrop, alpha) in [([255, 255, 255], [21, 28, 24], 23u8), ([13, 18, 15], [150, 200, 240], 140), ([13, 18, 15], [150, 200, 240], 40), ([232, 176, 89], [31, 40, 34], 200)] {
+            let (c, a) = linear_match(color, backdrop, alpha);
+            let af = a as f32 / 255.0;
+            for k in 0..3 {
+                let design = (color[k] as f32 * alpha as f32 / 255.0 + backdrop[k] as f32 * (1.0 - alpha as f32 / 255.0)).round();
+                let unity = Color::linear_to_srgb(Color::srgb_to_linear(c[k] as f32 / 255.0) * af + Color::srgb_to_linear(backdrop[k] as f32 / 255.0) * (1.0 - af)) * 255.0;
+                assert!((design - unity).abs() <= 2.0, "{color:?} at {alpha} over {backdrop:?}: design {design}, unity {unity} ({c:?} at {a})");
+            }
+        }
     }
 
     /// An image with no stretchable middle stays as it is.
