@@ -46,7 +46,7 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, allowed: &HashSet<String>,
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
     let metrics = |n: &flexma_doc::Node| measurer.metrics(n);
     let runs = |n: &flexma_doc::Node, s: &str| measurer.svg_runs(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), font_runs: Some(&runs), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true) };
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), font_runs: Some(&runs), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true), own_paint: false, skip_root_paint: false };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear, Some((data_dir, allowed))).ok().map(|(png, _, _)| png)
 }
@@ -127,6 +127,21 @@ impl AssetMode<'_> {
 /// Export nodes (or a whole page) to SVG. With `fonts`, text breaks into
 /// lines by the real font metrics instead of estimates.
 pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>, paint: &PaintSource) -> Option<(String, Rect)> {
+    export_svg_as(doc, ids, background, assets, fonts, paint, Layers::All)
+}
+
+/// What of the export roots an SVG export draws.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Layers {
+    All,
+    /// Only the one root's own paint, as `SvgOptions::own_paint` describes.
+    OwnPaint,
+    /// Everything but the roots' own paint (`SvgOptions::skip_root_paint`).
+    WithoutRootPaint,
+}
+
+/// `export_svg`, drawing `layers` of the roots.
+pub fn export_svg_as(doc: &Document, ids: &[NodeId], background: Option<Color>, assets: AssetMode, fonts: Option<&Arc<FontDb>>, paint: &PaintSource, layers: Layers) -> Option<(String, Rect)> {
     let inline = matches!(assets, AssetMode::Inline(..));
     // Linear blending only applies when the server rasterizes (inlined
     // images); browsers viewing an SVG blend in sRGB.
@@ -149,6 +164,8 @@ pub fn export_svg(doc: &Document, ids: &[NodeId], background: Option<Color>, ass
         resolve_variant: &variant,
         linear,
         paint_tiles: &|l| paint.tiles(l, inline),
+        own_paint: layers == Layers::OwnPaint,
+        skip_root_paint: layers == Layers::WithoutRootPaint,
     };
     export(doc, ids, &opts)
 }
@@ -355,6 +372,17 @@ impl TextMeasurer {
         });
         self.faces.borrow_mut().insert(key, id);
         id
+    }
+
+    /// The font file the node's text draws with: (bytes, face index, family,
+    /// weight, italic).
+    pub fn face_file(&self, n: &flexma_doc::Node) -> Option<(Vec<u8>, u32, String, u16, bool)> {
+        let id = self.face(n)?;
+        let info = self.db.face(id)?;
+        let (family, weight, italic) = (info.families.first()?.0.clone(), info.weight.0, info.style != resvg::usvg::fontdb::Style::Normal);
+        let index = info.index;
+        let bytes = self.db.with_face_data(id, |data, _| data.to_vec())?;
+        Some((bytes, index, family, weight, italic))
     }
 
     /// Whether the node's own font family is here (not a fallback).
@@ -926,6 +954,39 @@ pub fn svg_to_png_on(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, li
     opt.image_href_resolver.resolve_string = image_resolver(images);
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
     tree_to_png(&tree, scale, max_dim, linear, checker)
+}
+
+/// Rasterize SVG at `scale` into a pixmap (premultiplied), longest side ≤
+/// `max_dim`; also returns the scale used. For renders small enough to hold
+/// whole, like the Unity export's layer images.
+pub fn svg_to_pixmap(svg: &str, scale: f32, max_dim: u32, fonts: Arc<FontDb>, linear: bool, images: Images) -> Result<(resvg::tiny_skia::Pixmap, f32), String> {
+    let mut opt = svg_options();
+    opt.fontdb = fonts;
+    opt.font_family = "Inter".into();
+    opt.font_resolver.select_fallback = Box::new(|_, _, _| None);
+    opt.image_href_resolver.resolve_string = image_resolver(images);
+    let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
+    let (w, h, s) = png_size(tree.size().width(), tree.size().height(), scale, max_dim);
+    let mut pm = resvg::tiny_skia::Pixmap::new(w, h).ok_or("image too large")?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(s, s), &mut pm.as_mut());
+    if linear {
+        encode_linear(&mut pm);
+    }
+    Ok((pm, s))
+}
+
+/// A pixmap as a PNG (straight alpha).
+pub fn pixmap_png(pm: resvg::tiny_skia::Pixmap) -> Result<Vec<u8>, String> {
+    let (w, h) = (pm.width(), pm.height());
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut wr = enc.write_header().map_err(|e| e.to_string())?;
+        wr.write_image_data(&straight_rgba(pm)).map_err(|e| e.to_string())?;
+    }
+    Ok(png)
 }
 
 /// Draw a parsed SVG to PNG in strips (see `svg_to_png_on`).

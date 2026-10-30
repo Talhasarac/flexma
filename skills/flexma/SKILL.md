@@ -7,7 +7,13 @@ description: Design UIs, mockups, wireframes, landing pages, app screens, compon
 
 Flexma is a collaborative design canvas. You edit the **same live document** people are looking at: every change you make appears on their screens immediately, with your name next to it. Work like a careful senior product designer pairing with them.
 
-For Unity projects there is an optional companion skill, `unity-ui-to-flexma`, that exports a game's uGUI screens into Flexma as editable layers and keeps them in sync. If the user wants their Unity UI in Flexma and that skill isn't installed, point them to Flexma's AI Agents page for its install command (`curl -fsSL <flexma-url>/agents/install/unity-ui-to-flexma.sh | sh`).
+For Unity projects there are two optional companion skills:
+
+- `unity-ui-to-flexma` exports a game's uGUI screens into Flexma as editable layers and keeps them in sync.
+- `flexma-to-unity` goes the other way. It builds Flexma frames into uGUI prefabs that look the same as the design, from Flexma's own renders. Never rebuild a Flexma design by hand in Unity code: it drifts (retyped colors, faked rounded clipping, fake bold, sharp shadows).
+  - Designs meant for Unity follow "Designing in Flexma for Unity" in that skill: a frame per screen at the reference resolution, constraints as anchors, auto layout for anything whose content changes, live text as text, components for repeated items, and clear names on what code touches.
+
+If a skill the user needs isn't installed, point them to Flexma's AI Agents page for its install command (`curl -fsSL <flexma-url>/agents/install/<skill>.sh | sh`).
 
 The MCP server is usually registered as `flexma`, so tools appear as `mcp__flexma__<tool>` in Claude Code, `flexma.<tool>` in Codex and `flexma_<tool>` in OpenCode. If no Flexma tools are available, tell the user to connect the server (see "Setup" at the end) instead of guessing.
 
@@ -179,6 +185,7 @@ If something is ambiguous, reply with a question instead of guessing, and leave 
 | `get_screenshot` | Render a node or page to PNG so you can see it. `node_ids` (up to 24) puts several frames side by side in one labelled image. Layers without an opaque fill show transparency as a grey checkerboard |
 | `export_svg` | Get SVG markup, e.g. for icons or handoff |
 | `export_png` | Save nodes or a page as PNG files (`scale` default 2, `node_ids` for several): returns one `curl` command per image with a 15-minute download link; run them to save the files. Use this when the user wants image files, `get_screenshot` when you only need to look |
+| `export_unity` | Frames as a zip for Unity uGUI (layer images, fonts, layout); the `flexma-to-unity` importer fetches this itself |
 
 See `references/node-spec.md` for every property and shorthand, and `references/recipes.md` for ready-made patterns: screens, buttons, inputs, cards, nav bars, pricing tables, and design-to-code mapping.
 
@@ -215,7 +222,7 @@ Then call `get_screenshot` with the returned frame id and adjust.
 - `move_nodes` is the only way to change a parent; `update_nodes` rejects `parent`/`index`.
 - Images and fonts: upload files with `upload_image` / `upload_font` (run the `curl` command they return); don't paste file contents into tool calls.
 - Big trees (an exported game UI, hundreds of frames): write the specs to a JSON file and send it with `upload_nodes` instead of pasting huge `create_nodes` payloads. Each batch is one undoable step; split very large exports by screen.
-- Unity projects in Linear color space: create their pages with `linearBlending: true` so translucent overlays and text edges match Unity.
+- Unity projects in Linear color space: pages exported *from* Unity get `linearBlending: true`, so Flexma shows translucent overlays and text edges the way Unity draws them. Pages designed in Flexma to be imported *into* Unity keep the default: `flexma-to-unity` corrects their see-through pixels for Unity's blending.
 - Keep source data with the design in `meta` (any JSON object), e.g. the Unity component or a button's action. `find_nodes` can search it by `meta` entries or by `key`.
 - Re-exports: give every node a stable `key` (e.g. its Unity object path). Uploading again then updates the same nodes in place (ids, comments and people's additions survive) instead of adding copies. Don't delete and recreate screens.
   - Children without a `key` that people added in Flexma are kept. When the export itself has no keys and its structure changed (a section rebuilt from new HTML), add `"prune": true` to the top-level spec so old unkeyed layers are deleted instead of piling up.

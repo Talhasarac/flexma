@@ -7,6 +7,8 @@ description: Export a Unity project's UI screens (menus, HUD, popups, shops, inv
 
 This skill exports every screen a Unity project actually uses into a Flexma file, as real layers (frames, images, text, masks, constraints, auto layout, components), not screenshots. It reads uGUI canvases (with TextMeshPro) and, when switched on, UI Toolkit documents (UIDocument, UXML, USS). Re-running it updates the same layers in place, so comments, ids, frame positions and anything designers added in Flexma survive.
 
+To bring a design from Flexma into the game, use the `flexma-to-unity` skill. It imports frames as uGUI prefabs that look the same as the design. Don't rebuild them in code.
+
 The work is done by five editor scripts that ship with this skill in `scripts/`. Your job is to install them, find out how the project shows its screens at runtime, run the export, and check the result against Unity.
 
 Load the `flexma` skill as well. It has the Flexma node spec, which you need when reading results or writing hooks.

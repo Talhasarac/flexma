@@ -42,6 +42,14 @@ pub struct SvgOptions<'a> {
     /// A paint layer's tiles: (column, row, URL or data URI) of each 256 px
     /// tile image, for the layer's id.
     pub paint_tiles: &'a dyn Fn(&str) -> Vec<(i32, i32, String)>,
+    /// Draw only the (single) export root's own paint, without its children
+    /// and opacity, in its own coordinates (its rotation undone), cut by the
+    /// ancestors that clip their content, as it shows in the design. Hidden
+    /// layers draw too. For engines that draw each layer as its own image
+    /// (the Unity export).
+    pub own_paint: bool,
+    /// Leave out the export roots' own paint and effects; their children draw.
+    pub skip_root_paint: bool,
 }
 
 impl Default for SvgOptions<'_> {
@@ -57,13 +65,19 @@ impl Default for SvgOptions<'_> {
             resolve_variant: &|_, _, _| None,
             linear: false,
             paint_tiles: &|_| Vec::new(),
+            own_paint: false,
+            skip_root_paint: false,
         }
     }
 }
 
 /// Export the given nodes (or a page: pass the page id) to an SVG document.
-/// Returns the SVG and the page-space bounds it covers.
+/// Returns the SVG and the page-space bounds it covers (with `own_paint`, the
+/// bounds in the root's own coordinates; `None` when nothing of it shows).
 pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(String, Rect)> {
+    if opts.own_paint {
+        return export_own(doc, ids.first()?, opts);
+    }
     let mut bounds = Rect::empty();
     let mut roots: Vec<&Node> = Vec::new();
     for id in ids {
@@ -87,6 +101,7 @@ pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(Stri
     }
     let b = bounds.inflate(opts.padding);
     let mut w = writer(doc, opts, String::new(), None);
+    w.roots = roots.iter().map(|n| n.id.clone()).collect();
     write_roots(&mut w, &roots);
     // Background blurs: what's painted before each such layer, drawn again
     // blurred and clipped to its shape, under it (SVG has no backdrop filter).
@@ -126,20 +141,7 @@ pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(Stri
         );
         w.body = w.body.replace(&backdrop_placeholder(k), &markup);
     }
-    let mut out = String::new();
-    let _ = write!(
-        out,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}">"#,
-        x = fmt_num(b.x),
-        y = fmt_num(b.y),
-        w = fmt_num(b.width.max(1.0)),
-        h = fmt_num(b.height.max(1.0)),
-    );
-    if !w.defs.is_empty() {
-        out.push_str("<defs>");
-        out.push_str(&w.defs);
-        out.push_str("</defs>");
-    }
+    let mut out = svg_open(&b, &w.defs);
     if let Some(bg) = opts.background {
         let _ = write!(
             out,
@@ -154,6 +156,96 @@ pub fn export(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<(Stri
     out.push_str(&w.body);
     out.push_str("</svg>");
     Some((out, b))
+}
+
+/// The `<svg>` start tag for `b`, with `defs`.
+fn svg_open(b: &Rect, defs: &str) -> String {
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}">"#,
+        x = fmt_num(b.x),
+        y = fmt_num(b.y),
+        w = fmt_num(b.width.max(1.0)),
+        h = fmt_num(b.height.max(1.0)),
+    );
+    if !defs.is_empty() {
+        out.push_str("<defs>");
+        out.push_str(defs);
+        out.push_str("</defs>");
+    }
+    out
+}
+
+/// `export` with `own_paint`: one layer's own paint in its own coordinates,
+/// inside the clips of its ancestors (drawn as the groups they are in the
+/// design, then undone, so the layer lands at its own origin).
+fn export_own(doc: &Document, id: &str, opts: &SvgOptions) -> Option<(String, Rect)> {
+    let n = doc.get(id)?;
+    if n.kind == NodeType::Text || !n.kind.is_scene() {
+        return None;
+    }
+    let inverse = doc.world_transform(id).invert()?;
+    let chain: Vec<&Node> = doc.ancestors(id).iter().rev().filter_map(|a| doc.get(a)).filter(|a| a.kind.is_scene()).collect();
+    let mut b = own_bounds(n);
+    for a in &chain {
+        if a.kind.is_frame_like() && a.clips_content {
+            let r = inverse.mul(&doc.world_transform(&a.id)).map_rect(&Rect::new(0.0, 0.0, a.width, a.height));
+            let (x0, y0) = (b.x.max(r.x), b.y.max(r.y));
+            let (x1, y1) = (b.right().min(r.right()), b.bottom().min(r.bottom()));
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+            b = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        }
+    }
+    let mut w = writer(doc, opts, String::new(), None);
+    w.roots = vec![n.id.clone()];
+    let _ = write!(w.body, r#"<g transform="{}">"#, inverse.to_svg());
+    let mut open = 1;
+    for a in &chain {
+        let _ = write!(w.body, r#"<g transform="{}">"#, doc.local_transform(&a.id).to_svg());
+        open += 1;
+        if a.kind.is_frame_like() && a.clips_content && w.open_clip(a) {
+            open += 1;
+        }
+    }
+    w.node(n, &Affine::IDENTITY);
+    for _ in 0..open {
+        w.body.push_str("</g>");
+    }
+    let mut out = svg_open(&b, &w.defs);
+    out.push_str(&w.body);
+    out.push_str("</svg>");
+    Some((out, b))
+}
+
+/// A layer's own box grown by how far its shadows, blur and stroke reach,
+/// in its own coordinates.
+fn own_bounds(n: &Node) -> Rect {
+    let mut grow = 0.0f64;
+    for e in &n.effects {
+        match e {
+            Effect::DropShadow { x, y, blur, spread, .. } if shadow_shows(e) => {
+                grow = grow.max(*blur as f64 * 1.5 + (*spread as f64).clamp(0.0, MAX_SPREAD) + (*x as f64).abs().max((*y as f64).abs()));
+            }
+            Effect::LayerBlur { radius, visible } if *visible => grow = grow.max(*radius as f64 * 1.5),
+            _ => {}
+        }
+    }
+    if n.has_visible_stroke() {
+        let reach = match (aligned_stroke(n), n.stroke_align) {
+            (true, crate::paint::StrokeAlign::Inside) => 0.0,
+            (true, crate::paint::StrokeAlign::Outside) => n.stroke_weight,
+            (true, crate::paint::StrokeAlign::Center) => n.stroke_weight / 2.0,
+            _ if n.kind == NodeType::Line => n.stroke_weight / 2.0,
+            // Paths center their stroke, and miter joins reach further.
+            _ => n.stroke_weight,
+        };
+        grow = grow.max(reach);
+    }
+    let b = Rect::new(n.width.min(0.0), n.height.min(0.0), n.width.abs(), n.height.abs());
+    if grow > 0.0 { b.inflate(grow.ceil()) } else { b }
 }
 
 /// Subtree bounds grown by the node's own shadows/blur so exports don't clip them.
@@ -260,11 +352,13 @@ struct Writer<'a> {
     stopped: bool,
     /// Layers with a background blur: (placeholder number, id, radius).
     backdrops: Vec<(usize, NodeId, f32)>,
+    /// The export's roots (for `own_paint` and `skip_root_paint`).
+    roots: Vec<NodeId>,
 }
 
 /// A writer for `doc` (see `export`).
 fn writer<'a>(doc: &'a Document, opts: &'a SvgOptions<'a>, id_prefix: String, stop_at: Option<NodeId>) -> Writer<'a> {
-    Writer { doc, opts, defs: String::new(), body: String::new(), next_id: 0, id_prefix, stop_at, stopped: false, backdrops: Vec::new() }
+    Writer { doc, opts, defs: String::new(), body: String::new(), next_id: 0, id_prefix, stop_at, stopped: false, backdrops: Vec::new(), roots: Vec::new() }
 }
 
 /// Write the export's root nodes.
@@ -779,7 +873,11 @@ impl Writer<'_> {
                 Effect::BackgroundBlur { .. } => 0.0,
             })
             .fold(0.0, f64::max);
-        let m = (reach + n.width.abs().max(n.height.abs()) * 0.5 + 2.0).ceil();
+        // A layer drawn on its own has no children to overflow; resvg draws
+        // nothing for a filter region far bigger than a small canvas inside
+        // clipped groups.
+        let overflow = if self.opts.own_paint { 0.0 } else { n.width.abs().max(n.height.abs()) * 0.5 };
+        let m = (reach + overflow + 2.0).ceil();
         // sRGB blending, like the editor.
         let _ = write!(
             self.defs,
@@ -868,7 +966,9 @@ impl Writer<'_> {
     }
 
     fn node(&mut self, n: &Node, _parent_world: &Affine) {
-        if self.stopped || !n.visible || !n.kind.is_scene() {
+        let root = self.roots.contains(&n.id);
+        let own = self.opts.own_paint && root;
+        if self.stopped || !(n.visible || own) || !n.kind.is_scene() {
             return;
         }
         if self.stop_at.as_deref() == Some(n.id.as_str()) {
@@ -876,7 +976,8 @@ impl Writer<'_> {
             return;
         }
         // Its blurred backdrop goes first, under the layer (see `export`).
-        if self.stop_at.is_none() {
+        // A layer drawn on its own has nothing behind it to blur.
+        if self.stop_at.is_none() && !self.opts.own_paint {
             if let Some(r) = n.effects.iter().find_map(|e| match e {
                 Effect::BackgroundBlur { radius, visible: true } if *radius > 0.0 => Some(*radius),
                 _ => None,
@@ -887,22 +988,25 @@ impl Writer<'_> {
             }
         }
         let local = self.doc.local_transform(&n.id);
+        let paints = !(self.opts.skip_root_paint && root);
         let mut g = String::from("<g");
         let _ = write!(g, r#" transform="{}""#, local.to_svg());
-        if n.opacity < 1.0 {
+        // Engines that draw layers one by one apply the opacity themselves.
+        if n.opacity < 1.0 && !own {
             let _ = write!(g, r#" opacity="{}""#, fmt_num(n.opacity));
         }
-        if let Some(f) = self.effects_filter(n) {
+        if let Some(f) = if paints { self.effects_filter(n) } else { None } {
             let _ = write!(g, r#" filter="url(#{f})""#);
         }
         let _ = write!(g, r#" data-name="{}">"#, escape(&n.name));
         self.body.push_str(&g);
-        if box_shadows(n) {
+        if paints && box_shadows(n) {
             let shadows = self.box_shadows_markup(n);
             self.body.push_str(&shadows);
         }
 
         match n.kind {
+            _ if !paints => {}
             NodeType::Text => self.text(n),
             NodeType::Paint => self.paint_layer(n),
             _ => {
@@ -975,29 +1079,9 @@ impl Writer<'_> {
             }
         }
 
-        let kids: Vec<NodeId> = self.doc.children(&n.id).to_vec();
+        let kids: Vec<NodeId> = if self.opts.own_paint { Vec::new() } else { self.doc.children(&n.id).to_vec() };
         if !kids.is_empty() {
-            let clip = n.kind.is_frame_like() && n.clips_content;
-            if clip && n.clip_alpha {
-                // Alpha mask from the fills. Any alpha above Unity's cutoff
-                // (0.001) shows the children fully, like the editor's stencil.
-                // Nearest sampling: resvg's smooth filters ring to zero next to
-                // hard alpha edges, which would cut holes into the mask.
-                let shape = self.shape(n).unwrap_or_default();
-                let fills = self.fills_markup(n, &shape);
-                let (id, fid) = (self.id("m"), self.id("f"));
-                let (w, h) = (fmt_num(n.width), fmt_num(n.height));
-                let _ = write!(
-                    self.defs,
-                    r#"<filter id="{fid}" filterUnits="userSpaceOnUse" x="0" y="0" width="{w}" height="{h}"><feComponentTransfer><feFuncA type="linear" slope="1000" intercept="0"/></feComponentTransfer></filter><mask id="{id}" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="{w}" height="{h}"><g filter="url(#{fid})" image-rendering="optimizeSpeed">{fills}</g></mask>"#
-                );
-                let _ = write!(self.body, r#"<g mask="url(#{id})">"#);
-            } else if clip {
-                let id = self.id("c");
-                let shape = self.shape(n).unwrap_or_default();
-                let _ = write!(self.defs, r#"<clipPath id="{id}">{shape}/></clipPath>"#);
-                let _ = write!(self.body, r#"<g clip-path="url(#{id})">"#);
-            }
+            let clip = n.kind.is_frame_like() && n.clips_content && self.open_clip(n);
             let world = self.doc.world_transform(&n.id);
             for k in kids {
                 if let Some(kn) = self.doc.get(&k) {
@@ -1010,6 +1094,32 @@ impl Writer<'_> {
             }
         }
         self.body.push_str("</g>");
+    }
+
+    /// Start a group that clips to `n`, a frame that clips its content (the
+    /// caller closes it). Always true: the group is always written.
+    fn open_clip(&mut self, n: &Node) -> bool {
+        if n.clip_alpha {
+            // Alpha mask from the fills. Any alpha above Unity's cutoff
+            // (0.001) shows the children fully, like the editor's stencil.
+            // Nearest sampling: resvg's smooth filters ring to zero next to
+            // hard alpha edges, which would cut holes into the mask.
+            let shape = self.shape(n).unwrap_or_default();
+            let fills = self.fills_markup(n, &shape);
+            let (id, fid) = (self.id("m"), self.id("f"));
+            let (w, h) = (fmt_num(n.width), fmt_num(n.height));
+            let _ = write!(
+                self.defs,
+                r#"<filter id="{fid}" filterUnits="userSpaceOnUse" x="0" y="0" width="{w}" height="{h}"><feComponentTransfer><feFuncA type="linear" slope="1000" intercept="0"/></feComponentTransfer></filter><mask id="{id}" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="{w}" height="{h}"><g filter="url(#{fid})" image-rendering="optimizeSpeed">{fills}</g></mask>"#
+            );
+            let _ = write!(self.body, r#"<g mask="url(#{id})">"#);
+        } else {
+            let id = self.id("c");
+            let shape = self.shape(n).unwrap_or_default();
+            let _ = write!(self.defs, r#"<clipPath id="{id}">{shape}/></clipPath>"#);
+            let _ = write!(self.body, r#"<g clip-path="url(#{id})">"#);
+        }
+        true
     }
 
     fn text(&mut self, n: &Node) {

@@ -212,6 +212,17 @@ fn tools() -> Value {
             },
             "required": ["file_id"]
         })),
+        tool("export_unity", "Export frames for Unity's uGUI as a zip the flexma-to-unity importer builds a prefab from, the same as the design: every layer that paints comes as an image drawn by Flexma (9-sliced where it stretches), text as TextMeshPro text with its font files, layout as anchors and auto layout. Returns a curl command with a short-lived download link. The Unity importer fetches this itself; use the tool to inspect an export.", json!({
+            "type": "object",
+            "properties": {
+                "file_id": file_id,
+                "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Frames to export (screens, or components to use as prefabs), up to 50" },
+                "scale": { "type": "number", "description": "Pixels per design pixel in the layer images. Default 2" },
+                "background": { "type": "boolean", "description": "Include the frames' own fill (often a mockup of the game behind the UI). Default false" },
+                "linear": { "type": "boolean", "description": "The Unity project uses Linear color space (Unity's default): see-through pixels are corrected so they blend there as they do in the design. Default true" }
+            },
+            "required": ["file_id", "node_ids"]
+        })),
         tool("export_svg", "Export a node or page as SVG markup.", json!({
             "type": "object",
             "properties": { "file_id": file_id, "node_id": { "type": "string" }, "page_id": { "type": "string" } },
@@ -587,6 +598,7 @@ impl Ctx {
             "get_screenshot" => self.get_screenshot(args).await,
             "export_svg" => self.export_svg(args).await,
             "export_png" => self.export_png(args).await,
+            "export_unity" => self.export_unity(args).await,
             "get_selection" => self.get_selection(args).await,
             "save_version" => self.save_version(args).await,
             "list_comments" => self.list_comments(args).await,
@@ -1720,6 +1732,39 @@ impl Ctx {
         }
         text.push_str(&format!("\n{sizes}\nDon't share these links."));
         Ok(text_result(text))
+    }
+
+    async fn export_unity(&self, args: &Value) -> ToolResult {
+        let fid = s(args, "file_id")?.to_string();
+        let nodes = args.get("node_ids").and_then(id_list).filter(|ids| !ids.is_empty()).ok_or("node_ids: name the frames to export")?;
+        if nodes.len() > 50 {
+            return Err("node_ids takes up to 50 frames per call".into());
+        }
+        let scale = args.get("scale").and_then(Value::as_f64).unwrap_or(2.0) as f32;
+        let background = args.get("background").and_then(Value::as_bool).unwrap_or(false);
+        let linear = args.get("linear").and_then(Value::as_bool).unwrap_or(true);
+        let (uid, f2) = (self.user.id.clone(), fid.clone());
+        let ws = self.st.db.call(move |c| Ok(file_access(c, &uid, &f2, Role::Viewer)?.0)).await.map_err(err_msg)?;
+        let room = self.st.rooms.get(&fid).await.map_err(err_msg)?;
+        let check = nodes.clone();
+        room.read(move |doc, _| {
+            for id in &check {
+                match doc.get(id) {
+                    Some(n) if n.kind.is_frame_like() => {}
+                    Some(n) => return Err(format!("'{}' ({id}) isn't a frame", n.name)),
+                    None => return Err(format!("no node '{id}'")),
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(err_msg)??;
+        let kind = crate::uploads::Kind::Unity { file_id: fid, nodes, scale, background, linear };
+        let token = crate::uploads::create(kind, &ws, &self.user.id, 3);
+        Ok(text_result(format!(
+            "Download link, good for 3 downloads over the next 15 minutes:\n\ncurl -sSf -o flexma-unity.zip {}/api/unity-exports/{token}\n\nThe zip holds manifest.json (the layer tree), sprites/, fonts/ and refs/ (each frame as Flexma draws it). Don't share the link.",
+            self.base
+        )))
     }
 
     async fn export_svg(&self, args: &Value) -> ToolResult {

@@ -8,11 +8,12 @@ Flexma is a self-hosted, Figma-like collaborative design tool. It has three Rust
 |---|---|
 | `crates/flexma-doc` | The document model, shared by the server and the wasm engine. Change the node schema here only. The `define_node!` macro in `node.rs` is the single list of node properties; serialization, `set_prop` and `get_prop` derive from it. |
 | `crates/flexma-engine` | The wasm editor. `editor.rs` holds state and the local/remote op pipeline. Interaction is in `tools.rs`, commands in `commands.rs`, overlays in `overlay.rs`, and the JS API in `lib.rs`. `render.rs` decides what to draw and hands it to a `backend.rs` backend: WebGPU in `gpu.rs` (WGSL in `shaders/`) or the WebGL2 fallback in `gl.rs`. Keep the two backends' shaders in step. |
-| `crates/flexma-server` | The axum server. `rooms.rs` has one actor per open document. `mcp.rs` is the MCP tools, `oauth.rs` is the OAuth 2.1 server for MCP clients, and the `api_*.rs` files are REST. `paint.rs` stores brush strokes and tile snapshots. |
+| `crates/flexma-server` | The axum server. `rooms.rs` has one actor per open document. `mcp.rs` is the MCP tools, `oauth.rs` is the OAuth 2.1 server for MCP clients, and the `api_*.rs` files are REST. `paint.rs` stores brush strokes and tile snapshots. `unity.rs` is the Unity export (`export.unity`): each layer's own paint as a 9-sliced image, text and layout as data. |
 | `web/src/editor` | Editor UI. `store.ts` bridges engine and socket into React via version counters. |
 | `web/src/{pages,components,lib}` | Dashboard, auth and settings. |
 | `skills/flexma` | The skill served at `/agents/skills/flexma/*` and embedded in the server binary with `include_str!` (`api_tokens.rs`). Rebuild the server after editing it. |
 | `skills/unity-ui-to-flexma` | An optional skill (Unity uGUI export, with the editor scripts it installs), served the same way and installed by `/agents/install/unity-ui-to-flexma.sh` or `.ps1`. Every file in a skill folder must be listed in `api_tokens.rs`. |
+| `skills/flexma-to-unity` | The optional reverse skill: an importer that builds Flexma frames into uGUI prefabs from `export.unity`, with runtime scripts (`FlexmaLayout` mirrors `flexma_doc::layout`; keep the two in step) and a pixel check. Installed by `/agents/install/flexma-to-unity.sh` or `.ps1`. |
 
 ## Commands
 

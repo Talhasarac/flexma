@@ -177,11 +177,25 @@ pub const UNITY_SKILL: Skill = Skill {
     ],
 };
 
-pub const SKILLS: &[&Skill] = &[&FLEXMA_SKILL, &UNITY_SKILL];
+/// Optional: builds Flexma frames into Unity uGUI prefabs that look the same
+/// as the design. Ships the editor and runtime scripts.
+pub const FLEXMA_TO_UNITY_SKILL: Skill = Skill {
+    name: "flexma-to-unity",
+    files: &[
+        ("SKILL.md", include_str!("../../../skills/flexma-to-unity/SKILL.md")),
+        ("scripts/Runtime/FlexmaNode.cs", include_str!("../../../skills/flexma-to-unity/scripts/Runtime/FlexmaNode.cs")),
+        ("scripts/Runtime/FlexmaLayout.cs", include_str!("../../../skills/flexma-to-unity/scripts/Runtime/FlexmaLayout.cs")),
+        ("scripts/Editor/FlexmaImporter.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImporter.cs")),
+        ("scripts/Editor/FlexmaImportCheck.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImportCheck.cs")),
+        ("scripts/Editor/FlexmaImportWindow.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImportWindow.cs")),
+    ],
+};
+
+pub const SKILLS: &[&Skill] = &[&FLEXMA_SKILL, &UNITY_SKILL, &FLEXMA_TO_UNITY_SKILL];
 
 /// Optional installers, `/agents/install/<name>.sh|.ps1`: each also installs
 /// (or updates) the `flexma` skill it builds on.
-const ADD_ONS: &[&Skill] = &[&UNITY_SKILL];
+const ADD_ONS: &[&Skill] = &[&UNITY_SKILL, &FLEXMA_TO_UNITY_SKILL];
 
 pub async fn skill_file(Path((skill, path)): Path<(String, String)>) -> Response {
     let file = SKILLS.iter().find(|s| s.name == skill).and_then(|s| s.files.iter().find(|(p, _)| *p == path));

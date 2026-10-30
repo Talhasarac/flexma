@@ -28,6 +28,8 @@ pub enum Kind {
     Nodes { file_id: String, parent_id: Option<String>, index: Option<usize>, token_name: Option<String> },
     /// A PNG export of a node or page (the REST export's options).
     Png { file_id: String, node: Option<String>, page: Option<String>, scale: f32, background: bool },
+    /// A Unity export of frames (see `unity.rs`).
+    Unity { file_id: String, nodes: Vec<String>, scale: f32, background: bool, linear: bool },
 }
 
 impl Kind {
@@ -37,6 +39,7 @@ impl Kind {
             Kind::Image { .. } => "upload_image",
             Kind::Nodes { .. } => "upload_nodes",
             Kind::Png { .. } => "export_png",
+            Kind::Unity { .. } => "export_unity",
         }
     }
 }

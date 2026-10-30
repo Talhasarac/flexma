@@ -29,6 +29,7 @@ mod render;
 mod rooms;
 mod state;
 mod svg_import;
+mod unity;
 mod uploads;
 mod ws;
 
@@ -171,6 +172,7 @@ async fn main() {
         .route("/files/{id}/thumbnail.png", get(api_files::thumbnail))
         .route("/files/{id}/export.svg", get(api_files::export_svg))
         .route("/files/{id}/export.png", get(api_files::export_png))
+        .route("/files/{id}/export.unity", get(api_files::export_unity))
         .route("/files/{id}/assets", post(api_files::upload_asset))
         .route("/files/{id}/ws", get(ws::handler))
         .route("/files/{id}/versions", get(api_versions::list).post(api_versions::create))
@@ -194,6 +196,7 @@ async fn main() {
         .route("/image-uploads/{token}", post(api_files::upload_image_with_link))
         .route("/node-uploads/{token}", post(mcp::upload_nodes_with_link))
         .route("/png-exports/{token}", get(api_files::export_png_with_link))
+        .route("/unity-exports/{token}", get(api_files::export_unity_with_link))
         .route("/fonts/{id}", get(api_fonts::file))
         .route("/google-fonts", get(api_fonts::google_catalogue))
         .route("/google-fonts/preview", get(api_fonts::google_preview))

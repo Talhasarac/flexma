@@ -616,6 +616,77 @@ pub async fn upload_image_with_link(State(st): State<AppState>, Path(token): Pat
     Ok(Json(asset))
 }
 
+#[derive(Deserialize)]
+pub struct UnityQuery {
+    /// Frame ids, comma separated.
+    pub nodes: String,
+    pub scale: Option<f32>,
+    pub background: Option<bool>,
+    /// The Unity project is in Linear color space (see `unity::Options`).
+    pub linear: Option<bool>,
+}
+
+/// `GET /api/files/{id}/export.unity?nodes=a,b`: frames as a zip for the
+/// Unity importer (see `unity.rs`).
+pub async fn export_unity(State(st): State<AppState>, user: AuthUser, Path(id): Path<String>, Query(q): Query<UnityQuery>) -> AppResult<Response> {
+    let fid = id.clone();
+    st.db.call(move |c| file_access(c, &user.id, &fid, Role::Viewer)).await?;
+    let nodes = q.nodes.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
+    let opts = crate::unity::Options { scale: q.scale.unwrap_or(2.0), background: q.background.unwrap_or(false), unity_linear: q.linear.unwrap_or(true) };
+    unity_export_response(&st, &id, nodes, opts).await
+}
+
+/// The Unity export of frames `nodes` (access already checked).
+pub async fn unity_export_response(st: &AppState, id: &str, nodes: Vec<String>, opts: crate::unity::Options) -> AppResult<Response> {
+    if nodes.is_empty() || nodes.len() > 50 {
+        return Err(AppError::bad_request("name 1 to 50 frames in `nodes`"));
+    }
+    let opts = crate::unity::Options { scale: opts.scale.clamp(0.5, 4.0), ..opts };
+    let scale = opts.scale;
+    let room = st.rooms.get(id).await?;
+    let data_dir = st.cfg.data_dir.clone();
+    let fid = id.to_string();
+    let (ws, allowed) = st
+        .db
+        .call(move |c| {
+            let ws = crate::fonts::file_workspace(c, &fid)?;
+            let allowed = workspace_asset_ids(c, &ws)?;
+            Ok((ws, allowed))
+        })
+        .await?;
+    let fonts = crate::fonts::fontdb_for(st, &ws).await;
+    let (plan_fonts, plan_dir, plan_allowed, pfid) = (fonts.clone(), data_dir.clone(), allowed.clone(), id.to_string());
+    let plan = room
+        .read(move |doc, _| crate::unity::plan(doc, &nodes, &opts, &plan_fonts, &plan_dir, &plan_allowed, &pfid))
+        .await?
+        .map_err(AppError::bad_request)?;
+    let zip = render::run_render(move || crate::unity::draw(plan, scale, fonts, Some((&data_dir, &allowed))))
+        .await
+        .map_err(AppError::internal)?
+        .map_err(AppError::internal)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"flexma-unity.zip\""),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        zip,
+    )
+        .into_response())
+}
+
+/// `GET /api/unity-exports/{token}`: a Unity export, no sign-in (the link
+/// from MCP `export_unity` is the credential).
+pub async fn export_unity_with_link(State(st): State<AppState>, Path(token): Path<String>) -> AppResult<Response> {
+    let grant = crate::uploads::take(&token, |k| matches!(k, crate::uploads::Kind::Unity { .. }), "export_unity")?;
+    let crate::uploads::Kind::Unity { file_id, nodes, scale, background, linear } = grant.kind else {
+        return Err(AppError::internal("wrong link kind"));
+    };
+    let (uid, fid) = (grant.user_id.clone(), file_id.clone());
+    st.db.call(move |c| file_access(c, &uid, &fid, Role::Viewer).map(|_| ())).await?;
+    unity_export_response(&st, &file_id, nodes, crate::unity::Options { scale, background, unity_linear: linear }).await
+}
+
 /// `GET /api/png-exports/{token}`: a PNG export, no sign-in (the link from
 /// MCP `export_png` is the credential).
 pub async fn export_png_with_link(State(st): State<AppState>, Path(token): Path<String>) -> AppResult<Response> {
