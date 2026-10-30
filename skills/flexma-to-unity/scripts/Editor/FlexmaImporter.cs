@@ -88,15 +88,32 @@ namespace Flexma.Import
             var result = new Result { ExportDir = Path.Combine("Library", "FlexmaImport", fileId) };
             try
             {
-                EditorUtility.DisplayProgressBar("Flexma import", "Downloading " + s.Frames.Length + " frame(s)…", 0.1f);
-                var zip = Download(host, fileId, s);
-                EditorUtility.DisplayProgressBar("Flexma import", "Unpacking…", 0.4f);
                 if (Directory.Exists(result.ExportDir))
                 {
                     Directory.Delete(result.ExportDir, true);
                 }
-                Extract(zip, result.ExportDir);
-                result.Manifest = JObject.Parse(File.ReadAllText(Path.Combine(result.ExportDir, "manifest.json")));
+                // A few frames per request: servers behind proxies (Cloudflare gives up after 100 s) answer each in time.
+                for (int i = 0; i < s.Frames.Length; i += FramesPerRequest)
+                {
+                    var batch = s.Frames.Skip(i).Take(FramesPerRequest).ToArray();
+                    EditorUtility.DisplayProgressBar("Flexma import", "Downloading frames " + (i + 1) + "–" + (i + batch.Length) + " of " + s.Frames.Length + "…", 0.1f + 0.35f * i / s.Frames.Length);
+                    var zip = Download(host, fileId, s, batch);
+                    string part = result.ExportDir + "-part";
+                    if (Directory.Exists(part))
+                    {
+                        Directory.Delete(part, true);
+                    }
+                    Extract(zip, part);
+                    result.Manifest = Merge(result.Manifest, JObject.Parse(File.ReadAllText(Path.Combine(part, "manifest.json"))));
+                    foreach (var file in Directory.GetFiles(part, "*", SearchOption.AllDirectories))
+                    {
+                        string to = Path.Combine(result.ExportDir, file.Substring(part.Length + 1));
+                        Directory.CreateDirectory(Path.GetDirectoryName(to));
+                        File.Copy(file, to, true);
+                    }
+                    Directory.Delete(part, true);
+                }
+                File.WriteAllText(Path.Combine(result.ExportDir, "manifest.json"), result.Manifest.ToString());
                 foreach (var w in result.Manifest["warnings"] ?? new JArray())
                 {
                     result.Warnings.Add((string)w);
@@ -134,7 +151,45 @@ namespace Flexma.Import
             return (m.Groups[1].Value, m.Groups[2].Value);
         }
 
-        static byte[] Download(string host, string fileId, Settings s)
+        /// <summary>Frames asked for in one request (see <see cref="Import"/>).</summary>
+        const int FramesPerRequest = 4;
+
+        /// <summary>Two exports' manifests as one: the frames one after the other, images, fonts and refs together.</summary>
+        static JObject Merge(JObject into, JObject more)
+        {
+            if (into == null)
+            {
+                return more;
+            }
+            foreach (var f in (JArray)more["frames"])
+            {
+                ((JArray)into["frames"]).Add(f);
+            }
+            foreach (var w in (JArray)more["warnings"] ?? new JArray())
+            {
+                ((JArray)into["warnings"]).Add(w);
+            }
+            foreach (var key in new[] { "sprites", "refs" })
+            {
+                var have = (JObject)into[key] ?? new JObject();
+                foreach (var p in (JObject)more[key] ?? new JObject())
+                {
+                    have[p.Key] = p.Value;
+                }
+                into[key] = have;
+            }
+            var fonts = (JArray)into["fonts"];
+            foreach (JObject f in (JArray)more["fonts"])
+            {
+                if (!fonts.Any(x => (string)x["file"] == (string)f["file"]))
+                {
+                    fonts.Add(f);
+                }
+            }
+            return into;
+        }
+
+        static byte[] Download(string host, string fileId, Settings s, string[] frames)
         {
             if (string.IsNullOrEmpty(s.Token))
             {
@@ -142,7 +197,7 @@ namespace Flexma.Import
             }
             using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) })
             {
-                string url = host + "/api/files/" + fileId + "/export.unity?nodes=" + Uri.EscapeDataString(string.Join(",", s.Frames))
+                string url = host + "/api/files/" + fileId + "/export.unity?nodes=" + Uri.EscapeDataString(string.Join(",", frames))
                     + "&scale=" + s.Scale.ToString(CultureInfo.InvariantCulture) + "&background=" + (s.Background ? "true" : "false")
                     // Linear projects blend see-through pixels differently; Flexma corrects its images for that.
                     + "&linear=" + (PlayerSettings.colorSpace == ColorSpace.Linear ? "true" : "false");
