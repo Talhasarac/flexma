@@ -541,7 +541,7 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         if let Some(native) = &l.native {
             let mut sprite = json!({ "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height });
-            let fix = |c: flexma_doc::Color| if correct { color_for_linear(c, backdrop) } else { c };
+            let fix = |c: flexma_doc::Color| if correct { color_for_linear(c, Behind::of(true, backdrop)) } else { c };
             match native {
                 Native::Solid(c) => sprite["color"] = json!(fix(*c).to_hex()),
                 Native::Gradient { angle, stops } => {
@@ -554,7 +554,7 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         // A tinted (white) image can't hold per-pixel corrections; its edges blend as Unity blends.
         if correct && l.tint.is_none() {
-            correct_for_linear(&mut pm, if l.see_through { backdrop } else { None });
+            correct_for_linear(&mut pm, Behind::of(l.see_through, backdrop));
         }
         let (pm, border) = compact(pm);
         let (w, h) = (pm.width(), pm.height());
@@ -567,7 +567,7 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         let mut sprite = json!({ "id": hash, "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height });
         if let Some(t) = l.tint {
-            let t = if correct && t.a < 0.999 { t.with_alpha(linear_alpha(t.a)) } else { t };
+            let t = if correct && t.a < 0.999 { color_for_linear(t, Behind::Unknown) } else { t };
             sprite["tint"] = json!(t.to_hex());
         }
         by_layer.insert(l.id, sprite);
@@ -640,41 +640,75 @@ fn linear_alpha(a: f32) -> f32 {
 /// and alpha that Unity's blend turns into the design's (`pixel_for_linear`).
 /// Nothing in the image depends on where the layer is, so copies share one
 /// image and nothing behind it in the design is drawn into it.
-fn correct_for_linear(pm: &mut Pixmap, backdrop: Option<[u8; 3]>) {
+fn correct_for_linear(pm: &mut Pixmap, behind: Behind) {
     for p in pm.pixels_mut() {
         let a = p.alpha();
         if a == 0 || a == 255 {
             continue;
         }
         let c = p.demultiply();
-        let (rgb, a) = pixel_for_linear([c.red(), c.green(), c.blue()], a, backdrop);
+        let (rgb, a) = pixel_for_linear([c.red(), c.green(), c.blue()], a, behind);
         *p = ColorU8::from_rgba(rgb[0], rgb[1], rgb[2], a).premultiply();
     }
 }
 
-/// One see-through color (sRGB, 0–255) as Unity should draw it. Near black
-/// (shadows, dims, scrims) only needs a higher alpha, which holds over any
-/// backdrop (`linear_alpha`). A lighter color is matched over `backdrop`, the
-/// one color behind the whole layer in the design (`backdrop_of`); without
-/// one it stays.
-fn pixel_for_linear(color: [u8; 3], alpha: u8, backdrop: Option<[u8; 3]>) -> ([u8; 3], u8) {
-    if color.iter().all(|&v| v <= DARK) {
-        return (color, (linear_alpha(alpha as f32 / 255.0) * 255.0).round() as u8);
-    }
-    match backdrop {
-        Some(b) => linear_match(color, b, alpha),
-        None => (color, alpha),
+/// What a layer's lighter see-through pixels are matched over.
+#[derive(Clone, Copy)]
+enum Behind {
+    /// Nothing: the layer is opaque and they are its smoothed edges, which
+    /// stay as they are.
+    Edges,
+    /// The one color behind the whole layer in the design (`backdrop_of`).
+    Color([u8; 3]),
+    /// Nothing in the design is behind it (the game shows there).
+    Unknown,
+}
+
+impl Behind {
+    fn of(see_through: bool, backdrop: Option<[u8; 3]>) -> Behind {
+        match (see_through, backdrop) {
+            (false, _) => Behind::Edges,
+            (true, Some(b)) => Behind::Color(b),
+            (true, None) => Behind::Unknown,
+        }
     }
 }
 
+/// One see-through color (sRGB, 0–255) as Unity should draw it. Near black
+/// (shadows, dims, scrims) and anything over an unknown backdrop gets what
+/// holds over any backdrop (`for_any_backdrop`), so a see-through panel's
+/// lighter rim is corrected like its darker body and doesn't outshine it. A
+/// lighter color over a known backdrop is matched to it exactly.
+fn pixel_for_linear(color: [u8; 3], alpha: u8, behind: Behind) -> ([u8; 3], u8) {
+    match behind {
+        _ if color.iter().all(|&v| v <= DARK) => for_any_backdrop(color, alpha),
+        Behind::Edges => (color, alpha),
+        Behind::Color(b) => linear_match(color, b, alpha),
+        Behind::Unknown => for_any_backdrop(color, alpha),
+    }
+}
+
+/// The color and alpha that come out as in the design over any backdrop, as
+/// near as one pair can: the alpha that lets as much of the backdrop through
+/// (`linear_alpha`, exact for black) and the color that then matches the
+/// design over black. Over brighter backdrops the result is a little darker
+/// than the design.
+fn for_any_backdrop(color: [u8; 3], alpha: u8) -> ([u8; 3], u8) {
+    use flexma_doc::Color;
+    let a0 = alpha as f32 / 255.0;
+    let a = linear_alpha(a0);
+    let c = color.map(|v| (Color::linear_to_srgb(Color::srgb_to_linear(v as f32 / 255.0 * a0) / a) * 255.0).round() as u8);
+    (c, (a * 255.0).round() as u8)
+}
+
 /// `pixel_for_linear` for a color.
-fn color_for_linear(c: flexma_doc::Color, backdrop: Option<[u8; 3]>) -> flexma_doc::Color {
+fn color_for_linear(c: flexma_doc::Color, behind: Behind) -> flexma_doc::Color {
     let a = (c.a.clamp(0.0, 1.0) * 255.0).round() as u8;
     if a == 0 || a == 255 {
         return c;
     }
     let v = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let (rgb, a) = pixel_for_linear([v(c.r), v(c.g), v(c.b)], a, backdrop);
+    let (rgb, a) = pixel_for_linear([v(c.r), v(c.g), v(c.b)], a, behind);
     flexma_doc::Color { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a: a as f32 / 255.0 }
 }
 
@@ -1000,8 +1034,9 @@ mod tests {
         let stops = scrim["gradient"]["stops"].as_array().unwrap();
         assert!(stops.len() >= 17, "{scrim}");
         let mid = stops.iter().find(|s| (s[0].as_f64().unwrap() - 0.55).abs() < 1e-3).unwrap();
-        let want = flexma_doc::Color { r: 13.0 / 255.0, g: 18.0 / 255.0, b: 15.0 / 255.0, a: linear_alpha(0xd9 as f32 / 255.0) };
+        let want = color_for_linear(flexma_doc::Color { r: 13.0 / 255.0, g: 18.0 / 255.0, b: 15.0 / 255.0, a: 0xd9 as f32 / 255.0 }, Behind::Unknown);
         assert_eq!(mid[1], want.to_hex());
+        assert!(want.a > 0.97 && want.g <= 18.0 / 255.0, "{want:?}");
         assert_eq!(stops.last().unwrap()[1], "#0d120f00");
         assert_eq!(layer(&m, "Bar").unwrap()["sprite"]["color"], "#e8b878");
         assert!(layer(&m, "Round").unwrap()["sprite"]["id"].is_string());
@@ -1010,6 +1045,25 @@ mod tests {
         // The line is clear of them; its 10% white is matched over the card.
         let line = layer(&m, "Line").unwrap()["sprite"]["color"].as_str().unwrap().to_string();
         assert!(line.starts_with("#") && line.len() == 9 && line != "#ffffff1a", "{line}");
+    }
+
+    /// A see-through pill with nothing behind it in the design (the game shows
+    /// there): its lighter rim is corrected like its darker body, so over any
+    /// backdrop the rim stands out no more than in the design. Left alone, it
+    /// stood out up to three times as much over bright backdrops.
+    #[test]
+    fn see_through_rims_never_outshine_their_body() {
+        use flexma_doc::Color;
+        let lin = |v: f32| Color::srgb_to_linear(v / 255.0);
+        // The pill's 80% fill, and its rim: a 9% white stroke over that fill.
+        let (body, rim) = (([13u8, 18, 15], 204u8), ([40u8, 44, 41], 209u8));
+        let unity = |(c, a): ([u8; 3], u8), b: f32| Color::linear_to_srgb(lin(c[1] as f32) * a as f32 / 255.0 + lin(b) * (1.0 - a as f32 / 255.0)) * 255.0;
+        let design = |(c, a): ([u8; 3], u8), b: f32| c[1] as f32 * a as f32 / 255.0 + b * (1.0 - a as f32 / 255.0);
+        for b in (0..=255).step_by(15).map(|b| b as f32) {
+            let (ub, ur) = (unity(pixel_for_linear(body.0, body.1, Behind::Unknown), b), unity(pixel_for_linear(rim.0, rim.1, Behind::Unknown), b));
+            let (db, dr) = (design(body, b), design(rim, b));
+            assert!(ur <= dr + 2.0 && ur - ub <= dr - db + 2.0, "over {b}: design body {db} rim {dr}, unity body {ub} rim {ur}");
+        }
     }
 
     /// An image with no stretchable middle stays as it is.
