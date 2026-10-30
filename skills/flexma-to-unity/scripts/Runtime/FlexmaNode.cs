@@ -19,6 +19,9 @@ namespace Flexma
         [Tooltip("The Flexma layer id; a re-import updates this object instead of making a new one.")]
         public string id;
 
+        [Tooltip("The Flexma layer type: FRAME, RECTANGLE, VECTOR, TEXT, INSTANCE…")]
+        public string type;
+
         [Tooltip("How a parent's auto layout sizes this layer horizontally.")]
         public Sizing horizontal;
 

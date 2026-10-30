@@ -403,6 +403,7 @@ namespace Flexma.Import
                 go.layer = 5; // UI
                 var node = Ensure<FlexmaNode>(go);
                 node.id = id;
+                node.type = (string)n["type"];
                 node.horizontal = ParseSizing((string)n["sizing"]?["h"]);
                 node.vertical = ParseSizing((string)n["sizing"]?["v"]);
                 node.absolute = (bool?)n["absolute"] ?? false;
