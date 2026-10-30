@@ -357,10 +357,13 @@ fn paints(n: &Node) -> bool {
     }
 }
 
-/// The one opaque color a layer paints with: every visible fill and stroke
-/// the same solid color, and no effects. Its image then comes white with the
-/// color as a tint, so the game can recolor it (an icon that turns green when
-/// maxed, a selected tab) the way Unity UI usually does.
+/// The one color a layer paints with: every visible fill and stroke the same
+/// solid color, and no effects. Its image then comes white with the color as
+/// a tint, so the game can recolor it (an icon that turns green when maxed, a
+/// selected tab) the way Unity UI usually does. See-through colors only count
+/// when they're near black (dims, scrims): their tint can be corrected for
+/// linear blending once for any backdrop (`linear_alpha`), while lighter
+/// see-through layers are corrected pixel by pixel against the design.
 fn single_color(n: &Node) -> Option<flexma_doc::Color> {
     if n.kind == NodeType::Paint || n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, .. } | Effect::LayerBlur { visible: true, .. } | Effect::BackgroundBlur { visible: true, .. })) {
         return None;
@@ -371,7 +374,8 @@ fn single_color(n: &Node) -> Option<flexma_doc::Color> {
     for p in fills.chain(strokes) {
         let Paint::Solid { color: c, opacity, .. } = p else { return None };
         let c = c.with_alpha(c.a * opacity);
-        if c.a < 0.999 || color.is_some_and(|k| k.to_hex() != c.to_hex()) {
+        let dark = c.r.max(c.g).max(c.b) <= 0.1;
+        if (c.a < 0.999 && !dark) || color.is_some_and(|k| k.to_hex() != c.to_hex()) {
             return None;
         }
         color = Some(c);
@@ -449,6 +453,7 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         let mut sprite = json!({ "id": hash, "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height });
         if let Some(t) = l.tint {
+            let t = if correct && t.a < 0.999 { t.with_alpha(linear_alpha(t.a)) } else { t };
             sprite["tint"] = json!(t.to_hex());
         }
         by_layer.insert(l.id, sprite);
@@ -499,12 +504,20 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
 /// A white image colored by `tint`, the way Unity multiplies `Image.color` in.
 fn tinted(pm: &Pixmap, tint: flexma_doc::Color) -> Pixmap {
     let mut out = pm.clone();
-    let k = [tint.r, tint.g, tint.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u16);
+    let a = (tint.a.clamp(0.0, 1.0) * 255.0).round() as u16;
+    let k = [tint.r, tint.g, tint.b].map(|v| (v.clamp(0.0, 1.0) * tint.a.clamp(0.0, 1.0) * 255.0).round() as u16);
     for p in out.pixels_mut() {
         let m = |v: u8, k: u16| ((v as u16 * k + 127) / 255) as u8;
-        *p = PremultipliedColorU8::from_rgba(m(p.red(), k[0]), m(p.green(), k[1]), m(p.blue(), k[2]), p.alpha()).unwrap_or(*p);
+        *p = PremultipliedColorU8::from_rgba(m(p.red(), k[0]), m(p.green(), k[1]), m(p.blue(), k[2]), m(p.alpha(), a)).unwrap_or(*p);
     }
     out
+}
+
+/// The alpha at which black darkens in linear light about as much as it does
+/// at `a` in sRGB. One alpha can't match every backdrop exactly (sRGB isn't a
+/// pure power curve); 2.1 keeps it within 8 levels from dark to light.
+fn linear_alpha(a: f32) -> f32 {
+    1.0 - (1.0 - a.clamp(0.0, 1.0)).powf(2.1)
 }
 
 /// Unity, in Linear color space, blends see-through pixels in linear light;
@@ -721,6 +734,21 @@ mod tests {
                 let design = (color[k] as f32 * alpha as f32 / 255.0 + backdrop[k] as f32 * (1.0 - alpha as f32 / 255.0)).round();
                 let unity = Color::linear_to_srgb(Color::srgb_to_linear(c[k] as f32 / 255.0) * af + Color::srgb_to_linear(backdrop[k] as f32 / 255.0) * (1.0 - af)) * 255.0;
                 assert!((design - unity).abs() <= 2.0, "{color:?} at {alpha} over {backdrop:?}: design {design}, unity {unity} ({c:?} at {a})");
+            }
+        }
+    }
+
+    /// A black dim at the corrected alpha darkens in linear light about as the
+    /// design's alpha does in sRGB, within 8 levels from dark to light
+    /// backdrops. Uncorrected, a 65% dim over mid grey is 32 levels too light.
+    #[test]
+    fn dims_darken_like_the_design() {
+        use flexma_doc::Color;
+        for a in [0.5f32, 0.65, 0.72, 0.75, 0.85] {
+            for (b, tolerance) in [(40u8, 8.0), (90, 8.0), (128, 8.0), (180, 8.0), (230, 8.0)] {
+                let design = b as f32 * (1.0 - a);
+                let unity = Color::linear_to_srgb(Color::srgb_to_linear(b as f32 / 255.0) * (1.0 - linear_alpha(a))) * 255.0;
+                assert!((design - unity).abs() <= tolerance, "alpha {a} over {b}: design {design}, unity {unity}");
             }
         }
     }
