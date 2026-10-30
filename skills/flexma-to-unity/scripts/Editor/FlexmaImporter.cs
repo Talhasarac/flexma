@@ -181,12 +181,14 @@ namespace Flexma.Import
         }
 
         // ---------------- images ----------------
-        /// <summary>Copies the layer images in (named by content, so each is imported once) as sprites with their 9-slice borders.</summary>
+        /// <summary>Copies the layer images in (named by content, so each is imported once) as sprites with their 9-slice
+        /// borders. UI pieces stay uncompressed (exact pixels); images over 1024 px (artwork, full-screen backdrops) are
+        /// compressed at high quality, which looks the same and takes a quarter of the memory.</summary>
         static Dictionary<string, Sprite> ImportSprites(JObject manifest, string dir, string folder)
         {
             Directory.CreateDirectory(folder);
-            var fresh = new List<(string path, JObject info)>();
             var all = new Dictionary<string, string>();
+            bool copied = false;
             foreach (var p in (JObject)manifest["sprites"])
             {
                 string path = folder + "/" + p.Key + ".png";
@@ -194,41 +196,55 @@ namespace Flexma.Import
                 if (!File.Exists(path))
                 {
                     File.Copy(Path.Combine(dir, (string)p.Value["file"]), path);
-                    fresh.Add((path, (JObject)p.Value));
+                    copied = true;
                 }
             }
-            if (fresh.Count > 0)
+            if (copied)
             {
                 AssetDatabase.Refresh();
-                AssetDatabase.StartAssetEditing();
-                try
+            }
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                foreach (var p in (JObject)manifest["sprites"])
                 {
-                    foreach (var (path, info) in fresh)
+                    string path = all[p.Key];
+                    var info = (JObject)p.Value;
+                    var ti = (TextureImporter)AssetImporter.GetAtPath(path);
+                    var b = (JArray)info["border"];
+                    var border = new Vector4((float)b[0], (float)b[1], (float)b[2], (float)b[3]);
+                    float ppu = 100f * (float)info["scale"];
+                    bool big = (int)info["w"] > 1024 || (int)info["h"] > 1024;
+                    var compression = big ? TextureImporterCompression.CompressedHQ : TextureImporterCompression.Uncompressed;
+                    var ts = new TextureImporterSettings();
+                    ti.ReadTextureSettings(ts);
+                    bool same = ti.textureType == TextureImporterType.Sprite && ti.spriteImportMode == SpriteImportMode.Single
+                        && Mathf.Approximately(ti.spritePixelsPerUnit, ppu) && ti.spriteBorder == border && ti.textureCompression == compression
+                        && ti.mipmapEnabled && ts.spriteMeshType == SpriteMeshType.FullRect;
+                    if (same)
                     {
-                        var ti = (TextureImporter)AssetImporter.GetAtPath(path);
-                        var b = (JArray)info["border"];
-                        ti.textureType = TextureImporterType.Sprite;
-                        ti.spriteImportMode = SpriteImportMode.Single;
-                        ti.spritePixelsPerUnit = 100f * (float)info["scale"];
-                        ti.spriteBorder = new Vector4((float)b[0], (float)b[1], (float)b[2], (float)b[3]);
-                        ti.alphaIsTransparency = true;
-                        ti.sRGBTexture = true;
-                        ti.mipmapEnabled = true;
-                        ti.filterMode = FilterMode.Trilinear;
-                        ti.wrapMode = TextureWrapMode.Clamp;
-                        ti.npotScale = TextureImporterNPOTScale.None;
-                        ti.textureCompression = TextureImporterCompression.Uncompressed;
-                        var ts = new TextureImporterSettings();
-                        ti.ReadTextureSettings(ts);
-                        ts.spriteMeshType = SpriteMeshType.FullRect;
-                        ti.SetTextureSettings(ts);
-                        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+                        continue;
                     }
+                    ti.textureType = TextureImporterType.Sprite;
+                    ti.spriteImportMode = SpriteImportMode.Single;
+                    ti.spritePixelsPerUnit = ppu;
+                    ti.spriteBorder = border;
+                    ti.alphaIsTransparency = true;
+                    ti.sRGBTexture = true;
+                    ti.mipmapEnabled = true;
+                    ti.filterMode = FilterMode.Trilinear;
+                    ti.wrapMode = TextureWrapMode.Clamp;
+                    ti.npotScale = TextureImporterNPOTScale.None;
+                    ti.textureCompression = compression;
+                    ti.ReadTextureSettings(ts);
+                    ts.spriteMeshType = SpriteMeshType.FullRect;
+                    ti.SetTextureSettings(ts);
+                    AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
                 }
-                finally
-                {
-                    AssetDatabase.StopAssetEditing();
-                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
             }
             return all.ToDictionary(kv => kv.Key, kv => AssetDatabase.LoadAssetAtPath<Sprite>(kv.Value));
         }
