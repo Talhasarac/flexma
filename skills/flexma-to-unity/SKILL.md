@@ -10,6 +10,7 @@ Hand-rebuilding a design in Unity code drifts from the design. Values get retype
 - **Every layer that paints something** (fills, strokes, corners, shadows, gradients, icons, images) arrives as an image drawn by Flexma's own renderer, exactly as it shows in the design.
   - It is already cut by the frames that clip it. A header inside a rounded window comes with its top corners rounded and its bottom square.
   - Each image's stretchable middle is cut down to a few pixels and set as the sprite's 9-slice border. A 1680×952 window is a ~100 px texture that stretches to any size. Identical images are shared.
+- **Single-color layers** (icons, pips, badges, solid pills) come white with their design color as `Image.color`, so code can recolor them (an icon that turns green when maxed). The color is the design's, so nothing changes until code changes it.
 - **Text stays live TextMeshPro text.** It uses the design's own font files, one per weight, with the same size, letter spacing, line height and baseline. Code can still change it and translations still work.
 - **Constraints become anchors**, so screens resize like Unity UI.
 - **Auto layout becomes `FlexmaLayout`**, which runs Flexma's layout rules at runtime. A pill whose number grows still hugs it, and a list reflows when items are added.
@@ -88,7 +89,7 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 
 - **Never restyle in code.** That means colors, sizes, sprites, fonts or positions. Change the design in Flexma and import again; otherwise Unity and Flexma drift apart again, which is the problem this skill exists to fix.
 - **Lists.** Import the row or card component as its own prefab and `Instantiate` one per item under the list frame (an auto-layout frame). `FlexmaLayout` places them as Flexma would. Delete the sample rows the design shows, or hide them.
-- **States** (selected tab, disabled button) are separate layers or components in the design. Switch them with `SetActive`, or swap prefab instances, not by tinting.
+- **States** (selected tab, disabled button) come from the design: copy the look of the layer the design shows in that state onto the one changing (its sprites, tints and text colors, matched child by child), or switch layers with `SetActive`. Recoloring a single-color layer through `Image.color` to another design color is fine; inventing new colors in code isn't.
 - **Buttons** need a `Button` (and an `Image` as its target graphic, which a layer with a fill already has). Add them in code or on the prefab; re-imports keep added components.
 
 ### 6. Re-import after design changes
@@ -97,6 +98,15 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
   - Components and child objects added in Unity stay.
   - Layers deleted in Flexma are removed, with anything added under them.
 - Run the check again and compare with the last numbers.
+
+## Project hooks
+
+Set these from an `[InitializeOnLoad]` editor class in the project (they run on every import, so keep them idempotent):
+
+- `FlexmaImporter.TextComponent`: the text class imported text gets, e.g. the project's localizing subclass of `TextMeshProUGUI`.
+- `FlexmaImporter.FontAssetCreated`: runs for each new font asset, e.g. to give it the project's fallback fonts (CJK, Thai).
+- `FlexmaImporter.LayerBuilt`: runs for each layer with its manifest entry, for project-specific components.
+- `Settings.Folder`: where imports go. Use a `Resources` folder when game code loads the prefabs by name.
 
 ## Designing in Flexma for Unity
 

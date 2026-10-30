@@ -55,6 +55,8 @@ struct Layer {
     /// Shown in the design (it and its parents), and how opaque, all told.
     shown: bool,
     opacity: f64,
+    /// Drawn white, to be colored by Unity's `Image.color` (`single_color`).
+    tint: Option<flexma_doc::Color>,
 }
 
 /// What the export draws, gathered while reading the document.
@@ -203,11 +205,12 @@ impl Planner<'_> {
         if n.kind == NodeType::Text {
             o.insert("text".into(), self.text(n));
         } else if (!root || self.opts.background) && paints(n) {
-            let layers = Layers::OwnPaint;
+            let tint = single_color(n);
+            let layers = if tint.is_some() { Layers::OwnPaintWhite } else { Layers::OwnPaint };
             if let Some((svg, bounds)) = render::export_svg_as(self.doc, std::slice::from_ref(&n.id), None, AssetMode::Inline(self.data_dir, self.allowed), Some(self.fonts), self.paint, layers) {
                 // The importer fills in the image id once it's drawn.
                 o.insert("sprite".into(), json!({ "x": bounds.x, "y": bounds.y, "w": bounds.width, "h": bounds.height }));
-                self.layers.push(Layer { id: n.id.clone(), name: n.name.clone(), svg, bounds, frame: spot.frame, at: spot.at, shown: spot.shown, opacity: spot.opacity });
+                self.layers.push(Layer { id: n.id.clone(), name: n.name.clone(), svg, bounds, frame: spot.frame, at: spot.at, shown: spot.shown, opacity: spot.opacity, tint });
             }
         }
         let doc = self.doc;
@@ -354,6 +357,28 @@ fn paints(n: &Node) -> bool {
     }
 }
 
+/// The one opaque color a layer paints with: every visible fill and stroke
+/// the same solid color, and no effects. Its image then comes white with the
+/// color as a tint, so the game can recolor it (an icon that turns green when
+/// maxed, a selected tab) the way Unity UI usually does.
+fn single_color(n: &Node) -> Option<flexma_doc::Color> {
+    if n.kind == NodeType::Paint || n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, .. } | Effect::LayerBlur { visible: true, .. } | Effect::BackgroundBlur { visible: true, .. })) {
+        return None;
+    }
+    let fills = n.visible_fills().filter(|_| !n.hide_fill);
+    let strokes = n.visible_strokes().filter(|_| n.stroke_weight > 0.0);
+    let mut color: Option<flexma_doc::Color> = None;
+    for p in fills.chain(strokes) {
+        let Paint::Solid { color: c, opacity, .. } = p else { return None };
+        let c = c.with_alpha(c.a * opacity);
+        if c.a < 0.999 || color.is_some_and(|k| k.to_hex() != c.to_hex()) {
+            return None;
+        }
+        color = Some(c);
+    }
+    color
+}
+
 /// A paint that isn't fully transparent.
 fn shows(p: &Paint) -> bool {
     match p {
@@ -399,10 +424,14 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         let place = l.at.filter(|_| (s - scale).abs() < 1e-3).map(|(x, y)| (((x + l.bounds.x) * scale as f64).round() as i32, ((y + l.bounds.y) * scale as f64).round() as i32));
         if let (Some(canvas), Some((px, py))) = (canvases.get_mut(l.frame).and_then(Option::as_mut), place) {
-            let fixes = correct_for_linear(&pm, canvas, px, py);
+            // A tinted (white) image can't hold per-pixel corrections; its edges blend as Unity blends.
+            let fixes = if l.tint.is_some() { Vec::new() } else { correct_for_linear(&pm, canvas, px, py) };
             if l.shown {
                 let paint = PixmapPaint { opacity: l.opacity as f32, ..PixmapPaint::default() };
-                canvas.draw_pixmap(px, py, pm.as_ref(), &paint, Transform::identity(), None);
+                match l.tint {
+                    Some(t) => canvas.draw_pixmap(px, py, tinted(&pm, t).as_ref(), &paint, Transform::identity(), None),
+                    None => canvas.draw_pixmap(px, py, pm.as_ref(), &paint, Transform::identity(), None),
+                }
             }
             let out = pm.pixels_mut();
             for (i, c) in fixes {
@@ -418,7 +447,11 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
             sprites.insert(hash.clone(), json!({ "file": file, "w": w, "h": h, "scale": s, "border": border }));
             files.push((file, png));
         }
-        by_layer.insert(l.id, json!({ "id": hash, "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height }));
+        let mut sprite = json!({ "id": hash, "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height });
+        if let Some(t) = l.tint {
+            sprite["tint"] = json!(t.to_hex());
+        }
+        by_layer.insert(l.id, sprite);
     }
     // Point the layers at their images (layers that drew nothing lose theirs).
     fn link(v: &mut Value, by_layer: &HashMap<String, Value>) {
@@ -461,6 +494,17 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
     }
     files.insert(0, ("manifest.json".into(), serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?));
     zip(files)
+}
+
+/// A white image colored by `tint`, the way Unity multiplies `Image.color` in.
+fn tinted(pm: &Pixmap, tint: flexma_doc::Color) -> Pixmap {
+    let mut out = pm.clone();
+    let k = [tint.r, tint.g, tint.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u16);
+    for p in out.pixels_mut() {
+        let m = |v: u8, k: u16| ((v as u16 * k + 127) / 255) as u8;
+        *p = PremultipliedColorU8::from_rgba(m(p.red(), k[0]), m(p.green(), k[1]), m(p.blue(), k[2]), p.alpha()).unwrap_or(*p);
+    }
+    out
 }
 
 /// Unity, in Linear color space, blends see-through pixels in linear light;

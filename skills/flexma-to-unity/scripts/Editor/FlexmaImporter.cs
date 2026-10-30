@@ -28,6 +28,17 @@ namespace Flexma.Import
     /// </summary>
     public static class FlexmaImporter
     {
+        /// <summary>The text component imported text gets: TextMeshProUGUI or a project's subclass of it (one that
+        /// localizes, say). Set it from an [InitializeOnLoad] editor class.</summary>
+        public static Type TextComponent = typeof(TextMeshProUGUI);
+
+        /// <summary>Called for each font asset the import creates, e.g. to give it the project's fallback fonts.</summary>
+        public static event Action<TMP_FontAsset> FontAssetCreated;
+
+        /// <summary>Called for each layer after it's built (the object and its manifest entry), for project-specific
+        /// components. Runs on every import, so make it idempotent.</summary>
+        public static event Action<GameObject, JObject> LayerBuilt;
+
         public sealed class Settings
         {
             /// <summary>The file's link, https://host/file/ID.</summary>
@@ -262,6 +273,7 @@ namespace Flexma.Import
                     }
                     fa.material.name = fa.name + " Material";
                     AssetDatabase.AddObjectToAsset(fa.material, fa);
+                    FontAssetCreated?.Invoke(fa);
                 }
                 assets[file] = fa;
             }
@@ -464,6 +476,7 @@ namespace Flexma.Import
                     UnityEngine.Object.DestroyImmediate(mask);
                 }
 
+                LayerBuilt?.Invoke(go, n);
                 int order = go.transform.Find(PaintName) != null ? 1 : 0;
                 foreach (JObject c in kids)
                 {
@@ -620,7 +633,8 @@ namespace Flexma.Import
                 img.fillCenter = true;
                 img.preserveAspect = false;
                 img.pixelsPerUnitMultiplier = 1;
-                img.color = Color.white;
+                // Single-color layers come white with their color here, so code can recolor them.
+                img.color = s["tint"] != null ? ParseColor((string)s["tint"]) : Color.white;
                 string type = (string)n["type"];
                 // Panels catch clicks like uGUI panels do; icons and decorations let them through.
                 img.raycastTarget = (type == "FRAME" || type == "COMPONENT" || type == "INSTANCE" || type == "RECTANGLE") && (img.gameObject == go);
@@ -679,7 +693,11 @@ namespace Flexma.Import
             /// height and baseline (margins put each baseline where Flexma's line box puts it).</summary>
             void Text(GameObject go, JObject n, JObject t, Vector2 size)
             {
-                var tmp = Ensure<TextMeshProUGUI>(go);
+                var tmp = go.GetComponent<TextMeshProUGUI>();
+                if (tmp == null)
+                {
+                    tmp = (TextMeshProUGUI)go.AddComponent(TextComponent);
+                }
                 string fontFile = (string)t["font"];
                 TMP_FontAsset fa = null;
                 if ((fontFile == null) || !fonts.TryGetValue(fontFile, out fa))

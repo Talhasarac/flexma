@@ -50,6 +50,9 @@ pub struct SvgOptions<'a> {
     pub own_paint: bool,
     /// Leave out the export roots' own paint and effects; their children draw.
     pub skip_root_paint: bool,
+    /// With `own_paint`: draw the root's solid fills and strokes white, for
+    /// engines that color the image themselves (Unity's `Image.color`).
+    pub white_paint: bool,
 }
 
 impl Default for SvgOptions<'_> {
@@ -67,6 +70,7 @@ impl Default for SvgOptions<'_> {
             paint_tiles: &|_| Vec::new(),
             own_paint: false,
             skip_root_paint: false,
+            white_paint: false,
         }
     }
 }
@@ -968,6 +972,21 @@ impl Writer<'_> {
     fn node(&mut self, n: &Node, _parent_world: &Affine) {
         let root = self.roots.contains(&n.id);
         let own = self.opts.own_paint && root;
+        let whitened;
+        let n = if own && self.opts.white_paint {
+            let mut w = n.clone();
+            let white = |p: &mut Paint| {
+                if let Paint::Solid { color, opacity, .. } = p {
+                    (*color, *opacity) = (Color::WHITE, 1.0);
+                }
+            };
+            w.fills.iter_mut().for_each(white);
+            w.strokes.iter_mut().for_each(white);
+            whitened = w;
+            &whitened
+        } else {
+            n
+        };
         if self.stopped || !(n.visible || own) || !n.kind.is_scene() {
             return;
         }

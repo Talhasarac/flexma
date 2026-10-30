@@ -46,7 +46,7 @@ pub fn thumbnail_png(doc: &Document, data_dir: &Path, allowed: &HashSet<String>,
     let measure = |n: &flexma_doc::Node, s: &str| measurer.measure(n, s);
     let metrics = |n: &flexma_doc::Node| measurer.metrics(n);
     let runs = |n: &flexma_doc::Node, s: &str| measurer.svg_runs(n, s);
-    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), font_runs: Some(&runs), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true), own_paint: false, skip_root_paint: false };
+    let opts = SvgOptions { padding: 48.0, background: Some(bg), resolve_asset: &resolve, image_size: &size, measure_text: Some(&measure), font_metrics: Some(&metrics), font_runs: Some(&runs), resolve_variant: &variant, linear, paint_tiles: &|l| paint.tiles(l, true), own_paint: false, skip_root_paint: false, white_paint: false };
     let (svg, _) = export(doc, &[page], &opts)?;
     svg_to_png(&svg, 2.0, THUMBNAIL_PX, fonts, linear, Some((data_dir, allowed))).ok().map(|(png, _, _)| png)
 }
@@ -136,6 +136,8 @@ pub enum Layers {
     All,
     /// Only the one root's own paint, as `SvgOptions::own_paint` describes.
     OwnPaint,
+    /// `OwnPaint` with its solid colors white (`SvgOptions::white_paint`).
+    OwnPaintWhite,
     /// Everything but the roots' own paint (`SvgOptions::skip_root_paint`).
     WithoutRootPaint,
 }
@@ -164,8 +166,9 @@ pub fn export_svg_as(doc: &Document, ids: &[NodeId], background: Option<Color>, 
         resolve_variant: &variant,
         linear,
         paint_tiles: &|l| paint.tiles(l, inline),
-        own_paint: layers == Layers::OwnPaint,
+        own_paint: matches!(layers, Layers::OwnPaint | Layers::OwnPaintWhite),
         skip_root_paint: layers == Layers::WithoutRootPaint,
+        white_paint: layers == Layers::OwnPaintWhite,
     };
     export(doc, ids, &opts)
 }
