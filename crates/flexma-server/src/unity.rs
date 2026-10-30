@@ -64,6 +64,8 @@ struct Layer {
     native: Option<Native>,
     /// Some of its paint is see-through on purpose (not just smoothed edges).
     see_through: bool,
+    /// Its fill is a near-black see-through color (a dark glass panel).
+    dark_body: bool,
 }
 
 /// A layer Unity draws without an image: a plain rectangle (no corners,
@@ -233,8 +235,8 @@ impl Planner<'_> {
             if let Some((svg, bounds)) = render::export_svg_as(self.doc, std::slice::from_ref(&n.id), None, AssetMode::Inline(self.data_dir, self.allowed), Some(self.fonts), self.paint, layers) {
                 // The importer fills in the image id (or the color) once it's drawn.
                 o.insert("sprite".into(), json!({ "x": bounds.x, "y": bounds.y, "w": bounds.width, "h": bounds.height }));
-                let see_through = see_through(n);
-                self.layers.push(Layer { id: n.id.clone(), name: n.name.clone(), svg, bounds, frame: spot.frame, at: spot.at, shown: spot.shown, opacity: spot.opacity, tint, native, see_through });
+                let (see_through, dark_body) = (see_through(n), dark_body(n));
+                self.layers.push(Layer { id: n.id.clone(), name: n.name.clone(), svg, bounds, frame: spot.frame, at: spot.at, shown: spot.shown, opacity: spot.opacity, tint, native, see_through, dark_body });
             }
         }
         let doc = self.doc;
@@ -455,6 +457,20 @@ fn see_through(n: &Node) -> bool {
     }) || n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, color, .. } if color.r.max(color.g).max(color.b) > DARK as f32 / 255.0))
 }
 
+/// The layer's fills are near-black and see-through: a dark glass panel or a
+/// scrim, whose lighter edge (a faint border) is corrected like its body when
+/// nothing is behind it in the design (`Behind::Unknown`).
+fn dark_body(n: &Node) -> bool {
+    let dark = |c: &flexma_doc::Color| c.r.max(c.g).max(c.b) <= DARK as f32 / 255.0;
+    let mut fills = n.visible_fills().filter(|p| !n.hide_fill && shows(p)).peekable();
+    fills.peek().is_some()
+        && fills.all(|p| match p {
+            Paint::Solid { color, opacity, .. } => dark(color) && color.a * opacity < 0.999,
+            Paint::LinearGradient { stops, opacity, .. } => stops.iter().all(|s| dark(&s.color)) && (*opacity < 0.999 || stops.iter().any(|s| s.color.a < 0.999)),
+            _ => false,
+        })
+}
+
 /// The one color a layer paints with: every visible fill and stroke the same
 /// solid color, and no effects. Its image then comes white with the color as
 /// a tint, so the game can recolor it (an icon that turns green when maxed, a
@@ -541,7 +557,7 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         if let Some(native) = &l.native {
             let mut sprite = json!({ "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height });
-            let fix = |c: flexma_doc::Color| if correct { color_for_linear(c, Behind::of(true, backdrop)) } else { c };
+            let fix = |c: flexma_doc::Color| if correct { color_for_linear(c, Behind::of(true, l.dark_body, backdrop)) } else { c };
             match native {
                 Native::Solid(c) => sprite["color"] = json!(fix(*c).to_hex()),
                 Native::Gradient { angle, stops } => {
@@ -554,7 +570,7 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
         }
         // A tinted (white) image can't hold per-pixel corrections; its edges blend as Unity blends.
         if correct && l.tint.is_none() {
-            correct_for_linear(&mut pm, Behind::of(l.see_through, backdrop));
+            correct_for_linear(&mut pm, Behind::of(l.see_through, l.dark_body, backdrop));
         }
         let (pm, border) = compact(pm);
         let (w, h) = (pm.width(), pm.height());
@@ -655,34 +671,36 @@ fn correct_for_linear(pm: &mut Pixmap, behind: Behind) {
 /// What a layer's lighter see-through pixels are matched over.
 #[derive(Clone, Copy)]
 enum Behind {
-    /// Nothing: the layer is opaque and they are its smoothed edges, which
-    /// stay as they are.
-    Edges,
+    /// Nothing; they stay as they are: an opaque layer's smoothed edges, or
+    /// light paint (frost, glows) with nothing behind it in the design.
+    Leave,
     /// The one color behind the whole layer in the design (`backdrop_of`).
     Color([u8; 3]),
-    /// Nothing in the design is behind it (the game shows there).
+    /// Nothing in the design is behind a dark glass panel (the game shows
+    /// there): its lighter border is corrected like its body.
     Unknown,
 }
 
 impl Behind {
-    fn of(see_through: bool, backdrop: Option<[u8; 3]>) -> Behind {
+    fn of(see_through: bool, dark_body: bool, backdrop: Option<[u8; 3]>) -> Behind {
         match (see_through, backdrop) {
-            (false, _) => Behind::Edges,
+            (false, _) => Behind::Leave,
             (true, Some(b)) => Behind::Color(b),
-            (true, None) => Behind::Unknown,
+            (true, None) if dark_body => Behind::Unknown,
+            (true, None) => Behind::Leave,
         }
     }
 }
 
 /// One see-through color (sRGB, 0–255) as Unity should draw it. Near black
-/// (shadows, dims, scrims) and anything over an unknown backdrop gets what
-/// holds over any backdrop (`for_any_backdrop`), so a see-through panel's
-/// lighter rim is corrected like its darker body and doesn't outshine it. A
-/// lighter color over a known backdrop is matched to it exactly.
+/// (shadows, dims, scrims) gets what holds over any backdrop
+/// (`for_any_backdrop`); so does a dark glass panel's lighter border, so it
+/// doesn't outshine the panel. A lighter color over a known backdrop is
+/// matched to it exactly.
 fn pixel_for_linear(color: [u8; 3], alpha: u8, behind: Behind) -> ([u8; 3], u8) {
     match behind {
         _ if color.iter().all(|&v| v <= DARK) => for_any_backdrop(color, alpha),
-        Behind::Edges => (color, alpha),
+        Behind::Leave => (color, alpha),
         Behind::Color(b) => linear_match(color, b, alpha),
         Behind::Unknown => for_any_backdrop(color, alpha),
     }
@@ -1023,6 +1041,8 @@ mod tests {
             { "type": "rectangle", "name": "Scrim", "x": 0, "y": 0, "w": 1000, "h": 1080,
               "fill": { "type": "LINEAR_GRADIENT", "angle": 0, "stops": [{ "position": 0, "color": "#0d120ff5" }, { "position": 0.55, "color": "#0d120fd9" }, { "position": 1, "color": "#0d120f00" }] } },
             { "type": "frame", "name": "Bar", "x": 100, "y": 900, "w": 600, "h": 4, "fill": "#e8b878" },
+            { "type": "rectangle", "name": "Frost", "x": 1660, "y": 0, "w": 260, "h": 1080,
+              "fill": { "type": "LINEAR_GRADIENT", "angle": 180, "stops": [{ "position": 0, "color": "#bfe3ff59" }, { "position": 1, "color": "#bfe3ff00" }] } },
             { "type": "frame", "name": "Round", "x": 100, "y": 950, "w": 600, "h": 40, "radius": 12, "fill": "#e8b878" },
             { "type": "frame", "name": "Card", "x": 1200, "y": 100, "w": 400, "h": 300, "radius": 24, "fill": "#1a2a1f", "clip": true, "children": [
                 { "type": "rectangle", "name": "Header", "x": 0, "y": 0, "w": 400, "h": 60, "fill": "#2a3a2f" },
@@ -1039,6 +1059,8 @@ mod tests {
         assert!(want.a > 0.97 && want.g <= 18.0 / 255.0, "{want:?}");
         assert_eq!(stops.last().unwrap()[1], "#0d120f00");
         assert_eq!(layer(&m, "Bar").unwrap()["sprite"]["color"], "#e8b878");
+        // Light frost with nothing behind it in the design stays as designed.
+        assert_eq!(layer(&m, "Frost").unwrap()["sprite"]["gradient"]["stops"][0][1], "#bfe3ff59");
         assert!(layer(&m, "Round").unwrap()["sprite"]["id"].is_string());
         // The header runs into the card's rounded corners, so the card cuts it: an image.
         assert!(layer(&m, "Header").unwrap()["sprite"]["id"].is_string());
