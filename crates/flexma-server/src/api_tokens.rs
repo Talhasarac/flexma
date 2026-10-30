@@ -187,6 +187,7 @@ pub const FLEXMA_TO_UNITY_SKILL: Skill = Skill {
         ("scripts/Runtime/FlexmaLayout.cs", include_str!("../../../skills/flexma-to-unity/scripts/Runtime/FlexmaLayout.cs")),
         ("scripts/Runtime/FlexmaScreens.cs", include_str!("../../../skills/flexma-to-unity/scripts/Runtime/FlexmaScreens.cs")),
         ("scripts/Runtime/FlexmaScrollHug.cs", include_str!("../../../skills/flexma-to-unity/scripts/Runtime/FlexmaScrollHug.cs")),
+        ("scripts/Runtime/FlexmaGradient.cs", include_str!("../../../skills/flexma-to-unity/scripts/Runtime/FlexmaGradient.cs")),
         ("scripts/Editor/FlexmaImporter.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImporter.cs")),
         ("scripts/Editor/FlexmaImportCheck.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImportCheck.cs")),
         ("scripts/Editor/FlexmaImportWindow.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImportWindow.cs")),

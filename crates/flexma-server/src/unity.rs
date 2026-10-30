@@ -4,7 +4,10 @@
 //! Every layer that paints something comes as its own image, drawn by the
 //! renderer exactly as the design shows it (cut by the frames that clip it),
 //! with the stretchable middle cut down to a few pixels so Unity draws it as
-//! a 9-slice at any size. Text comes as text, so TextMeshPro keeps it live,
+//! a 9-slice at any size. Plain rectangles filled with one color or a linear
+//! gradient come without an image: Unity draws them itself (`Native`). An
+//! image depends only on the layer, never on what is behind it, so copies of
+//! one button share one image. Text comes as text, so TextMeshPro keeps it live,
 //! with the font files it draws with and the metrics that place its
 //! baseline. Layout comes as constraints (Unity anchors) and auto layout
 //! settings, so the screen resizes and reflows like the design.
@@ -57,6 +60,21 @@ struct Layer {
     opacity: f64,
     /// Drawn white, to be colored by Unity's `Image.color` (`single_color`).
     tint: Option<flexma_doc::Color>,
+    /// Drawn by Unity without an image (`plain`).
+    native: Option<Native>,
+    /// Some of its paint is see-through on purpose (not just smoothed edges).
+    see_through: bool,
+}
+
+/// A layer Unity draws without an image: a plain rectangle (no corners,
+/// strokes or effects, nothing clipping it) with one fill.
+#[derive(Clone, Debug, PartialEq)]
+enum Native {
+    /// An `Image` without a sprite, in this color.
+    Solid(flexma_doc::Color),
+    /// A linear gradient (`FlexmaGradient`, vertex colors): Flexma's angle and
+    /// the stops, opacity included.
+    Gradient { angle: f32, stops: Vec<(f32, flexma_doc::Color)> },
 }
 
 /// What the export draws, gathered while reading the document.
@@ -76,7 +94,7 @@ pub struct Plan {
 pub fn plan(doc: &Document, ids: &[String], opts: &Options, fonts: &Arc<FontDb>, data_dir: &Path, allowed: &HashSet<String>, file_id: &str) -> Result<Plan, String> {
     let measurer = TextMeasurer::new(fonts.clone());
     let paint = PaintSource { data_dir, file_id, share_token: None };
-    let mut p = Planner { doc, opts, fonts, data_dir, allowed, paint: &paint, measurer: &measurer, layers: Vec::new(), faces: HashMap::new(), font_files: Vec::new(), warnings: Vec::new() };
+    let mut p = Planner { doc, opts, fonts, data_dir, allowed, paint: &paint, measurer: &measurer, root: String::new(), layers: Vec::new(), faces: HashMap::new(), font_files: Vec::new(), warnings: Vec::new() };
     let mut frames = Vec::new();
     let mut sizes = Vec::new();
     let mut refs = Vec::new();
@@ -87,6 +105,7 @@ pub fn plan(doc: &Document, ids: &[String], opts: &Options, fonts: &Arc<FontDb>,
         }
         let at = Spot { frame: sizes.len(), at: Some((0.0, 0.0)), shown: true, opacity: 1.0 };
         sizes.push((n.width, n.height));
+        p.root = id.clone();
         frames.push(p.node(n, true, at));
         let layers = if opts.background { Layers::All } else { Layers::WithoutRootPaint };
         let (svg, _) = render::export_svg_as(doc, std::slice::from_ref(id), None, AssetMode::Inline(data_dir, allowed), Some(fonts), &paint, layers).ok_or("nothing to export")?;
@@ -120,6 +139,8 @@ struct Planner<'a> {
     allowed: &'a HashSet<String>,
     paint: &'a PaintSource<'a>,
     measurer: &'a TextMeasurer,
+    /// The frame being read.
+    root: String,
     layers: Vec<Layer>,
     /// Font file per (family, weight, italic) asked for.
     faces: HashMap<(String, u16, bool), Option<String>>,
@@ -205,12 +226,15 @@ impl Planner<'_> {
         if n.kind == NodeType::Text {
             o.insert("text".into(), self.text(n));
         } else if (!root || self.opts.background) && paints(n) {
-            let tint = single_color(n);
+            let native = spot.at.and_then(|_| plain(self.doc, n, &self.root));
+            let tint = if native.is_some() { None } else { single_color(n) };
+            // A native layer is still drawn, for what's behind the layers after it.
             let layers = if tint.is_some() { Layers::OwnPaintWhite } else { Layers::OwnPaint };
             if let Some((svg, bounds)) = render::export_svg_as(self.doc, std::slice::from_ref(&n.id), None, AssetMode::Inline(self.data_dir, self.allowed), Some(self.fonts), self.paint, layers) {
-                // The importer fills in the image id once it's drawn.
+                // The importer fills in the image id (or the color) once it's drawn.
                 o.insert("sprite".into(), json!({ "x": bounds.x, "y": bounds.y, "w": bounds.width, "h": bounds.height }));
-                self.layers.push(Layer { id: n.id.clone(), name: n.name.clone(), svg, bounds, frame: spot.frame, at: spot.at, shown: spot.shown, opacity: spot.opacity, tint });
+                let see_through = see_through(n);
+                self.layers.push(Layer { id: n.id.clone(), name: n.name.clone(), svg, bounds, frame: spot.frame, at: spot.at, shown: spot.shown, opacity: spot.opacity, tint, native, see_through });
             }
         }
         let doc = self.doc;
@@ -357,6 +381,80 @@ fn paints(n: &Node) -> bool {
     }
 }
 
+fn has_effects(n: &Node) -> bool {
+    n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, .. } | Effect::LayerBlur { visible: true, .. } | Effect::BackgroundBlur { visible: true, .. }))
+}
+
+/// How Unity can draw `n` without an image: a rectangle or frame with square
+/// corners, one solid or linear-gradient fill, no strokes or effects, and no
+/// frame up to `root` that clips into it (it sits inside every clipping frame,
+/// clear of their rounded corners). `n` and its parents aren't rotated.
+fn plain(doc: &Document, n: &Node, root: &str) -> Option<Native> {
+    if !(n.kind == NodeType::Rectangle || n.kind.is_frame_like()) || n.rotation != 0.0 || n.flip_x || n.flip_y || n.blend_mode != flexma_doc::BlendMode::Normal {
+        return None;
+    }
+    if n.radii().iter().any(|&r| r > 0.0) || has_effects(n) || n.hide_fill || (n.stroke_weight > 0.0 && n.visible_strokes().any(shows)) {
+        return None;
+    }
+    let mut fills = n.visible_fills().filter(|p| shows(p));
+    let fill = fills.next()?;
+    if fills.next().is_some() {
+        return None;
+    }
+    let native = match fill {
+        Paint::Solid { color, opacity, .. } => Native::Solid(color.with_alpha(color.a * opacity)),
+        Paint::LinearGradient { stops, angle, opacity, .. } if !stops.is_empty() => {
+            let mut stops: Vec<(f32, flexma_doc::Color)> = stops.iter().map(|s| (s.position.clamp(0.0, 1.0), s.color.with_alpha(s.color.a * opacity))).collect();
+            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+            Native::Gradient { angle: *angle, stops }
+        }
+        _ => return None,
+    };
+    let b = doc.world_bounds(&n.id);
+    if n.id != root {
+        for id in doc.ancestors(&n.id) {
+            let a = doc.get(&id)?;
+            if a.clip_alpha {
+                return None;
+            }
+            if a.kind.is_frame_like() && a.clips_content {
+                let f = doc.world_bounds(&id);
+                const E: f64 = 0.01;
+                if b.x < f.x - E || b.y < f.y - E || b.x + b.width > f.x + f.width + E || b.y + b.height > f.y + f.height + E {
+                    return None;
+                }
+                // Corners: top left, top right, bottom right, bottom left.
+                let r = a.radii();
+                let corners = [(f.x, f.y), (f.x + f.width - r[1], f.y), (f.x + f.width - r[2], f.y + f.height - r[2]), (f.x, f.y + f.height - r[3])];
+                for (k, (cx, cy)) in corners.into_iter().enumerate() {
+                    if r[k] > 0.0 && b.x < cx + r[k] - E && b.x + b.width > cx + E && b.y < cy + r[k] - E && b.y + b.height > cy + E {
+                        return None;
+                    }
+                }
+            }
+            if id == root {
+                break;
+            }
+        }
+    }
+    Some(native)
+}
+
+/// Some fill or stroke of `n` is see-through on purpose (a solid color or a
+/// gradient stop below full opacity). Only then are its lighter see-through
+/// pixels matched to what's behind (`pixel_for_linear`); an opaque layer's
+/// smoothed edges are left alone. Shadows are near black, which needs no
+/// backdrop.
+fn see_through(n: &Node) -> bool {
+    let fills = n.visible_fills().filter(|_| !n.hide_fill);
+    let strokes = n.visible_strokes().filter(|_| n.stroke_weight > 0.0);
+    fills.chain(strokes).any(|p| match p {
+        Paint::Solid { color, opacity, .. } => color.a * opacity < 0.999,
+        Paint::LinearGradient { stops, opacity, .. } => *opacity < 0.999 || stops.iter().any(|s| s.color.a < 0.999),
+        _ => false,
+    })
+}
+
 /// The one color a layer paints with: every visible fill and stroke the same
 /// solid color, and no effects. Its image then comes white with the color as
 /// a tint, so the game can recolor it (an icon that turns green when maxed, a
@@ -427,9 +525,12 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
             continue;
         }
         let place = l.at.filter(|_| (s - scale).abs() < 1e-3).map(|(x, y)| (((x + l.bounds.x) * scale as f64).round() as i32, ((y + l.bounds.y) * scale as f64).round() as i32));
+        // What's behind the layer in the design, as one color, for its lighter see-through pixels.
+        let mut backdrop = None;
         if let (Some(canvas), Some((px, py))) = (canvases.get_mut(l.frame).and_then(Option::as_mut), place) {
-            // A tinted (white) image can't hold per-pixel corrections; its edges blend as Unity blends.
-            let fixes = if l.tint.is_some() { Vec::new() } else { correct_for_linear(&pm, canvas, px, py) };
+            if l.see_through || matches!(l.native, Some(Native::Solid(c)) if c.a < 0.999) {
+                backdrop = backdrop_of(&pm, canvas, px, py);
+            }
             if l.shown {
                 let paint = PixmapPaint { opacity: l.opacity as f32, ..PixmapPaint::default() };
                 match l.tint {
@@ -437,10 +538,23 @@ pub fn draw(plan: Plan, scale: f32, fonts: Arc<FontDb>, images: render::Images) 
                     None => canvas.draw_pixmap(px, py, pm.as_ref(), &paint, Transform::identity(), None),
                 }
             }
-            let out = pm.pixels_mut();
-            for (i, c) in fixes {
-                out[i] = c;
+        }
+        if let Some(native) = &l.native {
+            let mut sprite = json!({ "x": l.bounds.x, "y": l.bounds.y, "w": l.bounds.width, "h": l.bounds.height });
+            let fix = |c: flexma_doc::Color| if correct { color_for_linear(c, backdrop) } else { c };
+            match native {
+                Native::Solid(c) => sprite["color"] = json!(fix(*c).to_hex()),
+                Native::Gradient { angle, stops } => {
+                    let stops: Vec<Value> = gradient_samples(stops, correct).into_iter().map(|(t, c)| json!([t, fix(c).to_hex()])).collect();
+                    sprite["gradient"] = json!({ "angle": angle, "stops": stops });
+                }
             }
+            by_layer.insert(l.id, sprite);
+            continue;
+        }
+        // A tinted (white) image can't hold per-pixel corrections; its edges blend as Unity blends.
+        if correct && l.tint.is_none() {
+            correct_for_linear(&mut pm, if l.see_through { backdrop } else { None });
         }
         let (pm, border) = compact(pm);
         let (w, h) = (pm.width(), pm.height());
@@ -522,39 +636,103 @@ fn linear_alpha(a: f32) -> f32 {
 
 /// Unity, in Linear color space, blends see-through pixels in linear light;
 /// the design blends them in sRGB, so a 10% white line comes out about twice
-/// as bright in Unity. For each see-through pixel of a layer over something
-/// opaque in the design (`canvas`, the frame drawn so far, with the layer at
-/// `px`, `py`), pick the color that Unity's blend turns into the design's
-/// result over that backdrop. The alpha stays, so whatever is really behind
-/// at runtime still shows through. Returns the new pixels by index.
-fn correct_for_linear(pm: &Pixmap, canvas: &Pixmap, px: i32, py: i32) -> Vec<(usize, PremultipliedColorU8)> {
-    use flexma_doc::Color;
-    let (w, h, cw, ch) = (pm.width() as i32, pm.height() as i32, canvas.width() as i32, canvas.height() as i32);
-    let (src, dst) = (pm.pixels(), canvas.pixels());
-    let mut out = Vec::new();
-    for y in 0..h {
-        let cy = py + y;
-        if cy < 0 || cy >= ch {
+/// as bright in Unity. Each see-through pixel of a layer image gets the color
+/// and alpha that Unity's blend turns into the design's (`pixel_for_linear`).
+/// Nothing in the image depends on where the layer is, so copies share one
+/// image and nothing behind it in the design is drawn into it.
+fn correct_for_linear(pm: &mut Pixmap, backdrop: Option<[u8; 3]>) {
+    for p in pm.pixels_mut() {
+        let a = p.alpha();
+        if a == 0 || a == 255 {
             continue;
         }
-        for x in 0..w {
-            let cx = px + x;
-            if cx < 0 || cx >= cw {
-                continue;
-            }
-            let i = (y * w + x) as usize;
-            let p = src[i];
-            let a = p.alpha();
-            let b = dst[(cy * cw + cx) as usize];
+        let c = p.demultiply();
+        let (rgb, a) = pixel_for_linear([c.red(), c.green(), c.blue()], a, backdrop);
+        *p = ColorU8::from_rgba(rgb[0], rgb[1], rgb[2], a).premultiply();
+    }
+}
+
+/// One see-through color (sRGB, 0–255) as Unity should draw it. Near black
+/// (shadows, dims, scrims) only needs a higher alpha, which holds over any
+/// backdrop (`linear_alpha`). A lighter color is matched over `backdrop`, the
+/// one color behind the whole layer in the design (`backdrop_of`); without
+/// one it stays.
+fn pixel_for_linear(color: [u8; 3], alpha: u8, backdrop: Option<[u8; 3]>) -> ([u8; 3], u8) {
+    if color.iter().all(|&v| v <= DARK) {
+        return (color, (linear_alpha(alpha as f32 / 255.0) * 255.0).round() as u8);
+    }
+    match backdrop {
+        Some(b) => linear_match(color, b, alpha),
+        None => (color, alpha),
+    }
+}
+
+/// `pixel_for_linear` for a color.
+fn color_for_linear(c: flexma_doc::Color, backdrop: Option<[u8; 3]>) -> flexma_doc::Color {
+    let a = (c.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if a == 0 || a == 255 {
+        return c;
+    }
+    let v = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (rgb, a) = pixel_for_linear([v(c.r), v(c.g), v(c.b)], a, backdrop);
+    flexma_doc::Color { r: rgb[0] as f32 / 255.0, g: rgb[1] as f32 / 255.0, b: rgb[2] as f32 / 255.0, a: a as f32 / 255.0 }
+}
+
+/// Channels at or below this are near black (see `pixel_for_linear`).
+const DARK: u8 = 26;
+
+/// The average color behind a layer's see-through pixels in the design
+/// (`canvas`, the frame drawn so far, with the layer at `px`, `py`), where
+/// something opaque is behind. Rounded to steps of 16, so copies of a layer
+/// over the same surface get the same image.
+fn backdrop_of(pm: &Pixmap, canvas: &Pixmap, px: i32, py: i32) -> Option<[u8; 3]> {
+    let (w, h, cw, ch) = (pm.width() as i32, pm.height() as i32, canvas.width() as i32, canvas.height() as i32);
+    let (src, dst) = (pm.pixels(), canvas.pixels());
+    let (mut sum, mut n) = ([0u64; 3], 0u64);
+    for y in 0.max(-py)..h.min(ch - py) {
+        for x in 0.max(-px)..w.min(cw - px) {
+            let a = src[(y * w + x) as usize].alpha();
+            let b = dst[((py + y) * cw + px + x) as usize];
             if a == 0 || a == 255 || b.alpha() < 128 {
                 continue;
             }
-            let (pc, bc) = (p.demultiply(), b.demultiply());
-            let (c, a) = linear_match([pc.red(), pc.green(), pc.blue()], [bc.red(), bc.green(), bc.blue()], a);
-            out.push((i, ColorU8::from_rgba(c[0], c[1], c[2], a).premultiply()));
+            let b = b.demultiply();
+            sum[0] += b.red() as u64;
+            sum[1] += b.green() as u64;
+            sum[2] += b.blue() as u64;
+            n += 1;
         }
     }
-    out
+    (n > 0).then(|| sum.map(|v| ((v / n + 8) / 16 * 16).min(255) as u8))
+}
+
+/// Where a gradient's color is sent: its stops, and when it's corrected for
+/// linear blending also every 1/16 between, so the corrected colors follow the
+/// design's curve (Unity blends vertex colors in a straight line).
+fn gradient_samples(stops: &[(f32, flexma_doc::Color)], dense: bool) -> Vec<(f32, flexma_doc::Color)> {
+    let mut ts: Vec<f32> = stops.iter().map(|s| s.0).collect();
+    if dense {
+        ts.extend((0..=16).map(|k| k as f32 / 16.0));
+    }
+    ts.sort_by(f32::total_cmp);
+    ts.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+    ts.into_iter().map(|t| (t, gradient_at(stops, t))).collect()
+}
+
+/// A gradient's color at `t` (straight alpha, sRGB, like SVG).
+fn gradient_at(stops: &[(f32, flexma_doc::Color)], t: f32) -> flexma_doc::Color {
+    let (first, last) = (stops[0], stops[stops.len() - 1]);
+    if t <= first.0 {
+        return first.1;
+    }
+    if t >= last.0 {
+        return last.1;
+    }
+    let k = stops.iter().position(|s| s.0 > t).unwrap_or(stops.len() - 1);
+    let (a, b) = (stops[k - 1], stops[k]);
+    let f = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 1.0 };
+    let mix = |x: f32, y: f32| x + (y - x) * f;
+    flexma_doc::Color { r: mix(a.1.r, b.1.r), g: mix(a.1.g, b.1.g), b: mix(a.1.b, b.1.b), a: mix(a.1.a, b.1.a) }
 }
 
 /// The color and alpha (sRGB, 0–255) that Unity's linear blend turns into
@@ -751,6 +929,87 @@ mod tests {
                 assert!((design - unity).abs() <= tolerance, "alpha {a} over {b}: design {design}, unity {unity}");
             }
         }
+    }
+
+    /// Builds a 1920×1080 screen of `kids` and exports it for a Linear project.
+    fn export(kids: serde_json::Value) -> serde_json::Value {
+        let mut doc = flexma_doc::Document::new_empty();
+        let mut n = 0;
+        let mut gen = || {
+            n += 1;
+            format!("g:{n}")
+        };
+        let screen = serde_json::json!({ "type": "frame", "name": "Screen", "x": 0, "y": 0, "w": 1920, "h": 1080, "fill": "#87b5e0", "clip": true, "children": kids });
+        let (ops, _) = flexma_doc::friendly::build_create_ops(&doc, "0:1", &[screen], None, &mut gen).unwrap();
+        let (_, errs) = doc.apply_all(&ops);
+        assert!(errs.is_empty(), "{errs:?}");
+        let id = doc.nodes().find(|n| n.name == "Screen").unwrap().id.clone();
+        let fonts = crate::render::base_fontdb();
+        let dir = std::env::temp_dir();
+        let opts = Options { scale: 2.0, background: false, unity_linear: true };
+        let plan = plan(&doc, &[id], &opts, &fonts, &dir, &HashSet::new(), "test").unwrap();
+        let zip = draw(plan, 2.0, fonts, None).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let mut manifest = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("manifest.json").unwrap(), &mut manifest).unwrap();
+        serde_json::from_str(&manifest).unwrap()
+    }
+
+    fn layer<'a>(v: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+        if v["name"] == name {
+            return Some(v);
+        }
+        ["frames", "children"].iter().filter_map(|k| v[*k].as_array()).flatten().find_map(|c| layer(c, name))
+    }
+
+    /// The same button over a dark panel and over a bright picture comes as
+    /// one image: images don't depend on what's behind them.
+    #[test]
+    fn copies_share_one_image() {
+        let button = |name: &str| serde_json::json!({ "type": "ellipse", "name": name, "x": 20, "y": 20, "w": 26, "h": 26, "fill": "#e8b878", "stroke": "#4a2c14", "strokeWeight": 3,
+            "effects": [{ "type": "DROP_SHADOW", "x": 0, "y": 2, "blur": 4, "color": "#00000066" }] });
+        let m = export(serde_json::json!([
+            { "type": "frame", "name": "Dark", "x": 100, "y": 100, "w": 66, "h": 66, "fill": "#1a2a1f", "children": [button("A")] },
+            { "type": "frame", "name": "Light", "x": 400, "y": 100, "w": 66, "h": 66, "fill": "#f4e6c8", "children": [button("B")] },
+            { "type": "rectangle", "name": "Glass", "x": 700, "y": 100, "w": 120, "h": 40, "radius": 8, "fill": "#ffffff26" },
+            { "type": "rectangle", "name": "Glass 2", "x": 700, "y": 300, "w": 120, "h": 40, "radius": 8, "fill": "#ffffff26" },
+        ]));
+        let (a, b) = (layer(&m, "A").unwrap(), layer(&m, "B").unwrap());
+        assert_eq!(a["sprite"]["id"], b["sprite"]["id"], "{a}\n{b}");
+        assert_eq!(layer(&m, "Glass").unwrap()["sprite"]["id"], layer(&m, "Glass 2").unwrap()["sprite"]["id"]);
+        // The button and the glass; the two panels are plain, so Unity draws them.
+        assert_eq!(m["sprites"].as_object().unwrap().len(), 2, "{}", m["sprites"]);
+    }
+
+    /// A scrim gradient and a plain bar come without images, as a gradient
+    /// with corrected alphas and as a color; a rounded one keeps its image.
+    #[test]
+    fn plain_rectangles_are_drawn_by_unity() {
+        let m = export(serde_json::json!([
+            { "type": "rectangle", "name": "Scrim", "x": 0, "y": 0, "w": 1000, "h": 1080,
+              "fill": { "type": "LINEAR_GRADIENT", "angle": 0, "stops": [{ "position": 0, "color": "#0d120ff5" }, { "position": 0.55, "color": "#0d120fd9" }, { "position": 1, "color": "#0d120f00" }] } },
+            { "type": "frame", "name": "Bar", "x": 100, "y": 900, "w": 600, "h": 4, "fill": "#e8b878" },
+            { "type": "frame", "name": "Round", "x": 100, "y": 950, "w": 600, "h": 40, "radius": 12, "fill": "#e8b878" },
+            { "type": "frame", "name": "Card", "x": 1200, "y": 100, "w": 400, "h": 300, "radius": 24, "fill": "#1a2a1f", "clip": true, "children": [
+                { "type": "rectangle", "name": "Header", "x": 0, "y": 0, "w": 400, "h": 60, "fill": "#2a3a2f" },
+                { "type": "rectangle", "name": "Line", "x": 30, "y": 100, "w": 340, "h": 2, "fill": "#ffffff1a" },
+            ] },
+        ]));
+        let scrim = &layer(&m, "Scrim").unwrap()["sprite"];
+        assert!(scrim.get("id").is_none(), "{scrim}");
+        let stops = scrim["gradient"]["stops"].as_array().unwrap();
+        assert!(stops.len() >= 17, "{scrim}");
+        let mid = stops.iter().find(|s| (s[0].as_f64().unwrap() - 0.55).abs() < 1e-3).unwrap();
+        let want = flexma_doc::Color { r: 13.0 / 255.0, g: 18.0 / 255.0, b: 15.0 / 255.0, a: linear_alpha(0xd9 as f32 / 255.0) };
+        assert_eq!(mid[1], want.to_hex());
+        assert_eq!(stops.last().unwrap()[1], "#0d120f00");
+        assert_eq!(layer(&m, "Bar").unwrap()["sprite"]["color"], "#e8b878");
+        assert!(layer(&m, "Round").unwrap()["sprite"]["id"].is_string());
+        // The header runs into the card's rounded corners, so the card cuts it: an image.
+        assert!(layer(&m, "Header").unwrap()["sprite"]["id"].is_string());
+        // The line is clear of them; its 10% white is matched over the card.
+        let line = layer(&m, "Line").unwrap()["sprite"]["color"].as_str().unwrap().to_string();
+        assert!(line.starts_with("#") && line.len() == 9 && line != "#ffffff1a", "{line}");
     }
 
     /// An image with no stretchable middle stays as it is.

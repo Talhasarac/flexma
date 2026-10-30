@@ -9,12 +9,17 @@ Hand-rebuilding a design in Unity code drifts from the design. Values get retype
 
 - **Every layer that paints something** (fills, strokes, corners, shadows, gradients, icons, images) arrives as an image drawn by Flexma's own renderer, exactly as it shows in the design.
   - It is already cut by the frames that clip it. A header inside a rounded window comes with its top corners rounded and its bottom square.
-  - Each image's stretchable middle is cut down to a few pixels and set as the sprite's 9-slice border. A 1680×952 window is a ~100 px texture that stretches to any size. Identical images are shared.
+  - Each image's stretchable middle is cut down to a few pixels and set as the sprite's 9-slice border. A 1680×952 window is a ~100 px texture that stretches to any size.
+  - An image depends only on its layer, never on what is behind it, so every copy of a button shares one image file.
+- **Plain rectangles need no image.** A rectangle or frame with square corners, no strokes or effects, one solid color or linear-gradient fill, and no frame clipping into it becomes an `Image` without a sprite: a plain color, or a gradient drawn with vertex colors (`FlexmaGradient`). Scrims, dividers, bars and flat panels cost no texture at all.
 - **Single-color layers** (icons, pips, badges, solid pills) come white with their design color as `Image.color`, so code can recolor them (an icon that turns green when maxed). The color is the design's, so nothing changes until code changes it.
 - **Text stays live TextMeshPro text.** It uses the design's own font files, one per weight, with the same size, letter spacing, line height and baseline. Code can still change it and translations still work.
 - **Constraints become anchors**, so screens resize like Unity UI.
 - **Auto layout becomes `FlexmaLayout`**, which runs Flexma's layout rules at runtime. A pill whose number grows still hugs it, and a list reflows when items are added.
-- **In a Linear-color-space project**, see-through pixels (a 10% white border, a selected tab) are corrected for Unity's linear blending, so they come out as in the design, not twice as bright.
+- **In a Linear-color-space project**, see-through paint is corrected for Unity's linear blending, so it comes out as in the design, not twice as bright:
+  - near-black see-through pixels (shadows, dims, scrims) get a higher alpha, which matches the design over any backdrop;
+  - lighter see-through paint (a 10% white border, a selected tab) is matched to the one color behind the whole layer in the design;
+  - the smoothed edges of opaque shapes are left as they are.
 - **Every import is checked.** Each prefab is rendered in Unity and compared pixel by pixel with Flexma's render of the frame. Expect 99%+; the rest is text anti-aliasing.
 
 Load the `flexma` skill too, for reading files (`get_file_tree`, `get_nodes`, `get_screenshot`).
@@ -34,7 +39,7 @@ Load the `flexma` skill too, for reading files (`get_file_tree`, `get_nodes`, `g
 
 | Copy | To | Role |
 |---|---|---|
-| `scripts/Runtime/*.cs` | `Assets/Flexma/Runtime/` | Runtime, ships with the game: layer ids and sizing (`FlexmaNode`), Flexma's auto layout (`FlexmaLayout`), helpers for game code (`FlexmaScreens`, `FlexmaScrollHug`) |
+| `scripts/Runtime/*.cs` | `Assets/Flexma/Runtime/` | Runtime, ships with the game: layer ids and sizing (`FlexmaNode`), Flexma's auto layout (`FlexmaLayout`), gradients (`FlexmaGradient`), helpers for game code (`FlexmaScreens`, `FlexmaScrollHug`) |
 | `scripts/Editor/*.cs` | `Assets/Editor/FlexmaImport/` | Editor only: importer, pixel check, window |
 
 The runtime scripts must not be in an `Editor` folder. If the project uses assembly definitions, put the runtime ones where game code can reference them. Let Unity compile, then read the console for errors.
@@ -66,6 +71,10 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 
 - Every frame in the summary reads like `Camp - Shop: 99.6% of pixels match`. It lists where the differences are, by layer.
 - Open `Library/FlexmaImport/FILE_ID/check/<frame>.png` (Flexma | Unity | differences in red) and look at it.
+- **Check what the import costs.** The summary's `images:` line gives the file's image count, megabytes and biggest images; the import deletes images nothing uses any more. Look at every image over about 1000 px:
+  - art the game doesn't show (a mockup of the scene behind a menu) belongs in the frame's fill, which isn't imported (see Designing below);
+  - a big image for an effect (a scrim, a fade) should be a plain rectangle with a gradient, which needs no image;
+  - a screen's worth of images for one panel means something cut it (rounded clipping, a mask); simplify it in the design.
 - Below about 99%, something is wrong:
   - a missing font (see warnings);
   - a layer whose image came out empty (warned; report it);
@@ -155,7 +164,9 @@ These make imports exact and keep them working as the game changes. The `flexma`
 - **Components for repeated things.** Rows, cards and list items are components, so the game can instantiate the component's prefab.
 - **Name what code touches**, uniquely within its screen: buttons, labels, lists, icons that change. Keep those names stable; code finds layers by name.
 - **Keep moving content away from rounded clipping corners.** Clipping is baked into each layer's image at its design position, so a list row that scrolls into a rounded corner keeps square corners there. Pad lists inside rounded frames by at least the radius, or make the scrolling area a plain rectangle. The importer adds a `RectMask2D` to clipping frames whose children overflow them.
-- **See-through layers are corrected against what is behind them in the design.** If something different shows behind at runtime (a translucent overlay above live content), the color can be slightly off there. Translucency over the 3D game world blends as Unity blends.
+- **Put art the game replaces in the frame's fill, not in a layer.** The fill is the mockup of what's behind the UI and isn't imported. A layer is imported and ships with the game even when code hides it, so a menu backdrop the game draws itself (a live scene) as a layer costs megabytes for nothing.
+- **Make scrims, fades, dividers and flat panels plain rectangles**: square corners, one color or a linear gradient, no strokes or effects, not reaching into a rounded clipping frame's corners. Unity draws those without an image. Round or shadowed ones are images (small 9-slices).
+- **Lighter see-through paint is matched to the color behind it in the design.** Over something else at runtime (the 3D world), it blends as Unity blends, slightly brighter. Near-black see-through paint matches over anything.
 - **Text: one font family per text layer.** Weights within a text are fine. Every family must be in the Flexma workspace (`list_fonts`); otherwise Flexma draws, and exports, a fallback, and the import warns.
 - **Center windows and dialogs with constraints** (`CENTER`/`CENTER`), not left/top, or they hug the top-left corner on wider screens.
 - **Let rows grow with the game's strings.** Translations and real values run longer than sample text: rows whose text can grow use auto layout with wrapping text (`width: "fill"`) or room to spare.
@@ -166,6 +177,7 @@ These make imports exact and keep them working as the game changes. The `flexma`
 
 ## Known limits
 
+- Radial gradients, image fills and anything with corners, strokes or effects come as images (9-sliced where they stretch).
 - Background blur and blend modes other than Normal aren't imported. uGUI has no backdrop blur without a custom shader. The import warns.
 - Text outlines and text shadows aren't imported yet (warned). Gradient or image text fills come in as their first solid color.
 - Text anti-aliasing: TextMeshPro's edges differ slightly from Flexma's. In Linear projects, light text on dark comes out a little bolder (Unity blends text edges in linear light).
@@ -183,6 +195,8 @@ These make imports exact and keep them working as the game changes. The `flexma`
 | A text uses TextMeshPro's default font | Its font isn't in the Flexma workspace; add it in Flexma and import again |
 | Everything is a little too big or small in the game | The Canvas Scaler's reference resolution isn't the frame's size |
 | Dark text looks greenish in the game | The canvas lacks Vertex Color Always In Gamma Color Space |
+| A ghost of the design's backdrop shows in a scrim or panel | Imported before the backdrop was kept out of images; import again |
+| Many near-identical images, or big images for scrims | Imported before images stopped depending on what's behind them; import again (unused images are deleted) |
 | A screen matches below ~99% | Read the "differs at" layers and the side-by-side; check warnings |
 | A button's hover tints the wrong layer, or gamepad focus jumps twice | Wire it with `FlexmaScreens.Button`; pass `Navigation.Mode.None` when the game moves focus itself |
 | List shows the design's sample rows next to the real ones | Samples weren't removed, or were removed with `Destroy` after cloning; use `ClearSamples` first |

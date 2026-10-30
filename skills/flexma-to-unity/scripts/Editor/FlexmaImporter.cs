@@ -22,7 +22,8 @@ namespace Flexma.Import
     /// <summary>
     /// Builds uGUI prefabs from Flexma frames, the same as the design. Flexma draws every layer that paints
     /// something (fills, strokes, corners, shadows, icons, the clipping of its parents) into its own image, cut
-    /// down to a 9-slice where it stretches; text stays live TextMeshPro text in the design's own font files;
+    /// down to a 9-slice where it stretches; plain rectangles with one color or a linear gradient come as an Image
+    /// without a sprite (with <see cref="FlexmaGradient"/>); text stays live TextMeshPro text in the design's own font files;
     /// constraints become anchors and auto layout becomes <see cref="FlexmaLayout"/>. Importing again updates the
     /// prefab in place by layer id, so components and references added in Unity survive.
     /// </summary>
@@ -62,11 +63,17 @@ namespace Flexma.Import
             /// <summary>Where the download was unpacked (Library/FlexmaImport/FILE).</summary>
             public string ExportDir;
             public JObject Manifest;
+            /// <summary>The file's images after the import: how many, how big, the biggest.</summary>
+            public string Images;
 
             public override string ToString()
             {
                 var sb = new StringBuilder();
                 sb.AppendLine(Prefabs.Count + " prefab(s): " + string.Join(", ", Prefabs));
+                if (Images != null)
+                {
+                    sb.AppendLine(Images);
+                }
                 foreach (var w in Warnings.Distinct())
                 {
                     sb.AppendLine("warning: " + w);
@@ -132,6 +139,7 @@ namespace Flexma.Import
                     result.Prefabs.Add(path);
                 }
                 AssetDatabase.SaveAssets();
+                result.Images = TidySprites(folder);
             }
             finally
             {
@@ -302,6 +310,48 @@ namespace Flexma.Import
                 AssetDatabase.StopAssetEditing();
             }
             return all.ToDictionary(kv => kv.Key, kv => AssetDatabase.LoadAssetAtPath<Sprite>(kv.Value));
+        }
+
+        /// <summary>Deletes this file's images that nothing uses any more (left by earlier imports, when layers
+        /// changed), so they don't ship with the game, and sums up the rest. An image any prefab, scene or asset in the
+        /// project still points at stays.</summary>
+        static string TidySprites(string folder)
+        {
+            var images = Directory.GetFiles(folder + "/Sprites", "*.png").Select(p => p.Replace('\\', '/')).ToList();
+            var screens = Directory.GetFiles(folder + "/Screens", "*.prefab").Select(p => p.Replace('\\', '/')).ToArray();
+            var used = new HashSet<string>(AssetDatabase.GetDependencies(screens, false));
+            var unused = images.Where(p => !used.Contains(p)).ToDictionary(p => AssetDatabase.AssetPathToGUID(p), p => p);
+            if (unused.Count > 0)
+            {
+                // Anything else in the project that points at one keeps it.
+                var guid = new Regex(@"guid: ([0-9a-f]{32})");
+                foreach (var file in Directory.EnumerateFiles("Assets", "*.*", SearchOption.AllDirectories))
+                {
+                    string ext = Path.GetExtension(file);
+                    if ((ext != ".prefab" && ext != ".unity" && ext != ".asset" && ext != ".mat" && ext != ".spriteatlas" && ext != ".spriteatlasv2")
+                        || file.Replace('\\', '/').StartsWith(folder + "/Screens/") || new FileInfo(file).Length > 64 << 20)
+                    {
+                        continue;
+                    }
+                    foreach (Match m in guid.Matches(File.ReadAllText(file)))
+                    {
+                        unused.Remove(m.Groups[1].Value);
+                    }
+                    if (unused.Count == 0)
+                    {
+                        break;
+                    }
+                }
+                foreach (var p in unused.Values)
+                {
+                    AssetDatabase.DeleteAsset(p);
+                }
+            }
+            var kept = images.Where(p => !unused.ContainsValue(p)).Select(p => (path: p, bytes: new FileInfo(p).Length, tex: AssetDatabase.LoadAssetAtPath<Texture2D>(p))).ToList();
+            var biggest = kept.Where(k => k.tex).OrderByDescending(k => (long)k.tex.width * k.tex.height).Take(3)
+                .Select(k => Path.GetFileNameWithoutExtension(k.path) + " " + k.tex.width + "×" + k.tex.height);
+            return "images: " + kept.Count + " (" + (kept.Sum(k => k.bytes) / 1048576.0).ToString("0.0", CultureInfo.InvariantCulture) + " MB)"
+                + (unused.Count > 0 ? ", " + unused.Count + " unused ones deleted" : "") + "; biggest: " + string.Join(", ", biggest);
         }
 
         // ---------------- fonts ----------------
@@ -647,12 +697,22 @@ namespace Flexma.Import
                 var paintChild = go.transform.Find(PaintName);
                 var own = go.GetComponent<Image>();
                 var s = n["sprite"] as JObject;
+                // Plain rectangles come without an image: a color, or a gradient drawn with vertex colors.
+                bool native = (s != null) && ((s["color"] != null) || (s["gradient"] != null));
                 Sprite sprite = null;
-                if ((s != null) && !sprites.TryGetValue((string)s["id"], out sprite))
+                if ((s != null) && !native && !sprites.TryGetValue((string)s["id"], out sprite))
                 {
                     result.Warnings.Add("missing image for " + go.name);
                 }
-                if (sprite == null)
+                if (!native || (n["text"] != null))
+                {
+                    var gradient = go.GetComponent<FlexmaGradient>();
+                    if (gradient != null)
+                    {
+                        UnityEngine.Object.DestroyImmediate(gradient);
+                    }
+                }
+                if ((sprite == null) && !native)
                 {
                     if (paintChild != null)
                     {
@@ -679,6 +739,11 @@ namespace Flexma.Import
                 {
                     if ((own != null) && (n["text"] == null))
                     {
+                        var moved = go.GetComponent<FlexmaGradient>();
+                        if (moved != null)
+                        {
+                            UnityEngine.Object.DestroyImmediate(moved);
+                        }
                         UnityEngine.Object.DestroyImmediate(own);
                     }
                     if (paintChild == null)
@@ -701,12 +766,27 @@ namespace Flexma.Import
                     img = Ensure<Image>(paintChild.gameObject);
                 }
                 img.sprite = sprite;
-                img.type = sprite.border != Vector4.zero ? Image.Type.Sliced : Image.Type.Simple;
+                img.type = (sprite != null) && (sprite.border != Vector4.zero) ? Image.Type.Sliced : Image.Type.Simple;
                 img.fillCenter = true;
                 img.preserveAspect = false;
                 img.pixelsPerUnitMultiplier = 1;
-                // Single-color layers come white with their color here, so code can recolor them.
-                img.color = s["tint"] != null ? ParseColor((string)s["tint"]) : Color.white;
+                // Single-color layers come white with their color here (plain ones without a sprite), so code can recolor them.
+                img.color = s["tint"] != null ? ParseColor((string)s["tint"]) : s["color"] != null ? ParseColor((string)s["color"]) : Color.white;
+                var g = s["gradient"] as JObject;
+                var fg = img.GetComponent<FlexmaGradient>();
+                if (g != null)
+                {
+                    var stops = (JArray)g["stops"];
+                    if (fg == null)
+                    {
+                        fg = img.gameObject.AddComponent<FlexmaGradient>();
+                    }
+                    fg.Set(F(g["angle"]), stops.Select(t => (float)t[0]).ToArray(), stops.Select(t => ParseColor((string)t[1])).ToArray());
+                }
+                else if (fg != null)
+                {
+                    UnityEngine.Object.DestroyImmediate(fg);
+                }
                 string type = (string)n["type"];
                 // Panels catch clicks like uGUI panels do; icons and decorations let them through.
                 img.raycastTarget = (type == "FRAME" || type == "COMPONENT" || type == "INSTANCE" || type == "RECTANGLE") && (img.gameObject == go);

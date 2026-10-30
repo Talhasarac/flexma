@@ -134,7 +134,7 @@ namespace Flexma
             Graphic hit = layer.GetComponent<Graphic>();
             if (!hit) { hit = layer.gameObject.AddComponent<Image>(); hit.color = Color.clear; }
             hit.raycastTarget = true;
-            b.targetGraphic = paint && paint.sprite ? paint : hit;
+            b.targetGraphic = paint && (paint.sprite || paint.color.a > 0) ? paint : hit;
             var nav = b.navigation;
             nav.mode = navigation;
             b.navigation = nav;
@@ -275,8 +275,8 @@ namespace Flexma
                 }
                 var own = t.GetComponent<Image>();
                 var child = t.Find(PaintName);
-                var img = own && own.sprite ? own : child ? child.GetComponent<Image>() : null;
-                if (img && img.sprite && img.enabled)
+                var img = Draws(own) ? own : child ? child.GetComponent<Image>() : null;
+                if (Draws(img))
                 {
                     part.HasPaint = true;
                     part.OnLayer = img == own;
@@ -330,8 +330,8 @@ namespace Flexma
                     var group = t.GetComponent<CanvasGroup>();
                     if (part.Alpha < 1 || group) (group ? group : t.gameObject.AddComponent<CanvasGroup>()).alpha = part.Alpha;
                     if (part.HasPosition) ((RectTransform)t).anchoredPosition = part.Position;
-                    var drawn = own && own.sprite ? own : child ? child.GetComponent<Image>() : null;
-                    if (part.Shape && part.HasPaint && drawn && drawn.sprite)
+                    var drawn = Draws(own) ? own : child ? child.GetComponent<Image>() : null;
+                    if (part.Shape && part.HasPaint && Draws(drawn))
                     {
                         drawn.color = part.Color;
                     }
@@ -374,6 +374,10 @@ namespace Flexma
                     }
                 }
             }
+
+            /// <summary>An image that shows something: a sprite, or a plain rectangle's color (not an invisible click
+            /// target).</summary>
+            static bool Draws(Image img) => img && img.enabled && (img.sprite || img.color.a > 0);
 
             static void Set(Image img, Part part)
             {
