@@ -307,7 +307,7 @@ namespace Flexma.Import
                     ti.ReadTextureSettings(ts);
                     bool same = ti.textureType == TextureImporterType.Sprite && ti.spriteImportMode == SpriteImportMode.Single
                         && Mathf.Approximately(ti.spritePixelsPerUnit, ppu) && ti.spriteBorder == border && ti.textureCompression == compression
-                        && ti.mipmapEnabled && ts.spriteMeshType == SpriteMeshType.FullRect;
+                        && !ti.mipmapEnabled && ti.filterMode == FilterMode.Bilinear && ts.spriteMeshType == SpriteMeshType.FullRect;
                     if (same)
                     {
                         continue;
@@ -318,8 +318,10 @@ namespace Flexma.Import
                     ti.spriteBorder = border;
                     ti.alphaIsTransparency = true;
                     ti.sRGBTexture = true;
-                    ti.mipmapEnabled = true;
-                    ti.filterMode = FilterMode.Trilinear;
+                    // No mipmaps: the 2× images draw at half size on 1080p, where bilinear filtering averages each 2×2 block
+                    // and stays sharp; a mip level would blur the corners of a 9-slice more than its stretched middle.
+                    ti.mipmapEnabled = false;
+                    ti.filterMode = FilterMode.Bilinear;
                     ti.wrapMode = TextureWrapMode.Clamp;
                     ti.npotScale = TextureImporterNPOTScale.None;
                     ti.textureCompression = compression;

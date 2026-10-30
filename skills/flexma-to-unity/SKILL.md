@@ -200,7 +200,7 @@ These make imports exact and keep them working as the game changes. The `flexma`
 - Flexma's text box sizes are used while a text still says what the design says. Once code changes a text, TextMeshPro measures it (rounded up to whole pixels like Flexma), which can differ by a pixel or two for letter-spaced text.
 - The check renders with a plain camera. In HDRP, exposure and tonemapping on that camera can shift colors; compare in the Game view instead.
 - Near-black shadows and dims over very dark backgrounds come out a few levels darker than the design (their alpha is corrected for any backdrop, which is least exact near black).
-- Images have mipmaps. At exactly half size (the default 2× images on a 1080p screen), the corner slices of a stretched 9-slice can look a pixel softer than its stretched middle.
+- Images have no mipmaps, so they stay sharp at half size (the default 2× images on a 1080p screen) and take a third less memory. On screens well below 1080p (a handheld's 800p), thin 1 px lines can flicker slightly as they move; for a game made mainly for those, import with Image scale 1 (the `scale` argument of `Run`).
 
 ## Troubleshooting
 
