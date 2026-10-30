@@ -1,9 +1,10 @@
 import { useState, type ReactElement } from 'react';
 import { Info } from 'lucide-react';
-import type { AgentSetup } from '../../lib/api';
+import type { AgentSetup, SkillInfo } from '../../lib/api';
 import { snippetsFor, type OS } from '../../lib/platform';
 import type { AsyncState } from '../../lib/useAsync';
 import { CopyField } from '../../components/CopyField';
+import { SkillUpdateNotice } from '../../components/SkillUpdateNotice';
 import { ErrorState } from '../../components/EmptyState';
 import { Tabs } from '../../components/Tabs';
 
@@ -155,11 +156,12 @@ export function TokenConnectSection({ setup, os, token }: ConnectProps) {
 }
 
 /** The Flexma skill for Claude Code, Codex and OpenCode. */
-export function SkillSection({ setup, os }: ConnectProps) {
+export function SkillSection({ setup, os, updates }: ConnectProps & { updates: SkillInfo[] }) {
   if (!setup.data) return <SetupLoading setup={setup} />;
   const o = snippetsFor(setup.data, os);
   return (
     <div className="stack">
+      <SkillUpdateNotice skills={updates} />
       <p className="text-muted">Run in {o.shell}:</p>
       <CopyField value={o.skillInstallCommand} multiline toastMessage="Command copied" />
       {o.skillInstallFallback && (
@@ -169,7 +171,8 @@ export function SkillSection({ setup, os }: ConnectProps) {
       )}
       <p className="text-muted text-sm">
         Installs the <code>flexma</code> skill into <code>{o.skillDirs[0]}</code>, <code>{o.skillDirs[1]}</code> and{' '}
-        <code>{o.skillDirs[2]}</code>.
+        <code>{o.skillDirs[2]}</code>, and updates the other Flexma skills already there. Run it again whenever the skills
+        change.
       </p>
       <p className="text-muted">
         Unity projects: also install <code>unity-ui-to-flexma</code>, which exports a game's uGUI and UI Toolkit screens

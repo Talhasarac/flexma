@@ -2171,6 +2171,16 @@ kbd {
   background: var(--warning-subtle);
 }
 
+.callout-accent {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent-subtle);
+}
+
+.callout-accent .callout-title svg {
+  color: var(--accent-text);
+  flex-shrink: 0;
+}
+
 .callout-title {
   display: flex;
   align-items: center;
@@ -2298,6 +2308,15 @@ kbd {
   color: var(--text-muted);
   font-size: 11.5px;
   font-weight: 400;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .hint-row {

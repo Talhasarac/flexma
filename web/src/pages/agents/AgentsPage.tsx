@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Bot, Infinity as InfinityIcon, MousePointer2, ShieldCheck } from 'lucide-react';
 import { api, type CreatedApiToken } from '../../lib/api';
 import { useAsync } from '../../lib/useAsync';
 import { useDocumentTitle } from '../../lib/useDocumentTitle';
 import { useAgentOS } from '../../lib/platform';
+import { useSkillUpdates } from '../../lib/skills';
 import { OsSwitch } from '../../components/OsSwitch';
 import { PageHeader } from '../../components/dashboard/PageHeader';
 import { ConnectSection, SkillSection, TokenConnectSection } from './ConnectSection';
@@ -14,6 +15,9 @@ export default function AgentsPage() {
   const [fresh, setFresh] = useState<CreatedApiToken | null>(null);
   const setup = useAsync(() => api.agentSetup(), 'agent-setup');
   const [os, setOs] = useAgentOS();
+  const skills = useSkillUpdates();
+  // The updates count as seen once the person leaves the page.
+  useEffect(() => skills.markSeen, [skills.markSeen]);
 
   return (
     <div className="page page-narrow">
@@ -57,7 +61,7 @@ export default function AgentsPage() {
           title="Install the Flexma skill (recommended)"
           description="Teaches your agent Flexma's tools and design conventions, so results look right the first time."
         >
-          <SkillSection setup={setup} os={os} />
+          <SkillSection setup={setup} os={os} updates={skills.updated} />
         </Step>
         <Step
           n={3}

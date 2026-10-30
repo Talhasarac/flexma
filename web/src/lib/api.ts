@@ -167,6 +167,17 @@ export interface BackupInfo {
   fontsBytes: number;
 }
 
+/** An agent skill this server serves (`GET /api/skills`). */
+export interface SkillInfo {
+  name: string;
+  /** A hash of its files; installed copies name it in their SKILL.md. */
+  version: string;
+  /** When this version first ran on the server. */
+  updatedAt: string;
+  /** Changed since this person last saw the skill updates. */
+  updated: boolean;
+}
+
 export interface AgentSetup {
   mcpUrl: string;
   skillInstallCommand: string;
@@ -667,6 +678,12 @@ const tokens = {
   agentSetup: () => request<AgentSetup>('GET', '/api/agent-setup'),
 };
 
+const skills = {
+  list: () => request<{ skills: SkillInfo[] }>('GET', '/api/skills'),
+  /** The person saw the updates: they no longer count as new. */
+  seen: () => request<{ skills: SkillInfo[] }>('POST', '/api/skills/seen'),
+};
+
 export const api = {
   /** Shorthands for the most common calls. */
   setup: auth.setup,
@@ -680,6 +697,7 @@ export const api = {
   projects,
   files,
   tokens,
+  skills,
   comments,
   fonts,
   paint,

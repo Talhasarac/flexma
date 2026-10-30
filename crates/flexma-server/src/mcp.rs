@@ -33,6 +33,12 @@ justify, alignItems, width/height: number|\"fill\"|\"hug\") for UI. Colors are h
 in the file. People leave feedback as comments: list_comments -> fix -> add_comment(reply_to) -> resolve_comment. Call \
 save_version before large or destructive edits. Load the `flexma` skill for the full node spec and design recipes.";
 
+/// Whether this is the agent's first tool call since the server started.
+fn first_call(agent: &str) -> bool {
+    static CALLED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    CALLED.lock().unwrap_or_else(|p| p.into_inner()).insert(agent.to_string())
+}
+
 /// Argument names a call passed that the tool's schema doesn't list.
 fn unknown_args(name: &str, args: &Value) -> Vec<String> {
     static PROPS: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
@@ -522,7 +528,7 @@ impl Ctx {
                         "protocolVersion": version,
                         "capabilities": { "tools": { "listChanged": false } },
                         "serverInfo": { "name": "flexma", "title": "Flexma", "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": INSTRUCTIONS,
+                        "instructions": format!("{INSTRUCTIONS} {}", crate::api_tokens::skill_versions_note(&self.base)),
                     }),
                 )
             }
@@ -547,6 +553,14 @@ impl Ctx {
                             "Note: ignored unknown argument(s) {} for {name}. If they should exist, your client's tool list may be out of date; reconnect to refresh it.",
                             unknown.join(", ")
                         ) }));
+                    }
+                }
+                // Skill versions, once per agent while this server runs, for
+                // clients that don't show the instructions (a new server
+                // build is when skills change).
+                if result.get("isError").is_none() && first_call(&self.agent().key) {
+                    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+                        content.push(json!({ "type": "text", "text": crate::api_tokens::skill_versions_note(&self.base) }));
                     }
                 }
                 rpc_result(&id, result)
@@ -3059,6 +3073,21 @@ pub async fn upload_nodes_with_link(
 #[cfg(test)]
 mod arg_tests {
     use super::*;
+
+    #[test]
+    fn instructions_fit_clients_limits() {
+        // Claude Code cuts server instructions after 2048 characters.
+        let base = "https://flexma.some-long-company-domain.example.com";
+        let text = format!("{INSTRUCTIONS} {}", crate::api_tokens::skill_versions_note(base));
+        assert!(text.len() < 2048, "{} characters", text.len());
+    }
+
+    #[test]
+    fn skill_note_once_per_agent() {
+        assert!(first_call("test-agent-a"));
+        assert!(!first_call("test-agent-a"));
+        assert!(first_call("test-agent-b"));
+    }
 
     #[test]
     fn id_lists_from_arrays_or_strings() {

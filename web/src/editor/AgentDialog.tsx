@@ -4,11 +4,21 @@ import { Link } from 'react-router-dom';
 import { Modal } from '../components/Modal';
 import { CopyField } from '../components/CopyField';
 import { OsSwitch } from '../components/OsSwitch';
-import { api, type AgentSetup } from '../lib/api';
+import { SkillUpdateNotice } from '../components/SkillUpdateNotice';
+import { api, type AgentSetup, type SkillInfo } from '../lib/api';
 import { snippetsFor, useAgentOS } from '../lib/platform';
 import { useEffect, useState } from 'react';
 
-export function AgentDialog({ open, onClose, fileId, fileName }: { open: boolean; onClose: () => void; fileId: string; fileName: string }) {
+interface Props {
+  open: boolean;
+  onClose: () => void;
+  fileId: string;
+  fileName: string;
+  /** Skills updated since the person last looked; shown first. */
+  updates: SkillInfo[];
+}
+
+export function AgentDialog({ open, onClose, fileId, fileName, updates }: Props) {
   const [setup, setSetup] = useState<AgentSetup | null>(null);
   const [os, setOs] = useAgentOS();
   useEffect(() => {
@@ -22,6 +32,7 @@ export function AgentDialog({ open, onClose, fileId, fileName }: { open: boolean
         <div className="skeleton skeleton-block" style={{ height: 120 }} />
       ) : (
         <div className="stack">
+          <SkillUpdateNotice skills={updates} command={s.skillInstallCommand} />
           <div className="os-row">
             <span className="text-muted text-sm">Commands for</span>
             <OsSwitch value={os} onChange={setOs} />

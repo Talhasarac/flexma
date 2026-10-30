@@ -247,6 +247,17 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (file_id, part)
     );
     "#,
+    // 12: when each agent skill version first ran here, and when each person
+    // last saw the skill updates (the AI button's dot).
+    r#"
+    CREATE TABLE skill_versions (
+        skill TEXT NOT NULL,
+        version TEXT NOT NULL,
+        first_seen INTEGER NOT NULL,
+        PRIMARY KEY (skill, version)
+    );
+    ALTER TABLE users ADD COLUMN skills_seen_at INTEGER;
+    "#,
 ];
 
 impl Db {

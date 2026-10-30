@@ -243,6 +243,20 @@
     width: 220px;
   }
 }
+/* A skill update: a dot on the AI button until the dialog has been opened. */
+.tb-ai {
+  position: relative;
+}
+.tb-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-elevated);
+}
 @media (max-width: 520px) {
   .editor-right {
     display: none;

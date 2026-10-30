@@ -106,6 +106,7 @@ async fn main() {
         Some(_) => usage(),
     }
 
+    db.call(|c| Ok(api_tokens::record_skill_versions(c)?)).await.expect("cannot record skill versions");
     let mut cfg = cfg;
     let users: i64 = db
         .call(|c| Ok(c.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?))
@@ -207,6 +208,8 @@ async fn main() {
         .route("/tokens", get(api_tokens::list).post(api_tokens::create))
         .route("/tokens/{id}", delete(api_tokens::delete))
         .route("/agent-setup", get(api_tokens::agent_setup))
+        .route("/skills", get(api_tokens::skills))
+        .route("/skills/seen", post(api_tokens::skills_seen))
         .route("/admin/users", get(api_admin::list_users))
         .route("/admin/users/{id}", patch(api_admin::update_user).delete(api_admin::delete_user))
         .route("/admin/users/{id}/reset-password", post(api_admin::reset_password))

@@ -15,6 +15,7 @@ import { MissingFontsButton } from './MissingFonts';
 import { exportPngs, safeName } from './download';
 import { useAuth } from '../lib/auth';
 import { togglePerfOverlay, usePerfOverlay } from './perf';
+import { useSkillUpdates } from '../lib/skills';
 
 interface Props {
   store: EditorStore;
@@ -34,6 +35,7 @@ export function TopBar({ store, file, onRenamed }: Props) {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const skills = useSkillUpdates();
   const e = store.engine;
   const act = (f: () => void) => () => {
     f();
@@ -113,8 +115,18 @@ export function TopBar({ store, file, onRenamed }: Props) {
         </button>
         <MissingFontsButton store={store} />
         <Presence store={store} self={user ? { name: user.name, color: user.color } : null} />
-        <button type="button" className="btn btn-sm tb-ai" onClick={() => setAgentsOpen(true)} title="Connect Claude Code, Codex or OpenCode">
+        <button
+          type="button"
+          className="btn btn-sm tb-ai"
+          onClick={() => setAgentsOpen(true)}
+          title={skills.updated.length > 0 ? 'Flexma skill update: update your agents' : 'Connect Claude Code, Codex or OpenCode'}
+        >
           <Sparkles size={14} /> AI
+          {skills.updated.length > 0 && (
+            <span className="tb-dot">
+              <span className="sr-only">(skill update)</span>
+            </span>
+          )}
         </button>
         <button type="button" className="btn btn-sm btn-primary" onClick={() => setShareOpen(true)}>
           <Share2 size={14} /> Share
@@ -122,7 +134,16 @@ export function TopBar({ store, file, onRenamed }: Props) {
         <ZoomButton store={store} />
       </div>
       {menu.element}
-      <AgentDialog open={agentsOpen} onClose={() => setAgentsOpen(false)} fileId={file.id} fileName={file.name} />
+      <AgentDialog
+        open={agentsOpen}
+        onClose={() => {
+          setAgentsOpen(false);
+          skills.markSeen();
+        }}
+        fileId={file.id}
+        fileName={file.name}
+        updates={skills.updated}
+      />
       <VersionsDialog open={versionsOpen} onClose={() => setVersionsOpen(false)} fileId={file.id} canEdit={ui.canEdit} />
       <ShareDialog open={shareOpen} onClose={() => setShareOpen(false)} file={file} />
     </header>
