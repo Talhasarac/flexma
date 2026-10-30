@@ -34,7 +34,7 @@ Load the `flexma` skill too, for reading files (`get_file_tree`, `get_nodes`, `g
 
 | Copy | To | Role |
 |---|---|---|
-| `scripts/Runtime/FlexmaNode.cs`, `FlexmaLayout.cs` | `Assets/Flexma/Runtime/` | Runtime: layer ids and sizing, Flexma's auto layout. Ships with the game. |
+| `scripts/Runtime/*.cs` | `Assets/Flexma/Runtime/` | Runtime, ships with the game: layer ids and sizing (`FlexmaNode`), Flexma's auto layout (`FlexmaLayout`), helpers for game code (`FlexmaScreens`, `FlexmaScrollHug`) |
 | `scripts/Editor/*.cs` | `Assets/Editor/FlexmaImport/` | Editor only: importer, pixel check, window |
 
 The runtime scripts must not be in an `Editor` folder. If the project uses assembly definitions, put the runtime ones where game code can reference them. Let Unity compile, then read the console for errors.
@@ -77,20 +77,35 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 - **Canvas.** Put the screen under the game's Canvas, set up like this:
   - **Canvas Scaler**: Scale With Screen Size, reference resolution = the frame's size, match 0.5.
   - In a Linear project, turn on **Vertex Color Always In Gamma Color Space** (`canvas.vertexColorAlwaysGammaSpace = true`), or dark text colors round toward green.
-- **Find layers by name**, and code against the layers rather than restyling them. Layer names are the Flexma layer names, so ask the designer (or rename in Flexma) for clear, unique names on what code touches.
+- **Code against the layers; never restyle them.** That means no colors, sizes, sprites, fonts or positions set in code. Change the design in Flexma and import again; otherwise Unity and Flexma drift apart again, which is the problem this skill exists to fix. Layer names are the Flexma layer names, so ask the designer (or rename in Flexma) for clear, unique names on what code touches.
+- **`FlexmaScreens`** (namespace `Flexma`) does the wiring. Set `FlexmaScreens.Folder` once to the Resources path of the imports (`"UI/Flexma/FILE_ID/Screens/"` when `Settings.Folder` is `Assets/Game/Resources/UI/Flexma`).
 
   ```csharp
-  var screen = Instantiate(upgradesPrefab, canvas.transform);
-  var coins = screen.transform.Find("Camp window/Header/Coins/Value").GetComponent<TMP_Text>();
-  coins.text = gm.Coins.ToString("N0");          // FlexmaLayout re-hugs the pill
-  var buy = screen.transform.Find("…/Buy button").gameObject.AddComponent<Button>();
-  buy.onClick.AddListener(Buy);
+  using Flexma;
+  var screen = FlexmaScreens.Load("Camp - Upgrades", canvas.transform);   // the frame's name, "/" written "-"
+  var coins = FlexmaScreens.Text(screen, "Header/Coins/Value");            // names below each other, nearest first
+  coins.text = gm.Coins.ToString("N0");                                    // FlexmaLayout re-hugs the pill
+  FlexmaScreens.Button(FlexmaScreens.Find(screen, "Buy button"), Buy);
   ```
 
-- **Never restyle in code.** That means colors, sizes, sprites, fonts or positions. Change the design in Flexma and import again; otherwise Unity and Flexma drift apart again, which is the problem this skill exists to fix.
-- **Lists.** Import the row or card component as its own prefab and `Instantiate` one per item under the list frame (an auto-layout frame). `FlexmaLayout` places them as Flexma would. Delete the sample rows the design shows, or hide them.
-- **States** (selected tab, disabled button) come from the design: copy the look of the layer the design shows in that state onto the one changing (its sprites, tints and text colors, matched child by child), or switch layers with `SetActive`. Recoloring a single-color layer through `Image.color` to another design color is fine; inventing new colors in code isn't.
-- **Buttons** need a `Button` (and an `Image` as its target graphic, which a layer with a fill already has). Add them in code or on the prefab; re-imports keep added components.
+  | Helper | Does |
+  |---|---|
+  | `Load(frame, parent)`, `Prefab(frame)` | Instantiate a screen; read one (its samples) without instantiating |
+  | `Take(frame, path, parent)` | One layer of a frame, the rest destroyed: each tab's body from its own frame inside one shared window |
+  | `Find`, `TryFind`, `Get<T>`, `Text` | Layers by name path. A layer whose own name has a "/" (`Toggle/On`) is found by its whole name |
+  | `Kid(parent, i)` | The i-th layer, skipping the `<paint>` image (for layers named after their text) |
+  | `Paint(layer)` | The image that draws a layer: on it, or on its `<paint>` child when it reaches past its box (shadows) |
+  | `Button(layer, onClick, navigation)` | Click target, hover and press tints on what the layer draws. Pass `Navigation.Mode.None` when the game moves gamepad focus itself |
+  | `Template`, `ClearSamples`, `Clone` | Lists from the design's own sample rows (below) |
+  | `SetIcon(iconFrame, sprite)` | An icon the data picks, in the design icon's frame and color |
+  | `Look.Of(sample)`, `look.Apply(layer)` | A state copied from the layer the design shows in it (below) |
+  | `Dim(color)` | A flat dim made in code that darkens like the design's in a Linear project |
+
+- **Lists.** Take the design's sample row as the template, so it looks exactly like the design: move it into a hidden holder with `Template`, remove the other samples with `ClearSamples`, then `Clone` one per item under the list frame. `FlexmaLayout` places them as Flexma would. A row component can also be imported as its own prefab.
+- **States** (selected tab, disabled button, toggle off, unaffordable price) come from the design. Keep a `Look.Of(...)` of the layer the design shows in each state and `Apply` it to the layer changing. It copies sprites, tints, opacity and text colors, matched child by child; shapes (icons) keep their own image and take only the state's color. Pass `withPositions: true` for a toggle's knob. When a state appears nowhere in the design, ask for it (see Designing below) rather than inventing it in code.
+- **Scrolling lists that hug their rows.** A list that is as tall as its rows until it runs out of room: put `FlexmaScrollHug` on the scroll view (a ScrollRect with a RectMask2D and a fixed height), with `Content` its rows, `Frame` the auto-layout frame holding it and `Column` the fill-height frame above that.
+- **Buttons** need a click target; `FlexmaScreens.Button` adds one where the layer draws nothing. Re-imports keep added components.
+- **Check the real screen too.** The import check compares the prefab; after wiring, render the game's own screen filled with the design's sample data (an editor script that builds the screen, fills it and renders it with a camera to a PNG) and put it next to `refs/<frame>.png`. That catches wiring mistakes: a template missing a state, a hidden sample, a row in the wrong list.
 
 ### 6. Re-import after design changes
 
@@ -98,6 +113,27 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
   - Components and child objects added in Unity stay.
   - Layers deleted in Flexma are removed, with anything added under them.
 - Run the check again and compare with the last numbers.
+
+## Moving a code-built UI to the prefabs
+
+When the game already builds its UI in code (a UI kit, `new GameObject` + `Image`), replace it screen by screen:
+
+1. **Import every frame first**, including component sheets and frames that only show states ("Components", "Missing states"); their layers are where states and templates come from.
+2. **Keep the game's side.** Keep the class names, public methods, events and fields other code and editor checks use (they may find fields by reflection). Only the building code changes: build from `Load`/`Take` instead of `new GameObject`.
+3. **Keep the game's strings.** Use its localized strings and number formats over the design's sample words; they have translations. New strings go in untranslated in the project's source language; never edit translation tables unless asked.
+4. **Gaps in the design** (a state or widget the game needs that no frame shows) reuse the closest piece of the design's kit, cloned and filled, and get listed for the user to design. Don't draw new looks in code.
+5. **One screen at a time.** Wire it, render it with sample data, compare with the ref, then move on. Several agents in one Unity editor at once step on each other's compiles.
+6. **Delete the old code-built look** once a screen is moved, so the two don't coexist.
+
+### Pitfalls in game code
+
+- **Unity's fake null:** `GetComponent<T>() ?? AddComponent<T>()` never adds, since a missing component isn't C# null. Use `if (!c) c = AddComponent<T>()`.
+- **One Graphic per GameObject:** a text layer can't also get an `Image` as a click target; it is its own target.
+- **`Destroy` waits until the end of the frame** and never runs in edit mode, so copies made meanwhile copy the doomed objects too. Remove samples with `DestroyImmediate` (as `ClearSamples` does) before cloning.
+- **`transform.Find` splits on "/"**, so it can't find a layer named `Toggle/On`; `FlexmaScreens.Find` can.
+- **A flat dim or overlay made in code** with the design's alpha looks lighter in a Linear project; pass the color through `FlexmaScreens.Dim`. Imported dims are already corrected.
+- **A dialog whose frame includes the screen behind it** loads that whole backdrop with it. Take the dialog layer with `Take`, or design dialogs in lean frames.
+- **Long imports outlast tool calls** (around 30 s for most MCP servers). The import goes on; wait for `report.txt` to list every frame before reading prefabs.
 
 ## Project hooks
 
@@ -121,6 +157,12 @@ These make imports exact and keep them working as the game changes. The `flexma`
 - **Keep moving content away from rounded clipping corners.** Clipping is baked into each layer's image at its design position, so a list row that scrolls into a rounded corner keeps square corners there. Pad lists inside rounded frames by at least the radius, or make the scrolling area a plain rectangle. The importer adds a `RectMask2D` to clipping frames whose children overflow them.
 - **See-through layers are corrected against what is behind them in the design.** If something different shows behind at runtime (a translucent overlay above live content), the color can be slightly off there. Translucency over the 3D game world blends as Unity blends.
 - **Text: one font family per text layer.** Weights within a text are fine. Every family must be in the Flexma workspace (`list_fonts`); otherwise Flexma draws, and exports, a fallback, and the import warns.
+- **Center windows and dialogs with constraints** (`CENTER`/`CENTER`), not left/top, or they hug the top-left corner on wider screens.
+- **Let rows grow with the game's strings.** Translations and real values run longer than sample text: rows whose text can grow use auto layout with wrapping text (`width: "fill"`) or room to spare.
+- **Design every state the game shows**, each as its own layer or frame: selected and unselected, disabled, toggle on and off, empty lists, full or maxed, locked, warnings, every settings tab, open dropdowns, text inputs, focus rings for gamepad. A state missing from the design gets invented in code, and drifts.
+- **Use the game's real strings and number formats in sample text**, so the design shows the real lengths.
+- **Dims are black see-through layers** (or `#000` at some opacity) over the whole screen; they import as tints Unity can stretch.
+- **Don't overlap see-through layers on other UI** unless that is what shows behind them at runtime; each is corrected against what the design shows behind it.
 
 ## Known limits
 
@@ -142,4 +184,7 @@ These make imports exact and keep them working as the game changes. The `flexma`
 | Everything is a little too big or small in the game | The Canvas Scaler's reference resolution isn't the frame's size |
 | Dark text looks greenish in the game | The canvas lacks Vertex Color Always In Gamma Color Space |
 | A screen matches below ~99% | Read the "differs at" layers and the side-by-side; check warnings |
+| A button's hover tints the wrong layer, or gamepad focus jumps twice | Wire it with `FlexmaScreens.Button`; pass `Navigation.Mode.None` when the game moves focus itself |
+| List shows the design's sample rows next to the real ones | Samples weren't removed, or were removed with `Destroy` after cloning; use `ClearSamples` first |
+| A dim made in code looks lighter than the design | Linear blending; use `FlexmaScreens.Dim` |
 | Re-import made new objects instead of updating | The layers were recreated in Flexma (new ids), e.g. by deleting and redrawing; references to the old ones need re-linking |

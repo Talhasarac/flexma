@@ -12,6 +12,7 @@ For Unity projects there are two optional companion skills:
 - `unity-ui-to-flexma` exports a game's uGUI screens into Flexma as editable layers and keeps them in sync.
 - `flexma-to-unity` goes the other way. It builds Flexma frames into uGUI prefabs that look the same as the design, from Flexma's own renders. Never rebuild a Flexma design by hand in Unity code: it drifts (retyped colors, faked rounded clipping, fake bold, sharp shadows).
   - Designs meant for Unity follow "Designing in Flexma for Unity" in that skill: a frame per screen at the reference resolution, constraints as anchors, auto layout for anything whose content changes, live text as text, components for repeated items, and clear names on what code touches.
+  - The game builds what the design shows, so a state the design leaves out gets invented in code and drifts. Design every state the game shows (selected and unselected, disabled, toggle off, empty, full or maxed, locked, every settings tab, open dropdowns, text inputs, gamepad focus) and use the game's real strings and number formats in sample text. Center windows and dialogs with `CENTER` constraints, and let rows whose text can grow wrap.
 
 If a skill the user needs isn't installed, point them to Flexma's AI Agents page for its install command (`curl -fsSL <flexma-url>/agents/install/<skill>.sh | sh`).
 
