@@ -440,11 +440,11 @@ fn plain(doc: &Document, n: &Node, root: &str) -> Option<Native> {
     Some(native)
 }
 
-/// Some fill or stroke of `n` is see-through on purpose (a solid color or a
-/// gradient stop below full opacity). Only then are its lighter see-through
-/// pixels matched to what's behind (`pixel_for_linear`); an opaque layer's
-/// smoothed edges are left alone. Shadows are near black, which needs no
-/// backdrop.
+/// Some paint of `n` is see-through on purpose: a fill or stroke (a solid
+/// color or a gradient stop below full opacity) or a colored glow. Only then
+/// are its lighter see-through pixels matched to what's behind
+/// (`pixel_for_linear`); an opaque layer's smoothed edges are left alone.
+/// Near-black shadows need no backdrop.
 fn see_through(n: &Node) -> bool {
     let fills = n.visible_fills().filter(|_| !n.hide_fill);
     let strokes = n.visible_strokes().filter(|_| n.stroke_weight > 0.0);
@@ -452,7 +452,7 @@ fn see_through(n: &Node) -> bool {
         Paint::Solid { color, opacity, .. } => color.a * opacity < 0.999,
         Paint::LinearGradient { stops, opacity, .. } => *opacity < 0.999 || stops.iter().any(|s| s.color.a < 0.999),
         _ => false,
-    })
+    }) || n.effects.iter().any(|e| matches!(e, Effect::DropShadow { visible: true, color, .. } if color.r.max(color.g).max(color.b) > DARK as f32 / 255.0))
 }
 
 /// The one color a layer paints with: every visible fill and stroke the same

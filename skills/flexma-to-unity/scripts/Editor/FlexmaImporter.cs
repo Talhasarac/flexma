@@ -245,22 +245,46 @@ namespace Flexma.Import
 
         // ---------------- images ----------------
         /// <summary>Copies the layer images in (named by content, so each is imported once) as sprites with their 9-slice
-        /// borders. UI pieces stay uncompressed (exact pixels); images over 1024 px (artwork, full-screen backdrops) are
-        /// compressed at high quality, which looks the same and takes a quarter of the memory.</summary>
+        /// borders. An image that looks the same as one already there (<see cref="LooksSame"/>) uses that one. UI pieces
+        /// stay uncompressed (exact pixels); images over 1024 px (artwork, full-screen backdrops) are compressed at high
+        /// quality, which looks the same and takes a quarter of the memory.</summary>
         static Dictionary<string, Sprite> ImportSprites(JObject manifest, string dir, string folder)
         {
             Directory.CreateDirectory(folder);
             var all = new Dictionary<string, string>();
             bool copied = false;
+            // Images this import uses, then the others already here, by size: a new image that looks the same as one of
+            // them uses that one instead (images used here first, so look-alikes from earlier imports fold together).
+            var chosen = new Dictionary<(int, int), List<string>>();
+            var here = new Dictionary<(int, int), List<string>>();
+            foreach (var file in Directory.GetFiles(folder, "*.png"))
+            {
+                Add(here, file.Replace('\\', '/'));
+            }
+            var pixels = new Dictionary<string, Color32[]>();
             foreach (var p in (JObject)manifest["sprites"])
             {
                 string path = folder + "/" + p.Key + ".png";
-                all[p.Key] = path;
+                string from = Path.Combine(dir, (string)p.Value["file"]);
+                var b = (JArray)p.Value["border"];
+                var border = new Vector4((float)b[0], (float)b[1], (float)b[2], (float)b[3]);
+                float ppu = 100f * (float)p.Value["scale"];
+                var size = PngSize(from);
+                Func<Dictionary<(int, int), List<string>>, string> alike = by =>
+                    by.TryGetValue(size, out var list) ? list.FirstOrDefault(c => (c != path) && SameSlicing(c, border, ppu) && LooksSame(from, c, pixels)) : null;
+                string same = alike(chosen) ?? (File.Exists(path) ? null : alike(here));
+                if (same != null)
+                {
+                    all[p.Key] = same;
+                    continue;
+                }
                 if (!File.Exists(path))
                 {
-                    File.Copy(Path.Combine(dir, (string)p.Value["file"]), path);
+                    File.Copy(from, path);
                     copied = true;
                 }
+                all[p.Key] = path;
+                Add(chosen, path);
             }
             if (copied)
             {
@@ -310,6 +334,80 @@ namespace Flexma.Import
                 AssetDatabase.StopAssetEditing();
             }
             return all.ToDictionary(kv => kv.Key, kv => AssetDatabase.LoadAssetAtPath<Sprite>(kv.Value));
+        }
+
+        static void Add(Dictionary<(int, int), List<string>> bySize, string png)
+        {
+            var size = PngSize(png);
+            if (!bySize.TryGetValue(size, out var list))
+            {
+                bySize[size] = list = new List<string>();
+            }
+            list.Add(png);
+        }
+
+        /// <summary>A PNG's width and height, from its header.</summary>
+        static (int, int) PngSize(string png)
+        {
+            using (var f = File.OpenRead(png))
+            {
+                var h = new byte[24];
+                if (f.Read(h, 0, 24) < 24)
+                {
+                    return (0, 0);
+                }
+                return ((h[16] << 24) | (h[17] << 16) | (h[18] << 8) | h[19], (h[20] << 24) | (h[21] << 16) | (h[22] << 8) | h[23]);
+            }
+        }
+
+        /// <summary>An image already in the project is sliced and scaled as a new one would be (one not imported yet, or
+        /// copied in this import, counts as matching: it gets the new one's settings).</summary>
+        static bool SameSlicing(string png, Vector4 border, float ppu)
+        {
+            var ti = AssetImporter.GetAtPath(png) as TextureImporter;
+            return (ti == null) || (ti.textureType != TextureImporterType.Sprite) || ((ti.spriteBorder == border) && Mathf.Approximately(ti.spritePixelsPerUnit, ppu));
+        }
+
+        /// <summary>Two images of one size that look the same: their opaque pixels match, and the see-through ones
+        /// differ by at most 24 levels (premultiplied). Copies of a see-through layer over slightly different
+        /// backdrops in the design come out like that (each is matched to what is behind it); two different colors
+        /// don't.</summary>
+        static bool LooksSame(string a, string b, Dictionary<string, Color32[]> cache)
+        {
+            var pa = Pixels(a, cache);
+            var pb = Pixels(b, cache);
+            if ((pa == null) || (pb == null) || (pa.Length != pb.Length))
+            {
+                return false;
+            }
+            for (int i = 0; i < pa.Length; i++)
+            {
+                Color32 x = pa[i], y = pb[i];
+                if ((x.a == 255) && (y.a == 255))
+                {
+                    if ((Math.Abs(x.r - y.r) > 2) || (Math.Abs(x.g - y.g) > 2) || (Math.Abs(x.b - y.b) > 2))
+                    {
+                        return false;
+                    }
+                }
+                else if ((Math.Abs(x.a - y.a) > 24) || (Math.Abs(x.r * x.a - y.r * y.a) > 24 * 255) || (Math.Abs(x.g * x.a - y.g * y.a) > 24 * 255) || (Math.Abs(x.b * x.a - y.b * y.a) > 24 * 255))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static Color32[] Pixels(string png, Dictionary<string, Color32[]> cache)
+        {
+            if (!cache.TryGetValue(png, out var px))
+            {
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                px = tex.LoadImage(File.ReadAllBytes(png)) ? tex.GetPixels32() : null;
+                UnityEngine.Object.DestroyImmediate(tex);
+                cache[png] = px;
+            }
+            return px;
         }
 
         /// <summary>Deletes this file's images that nothing uses any more (left by earlier imports, when layers

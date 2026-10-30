@@ -10,7 +10,7 @@ Hand-rebuilding a design in Unity code drifts from the design. Values get retype
 - **Every layer that paints something** (fills, strokes, corners, shadows, gradients, icons, images) arrives as an image drawn by Flexma's own renderer, exactly as it shows in the design.
   - It is already cut by the frames that clip it. A header inside a rounded window comes with its top corners rounded and its bottom square.
   - Each image's stretchable middle is cut down to a few pixels and set as the sprite's 9-slice border. A 1680×952 window is a ~100 px texture that stretches to any size.
-  - An image depends only on its layer, never on what is behind it, so every copy of a button shares one image file.
+  - An image depends only on its layer, never on what is behind it, so every copy of a button shares one image file. Images that differ only by a few levels in see-through pixels (a translucent button over two panels) are imported once.
 - **Plain rectangles need no image.** A rectangle or frame with square corners, no strokes or effects, one solid color or linear-gradient fill, and no frame clipping into it becomes an `Image` without a sprite: a plain color, or a gradient drawn with vertex colors (`FlexmaGradient`). Scrims, dividers, bars and flat panels cost no texture at all.
 - **Single-color layers** (icons, pips, badges, solid pills) come white with their design color as `Image.color`, so code can recolor them (an icon that turns green when maxed). The color is the design's, so nothing changes until code changes it.
 - **Text stays live TextMeshPro text.** It uses the design's own font files, one per weight, with the same size, letter spacing, line height and baseline. Code can still change it and translations still work.
@@ -71,7 +71,7 @@ return Flexma.Import.FlexmaImportWindow.Run("https://host/file/FILE_ID", "frameI
 
 - Every frame in the summary reads like `Camp - Shop: 99.6% of pixels match`. It lists where the differences are, by layer.
 - Open `Library/FlexmaImport/FILE_ID/check/<frame>.png` (Flexma | Unity | differences in red) and look at it.
-- **Check what the import costs.** The summary's `images:` line gives the file's image count, megabytes and biggest images; the import deletes images nothing uses any more. Look at every image over about 1000 px:
+- **Check what the import costs.** The summary's `images:` line gives the file's image count, megabytes and biggest images; the import deletes images nothing uses any more. Game code that resized or recolored an imported layer's sprite (a dim cut to a shape, stretched around a target) needs a look after an import that changes what the layer is: plain layers have no sprite. Look at every image over about 1000 px:
   - art the game doesn't show (a mockup of the scene behind a menu) belongs in the frame's fill, which isn't imported (see Designing below);
   - a big image for an effect (a scrim, a fade) should be a plain rectangle with a gradient, which needs no image;
   - a screen's worth of images for one panel means something cut it (rounded clipping, a mask); simplify it in the design.
