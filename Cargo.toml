@@ -6,7 +6,7 @@ members = ["crates/flexma-doc", "crates/flexma-engine", "crates/flexma-server"]
 version = "0.2.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/flexma/flexma"
+repository = "https://github.com/Talhasarac/flexma"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
