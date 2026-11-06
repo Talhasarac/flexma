@@ -24,6 +24,13 @@
   <img alt="MCP" src="https://img.shields.io/badge/agents-MCP-black">
 </p>
 
+<p align="center">
+  <a href="https://sillytoast.studio/flexma/">
+    <img src="https://sillytoast.studio/assets/flexma/film-poster.jpg" width="800" alt="Watch: Flexma in 35 seconds">
+  </a><br>
+  <sub>▶ <a href="https://sillytoast.studio/flexma/">Watch Flexma in 35 seconds</a></sub>
+</p>
+
 ---
 
 ## What is Flexma?
