@@ -158,6 +158,7 @@ When the game already builds its UI in code (a UI kit, `new GameObject` + `Image
 - **A dialog whose frame includes the screen behind it** loads that whole backdrop with it. Take the dialog layer with `Take`, or design dialogs in lean frames.
 - **Long imports outlast tool calls** (around 30 s for most MCP servers). The import goes on; wait for `report.txt` to list every frame before reading prefabs.
 - **Code that depends on how a layer is drawn breaks on re-imports.** Plain layers have no sprite, so don't read `Image.sprite` or its texture: use `FlexmaScreens.Paint(layer)` and its `color`. Don't stretch an imported image into boxes the design didn't draw it in (a dim cut to a shape, moved around a target); design that piece as plain rectangles instead (see Designing).
+- **Copies made in the editor lose driven sizes.** `Instantiate` in edit mode (an editor check, an export tool's snapshot) drops every RectTransform value a layout drives, and a size only the last layout pass set comes back as 0. `FlexmaLayout` leaves Fixed children's sizes undriven so copies keep them; if copied rows or panels come out 0 wide, the project has an older `FlexmaLayout.cs` (step 7).
 - **Edit-mode renders change font assets.** Rendering screens in the editor (checks, other languages) adds glyphs to dynamic TextMeshPro font assets, which rewrites them on disk. Revert those files (`git checkout`) instead of committing a check's side effects.
 
 ## Project hooks

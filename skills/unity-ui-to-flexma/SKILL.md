@@ -59,11 +59,12 @@ Don't skip this step. The exporter sees the scene as it was saved. Anything a sc
 |---|---|
 | A panel is moved, scaled or rotated when it opens (a phone or tablet going full screen, a map zooming in) | Add a `PoseScreen` hook. Ask the user how each screen is usually seen, because that's how designers want it in Flexma. |
 | A bezel, mask or frame is hidden for some screens | Use `HideGraphic` in a `PoseScreen` hook |
-| Custom `BaseMeshEffect`s or UI shaders (glows, halos, gradients) | Add an `AddEffects` hook that maps them to Flexma shadows or blurs, or accept that they're missing |
+| Custom `BaseMeshEffect`s or UI shaders (glows, halos, gradients) | Add an `AddEffects` hook that maps them to Flexma shadows or blurs, or `Options.PaintOverride` for a fill. Otherwise they're missing, and the summary warns with the layers. The Flexma importer's `FlexmaGradient` already exports as an editable gradient. |
 | `RawImage`s fed by RenderTextures or camera feeds at runtime | These export as whatever texture is assigned in the scene, or nothing. Tell the user, or have them assign a representative texture. |
 | Text filled in at runtime (localization, player names, prices) | The export shows the text saved in the scene. Mention it, and don't invent content. |
 | Editor overlays or debug canvases | In the hooks' static constructor, add their names with `FlexmaUIExporter.SkippedCanvasNames.Add("…")` |
 | Screens that exist only in prefabs spawned at runtime and in no scene | They aren't exported. Offer to export them by putting the prefab into a scratch scene that you never save. |
+| Screens the game builds in code (a UI kit, `new GameObject` + `AddComponent`) | Build each state with the game's own code in a preview scene and export that; see "UI built in code" below. |
 
 For UI Toolkit, look at the scripts that hold a `UIDocument` (`rootVisualElement.Q(...)`) as well:
 
@@ -92,18 +93,57 @@ FLEXMA_TOKEN=... Unity -batchmode -quit -projectPath . -executeMethod FlexmaUIEx
 
 Add `-flexmaUIToolkit` to include UI Toolkit documents, and `-flexmaNoCanvases` to leave uGUI canvases out.
 
+**No token in the editor, but the Flexma MCP connected:** export only (`ExportAndUpload(false)`), then upload the export folder the way `FlexmaUploader` does.
+1. Get a link from `upload_image` and post each file in `images/`.
+2. Fonts: post each font in `fonts.json` that has a `.ttf` or `.otf` `src` through an `upload_font` link. For the rest, use `add_font` with its family.
+3. Replace every `"@key"` asset and font reference in `pages.json` with the returned asset id or font family.
+4. In a Linear project, set `linearBlending: true` on each page (`update_nodes`).
+5. Send each page's nodes through `upload_nodes` with the page as parent.
+
+Keys stay the same, so a later uploader run updates these layers in place. Prefer the uploader whenever the user can set a token.
+
 The summary looks like `3 pages, 95 frames, 2255 layers, 216 images, 19 fonts, 133 unused objects skipped`, followed by `upload: 0 layers created, 74 updated, 0 removed; …`. Read the warnings in `summary.txt`.
 
 ### 5. Check the result
 
-1. Run `get_file_tree` on the file with `depth: 2` to see the pages and frames.
-2. Take a `get_screenshot` contact sheet (`node_ids` with several frames, `scale` around 0.3) of the frames that matter most: the main menu, the HUD, the busiest panels, and every frame a hook posed. Look at each one. Check that nothing is blank or white where it should be dark, that text sits in place, that nothing is clipped wrong, and that images aren't stretched.
-3. Read `excluded.txt`. It lists inactive objects that nothing references, which were skipped as unused. If one of them is actually a screen (switched on by name, by `Find`, or by an animation), say so.
-4. For a pixel check, render Unity next to Flexma. Instantiate the canvas in a temporary additive scene as Screen Space - Camera, with its own camera, a solid background and no post-processing (on HDRP, turn off the Postprocess and Exposure frame settings). Render it at the frame size, then diff it against the screenshot. Apply poses only after the canvas has settled: render once, run `Canvas.ForceUpdateCanvases()`, then pose and render again. Close the scene without saving.
+Don't tell the user the export matches Unity until every frame they asked for has been compared with a Unity render of the same state. A sample of frames isn't enough: one bad layout pass breaks screens you didn't open.
+
+1. **Before uploading,** read the warnings in `summary.txt`. These are the common ones:
+   - text 1 px wide or tall, which means a layout collapsed on the export copy;
+   - mesh effects that weren't exported;
+   - images that couldn't be read.
+
+   Fix them before you upload.
+2. Run `get_file_tree` on the file with `depth: 2` to see the pages and frames. Headings are page-level text, not frames; count them separately.
+3. **Render a Unity reference for every exported frame:** the same state, size, data, scroll position and background as the Flexma frame. Do it like this:
+   - Instantiate the canvas in a temporary additive scene as Screen Space - Camera, with its own camera, a solid background and no post-processing. On HDRP, turn off the Postprocess and Exposure frame settings.
+   - Render it at the frame size.
+   - Apply poses only after the canvas has settled: render once, run `Canvas.ForceUpdateCanvases()`, then pose and render again.
+   - Close the scene without saving.
+
+   For UI built in code, render the same canvases you exported.
+4. **Put each Unity render next to Flexma's.** Use `get_screenshot` (`node_ids` with several frames, `scale` around 0.3 for a first look, `scale: 1` to diff) and look at every pair. Check for:
+   - layers collapsed to slivers;
+   - columns stacked at an edge;
+   - blank or white areas where Unity is dark;
+   - text out of place, wrong clipping, or stretched images;
+   - two frames that look the same. That is a duplicate state, so pose a real one or drop it.
+
+   Text antialiasing differs slightly; that's expected (see Known limits).
+5. Read `excluded.txt`. It lists inactive objects that nothing references, which were skipped as unused. If one of them is actually a screen (switched on by name, by `Find`, or by an animation), say so.
 5. UI Toolkit frames come with Unity's render already: `renders/<scene>/<frame>.png` in the export folder, drawn from the same throwaway panel the layers were read from, at the panel's texture size (the frame size times the panel's scale). Diff it against a `get_screenshot` of the frame at `scale: 1`. Expect small differences in text antialiasing and bold text (see Known limits). `get_screenshot` currently draws strokes centered on the edge, so UI Toolkit borders (inside strokes) look half a border width wider there than in the editor; zoom into the editor in a browser if a border looks off.
 6. For UI Toolkit, frames that kept Unity's positions instead of auto layout say why in `meta.unity.layout` (for example `kept Unity's positions: .label would be at 12,30 … instead of 12,31 …`). Read it with `get_nodes`, or search `pages.json` in the export folder for `kept Unity's positions`.
 
-Fix the problems in hooks or exporter options, then export again. Repeat until the important screens match.
+Fix the problems in hooks or exporter options, then export again. Repeat until every requested screen matches.
+
+**Report export, upload and checking separately.** Give the numbers of states:
+- requested;
+- exported;
+- skipped, each with the reason;
+- uploaded;
+- compared side by side.
+
+Say which differences remain, and that headings aren't frames. Only claim that re-syncing works after a second export and upload with no changes in Unity gave `0 layers created, 0 updated, 0 removed` and no duplicate pages or frames (step 6).
 
 ### 6. Later exports
 
@@ -167,6 +207,8 @@ Hooks are static events that the exporter calls. Subscribe to them from an `[Ini
   - `ctx.MoveTo(original, pose)` and `ctx.HideGraphic(graphic)` change the copy, and are undone before the next frame. `ctx.Copy(t)` handles anything else, but you must undo those changes yourself.
   - Setting `ctx.Note` adds a pose note to the frame's description and meta.
 - **`FlexmaUIExporter.AddEffects(LayerContext layer)`** runs once per layer, with `layer.Layer` (the original object), `layer.Rect` (in local units) and `layer.Scale` (local units to Flexma px). Append effects to `layer.Effects`: `{type:"DROP_SHADOW", x, y, blur, spread, color}` (several stack, the first one lowest) or `{type:"LAYER_BLUR", radius}`.
+- **`Options.PaintOverride`** (`Func<Graphic, Color, JToken>`) is asked first for every graphic's fill, with the graphic and its color (tint included). Return a Flexma paint (`"#rrggbb"`, `{type:"LINEAR_GRADIENT", angle, stops:[{position, color}]}`, …) for a project graphic the exporter doesn't know, or null to use the built-in mapping.
+- **`FlexmaUIExporter.PreviewScenes`** maps a name to a preview scene. Put the name in `Options.ScenePaths` and the exporter reads that scene like a saved one; the name becomes the page name. See "UI built in code".
 
 Find objects through `ctx.Canvas` or `layer.Layer`, never with `FindObjectOfType` / `FindAnyObjectByType`. During an export the scene's copies exist too, and a global search can return a copy. Read field values instead of guessing them.
 
@@ -252,11 +294,45 @@ static void PoseDocument(FlexmaUIExporter.DocumentContext ctx)
 }
 ```
 
+## UI built in code
+
+Some games build their screens in code (a UI kit, `new GameObject` + `AddComponent`), so no scene holds them. Export them with the game's own builders, from a preview scene, in an editor script of the project:
+
+1. **Build in a preview scene** (`EditorSceneManager.NewPreviewScene()`), so no saved scene changes. The exporter refuses to run next to an untitled, unsaved scene, so leave a saved scene open.
+2. **One root canvas per state,** named after it. Each becomes a frame, and its layer keys come from hierarchy paths, so keep the names and build order the same between exports. Make every state really different: two states that render the same are a duplicate (a stale flag the game no longer reads, a page that was merged away).
+3. **Fill it with fixed sample data,** the same data the Unity reference renders use, never live saves or random values.
+4. **Settle it, don't animate it.** The editor runs no frames, so a coroutine that waits on `Time.deltaTime` never finishes. Call the builder's final state directly, with animation off.
+5. **Lay it out at the export size:** set the canvas to World Space with `sizeDelta` = `Options.ScreenSize`, then run `Canvas.ForceUpdateCanvases()` and `LayoutRebuilder.ForceRebuildLayoutImmediate(root)` twice.
+6. **If you copy a canvas** to keep a state while building the next, put back the original's `anchorMin`, `anchorMax`, `pivot`, `sizeDelta` and `anchoredPosition3D` on every RectTransform of the copy, matched in `GetComponentsInChildren<RectTransform>(true)` order, before any layout pass. Instantiate in the editor drops the values layouts drive, and a size only the last layout pass set comes back as 0. The exporter does this for its own copies. Building each state fresh avoids copies altogether.
+7. **Export:** register the scene, export, upload, then clean up.
+
+```csharp
+FlexmaUIExporter.PreviewScenes["Game UI"] = scene;
+try
+{
+    var prefs = FlexmaUIExporterWindow.Prefs.Load();
+    var options = prefs.ExportOptions();
+    options.ScenePaths = new List<string> { "Game UI" };
+    var exported = FlexmaUIExporter.Export(options);
+    var uploaded = FlexmaUploader.Upload(exported.Folder, prefs.UploadSettings());
+    return exported + "\nupload: " + uploaded;
+}
+finally
+{
+    FlexmaUIExporter.PreviewScenes.Remove("Game UI");
+    EditorSceneManager.ClosePreviewScene(scene);
+}
+```
+
+Then check every state against a Unity render of the same canvas (step 5 of the workflow).
+
 ## Already handled (useful when debugging)
 
 The exporter already deals with these. Look at them first if a screen looks wrong:
 
 - **ColorTint isn't stored on the Image.** Buttons tint their target graphic at runtime, so the exporter multiplies in the Selectable's normal or disabled color. Without that, white buttons export white.
+- **Copies lose driven RectTransform values.** Unity drops what layout groups, fitters and scripts drive when it copies objects in the editor, so a fixed-width child of a layout would export 1 px wide. The exporter puts the original's values back on its copy before layout runs.
+- **The Flexma importer's gradients.** A sprite-less Image with `FlexmaGradient` exports as an editable `LINEAR_GRADIENT` (tint included), not as the Image's white color.
 - **Hidden panels keep stale layout positions.** Layout groups inside inactive panels never ran. The exporter switches on each screen in the copy and runs `LayoutRebuilder.ForceRebuildLayoutImmediate` before reading rects.
 - **Atlas sprites report the atlas as `sprite.texture`.** Pixels are read from the source texture through the AssetDatabase.
 - **TextMeshPro ignores one trailing line break, but legacy Text doesn't.** The exporter strips one trailing `\n` from TMP text only. Without that, labels sit half a line too high.
@@ -273,7 +349,7 @@ The exporter already deals with these. Look at them first if a screen looks wron
 - UI Toolkit text measurement can differ by a pixel in the first export after a script reload, which shows up as a few updated layers on the next upload.
 - Animations, tweens and runtime-generated content show their saved state.
 - TextMeshPro SDF effects other than outline and underlay (bevel, glow, gradients from materials) aren't exported.
-- Custom shaders and mesh effects need an `AddEffects` hook, or they're left out.
+- Custom shaders and mesh effects need an `AddEffects` hook (or `Options.PaintOverride` for fills), or they're left out; the summary names them.
 
 ## Troubleshooting
 
@@ -284,6 +360,9 @@ The exporter already deals with these. Look at them first if a screen looks wron
 | "Export and upload" is greyed out | The window's file link isn't a full `https://host/file/<id>` link, or the token is empty |
 | A panel is missing | Nothing references it (check `excluded.txt`), or it's spawned from a prefab at runtime |
 | A frame shows the panel in the wrong place or size | The game poses it at runtime; add a `PoseScreen` hook |
+| Layers come out 1 px wide or tall, columns pile up at one edge | A copy lost its driven sizes. Update the exporter scripts; if a project script copies canvases itself, restore the RectTransform values on its copies too (see "UI built in code") |
+| A white block where Unity draws a gradient or glow | A mesh effect the exporter doesn't map; the summary names it. Map it with `PaintOverride` or `AddEffects` |
+| `Save or close the untitled scene first` | Unity can't open the exporter's temporary scene next to an unsaved untitled scene. Save it, open a saved scene, or build code-made UI in a preview scene |
 | Every re-push updates the same N layers | Something doesn't round-trip. Compare the spec with `get_nodes` for one of those layers. |
 | Hundreds of layers created and removed after a change | Expected when the Components switch is flipped or prefabs are restructured. Otherwise, the keys changed (objects recreated or the scene re-saved under a new GUID). |
 | No UI Toolkit frames | Include > UI Toolkit documents is off, Unity is older than 2022.3 (see the warnings), or the UIDocuments have no Source Asset |

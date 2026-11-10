@@ -46,6 +46,8 @@ public static partial class FlexmaUIExporter
         public Vector2 ScreenSize = new Vector2(1920, 1080);
         public int MaxImageSize = 2048;
         public string FrameBackground = "#2a2d33";
+        /// <summary>Project-specific paint for a graphic. Return null to use the built-in mapping.</summary>
+        public Func<Graphic, Color, JToken> PaintOverride;
         /// <summary>Root canvases to leave out by name (editor overlays, debug consoles).</summary>
         public List<string> SkipCanvasNames = new List<string>();
         /// <summary>Export a Mask on a sprite as clip:"alpha" (clip by the sprite's shape) instead of a rect clip.</summary>
@@ -115,6 +117,10 @@ public static partial class FlexmaUIExporter
 
     /// <summary>Root canvases the project always leaves out, by name (editor overlays, debug consoles); add to it from the hooks.</summary>
     public static readonly List<string> SkippedCanvasNames = new List<string>();
+
+    /// <summary>Preview scenes to export as if they were scenes, by the name used in Options.ScenePaths (which becomes the
+    /// page name): for UI that a game builds from code, built into a preview scene so no saved scene is touched.</summary>
+    public static readonly Dictionary<string, Scene> PreviewScenes = new Dictionary<string, Scene>();
 
     public sealed class ScreenContext
     {
@@ -193,6 +199,8 @@ public static partial class FlexmaUIExporter
         readonly Dictionary<Graphic, Color> tint = new Dictionary<Graphic, Color>();
         readonly HashSet<Transform> selfHidden = new HashSet<Transform>();
         readonly HashSet<Transform> big = new HashSet<Transform>();
+        readonly HashSet<string> collapsedTexts = new HashSet<string>();
+        readonly Dictionary<string, HashSet<string>> unmappedEffects = new Dictionary<string, HashSet<string>>();
         readonly Dictionary<Transform, string> keys = new Dictionary<Transform, string>();
 
         // What the PoseScreen hook changed on the copy for the current frame, undone before the next one.
@@ -225,6 +233,14 @@ public static partial class FlexmaUIExporter
 
         public Result Run()
         {
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                if (string.IsNullOrEmpty(SceneManager.GetSceneAt(i).path))
+                {
+                    // Unity can't add the temporary scene the export works in next to one that was never saved.
+                    throw new InvalidOperationException("Save or close the untitled scene first: Unity can't open the exporter's temporary scene next to it. Build code-made UI in a preview scene (EditorSceneManager.NewPreviewScene) and register it in FlexmaUIExporter.PreviewScenes.");
+                }
+            }
             string folder = opt.OutputFolder;
             if (string.IsNullOrEmpty(folder))
             {
@@ -250,7 +266,7 @@ public static partial class FlexmaUIExporter
             {
                 foreach (var path in opt.ScenePaths)
                 {
-                    var s = SceneManager.GetSceneByPath(path);
+                    var s = FindScene(path);
                     if (s.IsValid() && s.isLoaded)
                     {
                         continue;
@@ -281,7 +297,7 @@ public static partial class FlexmaUIExporter
 
                 for (int si = 0; si < opt.ScenePaths.Count; si++)
                 {
-                    var scene = SceneManager.GetSceneByPath(opt.ScenePaths[si]);
+                    var scene = FindScene(opt.ScenePaths[si]);
                     if (!scene.IsValid())
                     {
                         result.Warnings.Add("Scene not found: " + opt.ScenePaths[si]);
@@ -394,6 +410,16 @@ public static partial class FlexmaUIExporter
                     }
                 }
             }
+        }
+
+        /// <summary>A scene by its path, or a registered preview scene by its name.</summary>
+        static Scene FindScene(string path)
+        {
+            if (PreviewScenes.TryGetValue(path, out var preview) && preview.IsValid())
+            {
+                return preview;
+            }
+            return SceneManager.GetSceneByPath(path);
         }
 
         static GameObject ReferencedGameObject(UnityEngine.Object o)
@@ -566,6 +592,20 @@ public static partial class FlexmaUIExporter
                 for (int i = 0; i < originals.Length; i++)
                 {
                     copyOf[originals[i]] = copies[i];
+                }
+                // The editor drops driven RectTransform values (what layout groups, fitters and scripts set) when it
+                // copies objects, and layout can't rebuild a size only a script or the last layout pass set: it comes
+                // back as 0. Put back the original's values; layout then runs on the copy as usual.
+                for (int i = 1; i < originals.Length; i++)
+                {
+                    if ((originals[i] is RectTransform from) && (copies[i] is RectTransform to))
+                    {
+                        to.anchorMin = from.anchorMin;
+                        to.anchorMax = from.anchorMax;
+                        to.pivot = from.pivot;
+                        to.sizeDelta = from.sizeDelta;
+                        to.anchoredPosition3D = from.anchoredPosition3D;
+                    }
                 }
 
                 // Buttons, toggles and sliders tint their target graphic at runtime.
@@ -1080,6 +1120,10 @@ public static partial class FlexmaUIExporter
                 }
                 if (text != null)
                 {
+                    if (!hidden && (((double)text["w"] <= 1) || ((double)text["h"] <= 1)))
+                    {
+                        collapsedTexts.Add(PathOf(t));
+                    }
                     if (kids.Count == 0)
                     {
                         text["key"] = KeyOf(t);
@@ -1213,7 +1257,7 @@ public static partial class FlexmaUIExporter
             var rects = new Dictionary<Texture, HashSet<Rect>>();
             foreach (var path in opt.ScenePaths)
             {
-                var scene = SceneManager.GetSceneByPath(path);
+                var scene = FindScene(path);
                 if (!scene.IsValid())
                 {
                     continue;
@@ -1325,12 +1369,17 @@ public static partial class FlexmaUIExporter
         {
             note = null;
             var color = Col(g);
+            var paint = opt.PaintOverride?.Invoke(g, color);
+            if (paint != null)
+            {
+                return paint;
+            }
             if (g is Image img)
             {
                 var sprite = img.sprite;
                 if (sprite == null)
                 {
-                    return Hex(color);
+                    return GradientPaint(img, color) ?? Hex(color);
                 }
                 var source = SourceTexture(sprite);
                 ImageEntry image;
@@ -1425,6 +1474,34 @@ public static partial class FlexmaUIExporter
             }
             note = "Unity Graphic: " + g.GetType().Name;
             return "#ffffff22";
+        }
+
+        /// <summary>A sprite-less Image that the Flexma importer's FlexmaGradient draws with vertex colors, as an editable
+        /// linear gradient. Found by name, so the exporter compiles in projects without it.</summary>
+        static JToken GradientPaint(Image img, Color tint)
+        {
+            foreach (var effect in img.GetComponents<BaseMeshEffect>())
+            {
+                if ((effect == null) || !effect.isActiveAndEnabled || (effect.GetType().FullName != "Flexma.FlexmaGradient"))
+                {
+                    continue;
+                }
+                var type = effect.GetType();
+                var positions = type.GetField("positions")?.GetValue(effect) as float[];
+                var colors = type.GetField("colors")?.GetValue(effect) as Color[];
+                var angle = type.GetField("angle")?.GetValue(effect);
+                if ((positions == null) || (colors == null) || (positions.Length == 0) || (positions.Length != colors.Length) || !(angle is float a))
+                {
+                    return null;
+                }
+                var stops = new JArray();
+                for (int i = 0; i < positions.Length; i++)
+                {
+                    stops.Add(new JObject { ["position"] = Math.Round(positions[i], 4), ["color"] = Hex(colors[i] * tint) });
+                }
+                return new JObject { ["type"] = "LINEAR_GRADIENT", ["angle"] = Math.Round(a, 2), ["stops"] = stops };
+            }
+            return null;
         }
 
         JObject Text(Transform t, Graphic g, Vector2 parentTopLeft, float parentAngle, string name)
@@ -1730,7 +1807,26 @@ public static partial class FlexmaUIExporter
                     list.Add(new JObject { ["type"] = "DROP_SHADOW", ["x"] = Num(d.x), ["y"] = Num(-d.y), ["blur"] = 0, ["spread"] = 0, ["color"] = Hex(shadow.effectColor) });
                 }
             }
+            int before = list.Count;
             CustomEffects(t, scale, list);
+            if (list.Count == before)
+            {
+                // Mesh effects the exporter can't map, and no hook mapped: the layer exports without them.
+                foreach (var effect in t.GetComponents<BaseMeshEffect>())
+                {
+                    if ((effect == null) || !effect.enabled || (effect is Shadow) || (effect is PositionAsUV1)
+                        || (effect.GetType().FullName == "Flexma.FlexmaGradient"))
+                    {
+                        continue;
+                    }
+                    string type = effect.GetType().Name;
+                    if (!unmappedEffects.TryGetValue(type, out var where))
+                    {
+                        unmappedEffects[type] = where = new HashSet<string>();
+                    }
+                    where.Add(PathOf(t));
+                }
+            }
             if (list.Count == 0)
             {
                 return null;
@@ -2357,6 +2453,16 @@ public static partial class FlexmaUIExporter
             }));
             File.WriteAllText(Path.Combine(folder, FontsFile), fontList.ToString(Formatting.Indented));
             File.WriteAllLines(Path.Combine(folder, "excluded.txt"), excluded);
+            if (collapsedTexts.Count > 0)
+            {
+                result.Warnings.Add("Text 1 px wide or tall, so its layout didn't settle on the copy (" + collapsedTexts.Count + "): "
+                    + string.Join(", ", collapsedTexts.Take(5)) + (collapsedTexts.Count > 5 ? ", …" : ""));
+            }
+            foreach (var kv in unmappedEffects)
+            {
+                result.Warnings.Add(kv.Key + " isn't exported (" + kv.Value.Count + "): " + string.Join(", ", kv.Value.Take(3))
+                    + (kv.Value.Count > 3 ? ", …" : "") + "; map it with an AddEffects hook or Options.PaintOverride");
+            }
 
             result.Pages = pages.Count;
             result.Images = images.Count;

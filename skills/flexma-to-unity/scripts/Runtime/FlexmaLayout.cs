@@ -434,12 +434,22 @@ namespace Flexma
             }
         }
 
-        /// <summary>Put a child at `pos` (from the left or top inner edge of this frame) with `size` along `axis`.</summary>
+        /// <summary>Put a child at `pos` (from the left or top inner edge of this frame) with `size` along `axis`.
+        /// A Fixed child's anchors and size stay its own, not driven: the editor drops driven values when it copies or
+        /// saves an object, and a Fixed size has nothing to rebuild it from.</summary>
         void Place(RectTransform c, int axis, float pos, float size)
         {
-            tracker.Add(this, c, axis == 0
-                ? DrivenTransformProperties.AnchoredPositionX | DrivenTransformProperties.AnchorMinX | DrivenTransformProperties.AnchorMaxX | DrivenTransformProperties.SizeDeltaX
-                : DrivenTransformProperties.AnchoredPositionY | DrivenTransformProperties.AnchorMinY | DrivenTransformProperties.AnchorMaxY | DrivenTransformProperties.SizeDeltaY);
+            var n = c.GetComponent<FlexmaNode>();
+            bool followsText = (n != null) && (axis == 0 ? n.textHugsWidth : n.textHugsHeight);
+            bool sized = (SizingOf(c, axis) != Sizing.Fixed) || followsText || (Mathf.Abs(size - c.rect.size[axis]) > 0.01f);
+            var driven = axis == 0 ? DrivenTransformProperties.AnchoredPositionX : DrivenTransformProperties.AnchoredPositionY;
+            if (sized)
+            {
+                driven |= axis == 0
+                    ? DrivenTransformProperties.AnchorMinX | DrivenTransformProperties.AnchorMaxX | DrivenTransformProperties.SizeDeltaX
+                    : DrivenTransformProperties.AnchorMinY | DrivenTransformProperties.AnchorMaxY | DrivenTransformProperties.SizeDeltaY;
+            }
+            tracker.Add(this, c, driven);
             c.SetInsetAndSizeFromParentEdge(axis == 0 ? RectTransform.Edge.Left : RectTransform.Edge.Top, pos, Mathf.Max(0, size));
         }
 

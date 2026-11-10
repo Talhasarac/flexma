@@ -22,7 +22,7 @@ public sealed class FlexmaUIExporterWindow : EditorWindow
     const string Prefix = "FlexmaExporter.";
 
     /// <summary>Everything the window remembers.</summary>
-    sealed class Prefs
+    internal sealed class Prefs
     {
         public string Token;
         public string File;
