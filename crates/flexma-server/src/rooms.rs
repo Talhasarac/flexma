@@ -362,7 +362,7 @@ impl<'a> Tx<'a> {
             let mut ops = Vec::new();
             for id in ids {
                 let Some(n) = self.doc.get(id) else { continue };
-                if n.kind != flexma_doc::NodeType::Text || !n.needs_measure {
+                if n.kind != flexma_doc::NodeType::Text || !n.needs_measure || flexma_doc::text::squeezed(n) {
                     continue;
                 }
                 let (w, h) = m.measure_box(n);

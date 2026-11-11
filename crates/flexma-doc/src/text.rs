@@ -181,6 +181,12 @@ pub fn estimate_width(s: &str, font_size: f64, letter_spacing: f64, weight: u16)
     w
 }
 
+/// Wrapped text with almost no width, as in a frame that is still being
+/// built: measuring it now would give a letter a line, so it waits for a width.
+pub fn squeezed(n: &Node) -> bool {
+    n.text_auto_resize == TextAutoResize::Height && n.width < 1.0
+}
+
 /// Lines and box size for a text node using estimated metrics.
 /// Resize a text node's box to its estimated content (per its auto-resize
 /// mode) and flag it so a browser measures it exactly.

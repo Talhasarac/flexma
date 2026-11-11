@@ -634,7 +634,7 @@ impl Editor {
         let mut ops = Vec::new();
         for id in ids {
             let Some(n) = self.doc.get(&id).cloned() else { continue };
-            if n.kind != NodeType::Text {
+            if n.kind != NodeType::Text || flexma_doc::text::squeezed(&n) {
                 continue;
             }
             let (w, h) = self.text.as_mut().unwrap().measure_box(&n);

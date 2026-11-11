@@ -14,6 +14,22 @@ pub struct Document {
     /// isn't a resize: children were placed for the laid-out size. Not
     /// stored; every replica clears it after a batch (`clear_fresh`).
     fresh: std::collections::HashSet<NodeId>,
+    /// Wrapped text that layout shows at a width it wasn't measured at, with
+    /// an estimated height: the height it had, for when that width returns.
+    /// Derived, like layout; not stored.
+    estimates: HashMap<NodeId, Estimate>,
+}
+
+/// A text height layout replaced with an estimate (`Document::note_estimate`).
+#[derive(Clone, Copy, Debug)]
+struct Estimate {
+    /// The width `height` belongs to.
+    width: f64,
+    measured_width: Option<f64>,
+    height: f64,
+    needs_measure: bool,
+    /// The estimate layout gave it last.
+    estimated: f64,
 }
 
 /// Wire/storage form of a document: nodes in tree pre-order (parents first).
@@ -346,6 +362,39 @@ impl Document {
     /// End of a batch of ops (after its layout): nothing is new any more.
     pub fn clear_fresh(&mut self) {
         self.fresh.clear();
+    }
+
+    /// Layout gave text `id` a width it wasn't measured at and the estimated
+    /// height `h`. The height it had is kept, so it comes back if the width
+    /// does (`measured_height_back`): a frame that is 0 wide for a moment
+    /// while layers arrive one by one doesn't leave a letter-a-line height.
+    pub fn note_estimate(&mut self, id: &str, h: f64) {
+        let Some(n) = self.nodes.get(id) else { return };
+        if let Some(e) = self.estimates.get_mut(id) {
+            if e.measured_width == n.measured_width && (n.height - e.estimated).abs() < 0.01 {
+                e.estimated = h;
+                return;
+            }
+        }
+        let e = Estimate { width: n.measured_width.unwrap_or(n.width), measured_width: n.measured_width, height: n.height, needs_measure: n.needs_measure, estimated: h };
+        self.estimates.insert(id.to_string(), e);
+    }
+
+    /// The height text `id` had at width `w`, if layout replaced it with an
+    /// estimate since and nothing measured or resized it in between.
+    pub fn measured_height_back(&mut self, id: &str, w: f64) -> Option<f64> {
+        let e = *self.estimates.get(id)?;
+        let n = self.nodes.get_mut(id)?;
+        if e.measured_width != n.measured_width || (n.height - e.estimated).abs() >= 0.01 {
+            self.estimates.remove(id);
+            return None;
+        }
+        if (w - e.width).abs() > 0.01 {
+            return None;
+        }
+        n.needs_measure = e.needs_measure;
+        self.estimates.remove(id);
+        Some(e.height)
     }
 
     /// Flag a text box for exact measuring (derived state, like layout).

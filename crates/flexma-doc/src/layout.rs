@@ -266,12 +266,15 @@ fn arrange(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
             // at wraps differently: estimate its height and flag it, so the
             // room (for agent edits) or an editor measures it exactly. Its old
             // height would leave the box, and hugging parents, at the old line
-            // count.
-            let rewrapped = doc.get(c).is_some_and(|cn| rewraps(cn, w));
-            if rewrapped {
+            // count. Back at the measured width, it gets its measured height
+            // back.
+            if let Some(measured) = doc.measured_height_back(c, w) {
+                h = measured;
+            } else if doc.get(c).is_some_and(|cn| rewraps(cn, w)) {
                 let mut probe = doc.get(c).unwrap().clone();
                 probe.width = w;
                 h = crate::text::estimate_layout(&probe).2;
+                doc.note_estimate(c, h);
                 doc.set_needs_measure(c);
             }
             if doc.set_geometry(c, x, y, w, h) {
@@ -312,10 +315,12 @@ fn fill_absolute(doc: &mut Document, id: &str, out: &mut Vec<NodeId>) {
         if cn.layout_sizing_vertical == SizingMode::Fill {
             (y, h) = (0.0, ph);
         }
-        if rewraps(cn, w) {
-            let mut probe = cn.clone();
-            probe.width = w;
+        let probe = rewraps(cn, w).then(|| Node { width: w, ..cn.clone() });
+        if let Some(measured) = doc.measured_height_back(&c, w) {
+            h = measured;
+        } else if let Some(probe) = probe {
             h = crate::text::estimate_layout(&probe).2;
+            doc.note_estimate(&c, h);
             doc.set_needs_measure(&c);
         }
         if doc.set_geometry(&c, x, y, w, h) {
@@ -629,6 +634,34 @@ mod tests {
         let t = doc.get("t:1").unwrap();
         assert!(t.needs_measure && t.height > 60.0, "{} {}", t.needs_measure, t.height);
         assert_eq!(doc.get("f:1").unwrap().height, t.height);
+    }
+
+    /// A width that comes and goes (a parent briefly 0 wide while layers
+    /// arrive one by one) leaves the height measured at the real width, not
+    /// the estimate made for the passing one.
+    #[test]
+    fn passing_width_keeps_measured_height() {
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.layout_mode, f.width, f.layout_sizing_vertical) = (LayoutMode::Vertical, 416.0, SizingMode::Hug);
+        doc.apply(&Op::Create { node: f }).unwrap();
+        let mut t = Node::new("t:1", NodeType::Text);
+        t.parent = Some("f:1".into());
+        t.characters = "Upgrades for your own chopping. Your crew always uses your axe material.".into();
+        (t.font_size, t.line_height, t.width, t.height, t.measured_width) = (17.0, Some(20.5), 416.0, 41.0, Some(416.0));
+        (t.text_auto_resize, t.layout_sizing_horizontal) = (crate::paint::TextAutoResize::Height, SizingMode::Fill);
+        doc.apply(&Op::Create { node: t }).unwrap();
+        relayout_all(&mut doc);
+        assert_eq!(doc.get("t:1").unwrap().height, 41.0);
+        doc.apply(&Op::update1("f:1", "width", serde_json::json!(0))).unwrap();
+        relayout(&mut doc, &["f:1".to_string()]);
+        assert!(doc.get("t:1").unwrap().height > 200.0, "0 wide: a letter a line");
+        doc.apply(&Op::update1("f:1", "width", serde_json::json!(416))).unwrap();
+        relayout(&mut doc, &["f:1".to_string()]);
+        let t = doc.get("t:1").unwrap();
+        assert_eq!((t.width, t.height), (416.0, 41.0), "back at the measured width: the measured height");
+        assert_eq!(doc.get("f:1").unwrap().height, 41.0, "and the hugging frame with it");
     }
 
     fn build(spec: serde_json::Value) -> (Document, Vec<NodeId>) {
