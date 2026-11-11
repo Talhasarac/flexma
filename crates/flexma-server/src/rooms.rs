@@ -367,13 +367,17 @@ impl<'a> Tx<'a> {
                 }
                 let (w, h) = m.measure_box(n);
                 let mut props = serde_json::Map::new();
-                if (w - n.width).abs() > 0.01 {
+                // A finished measurement carries the whole box: editors that
+                // are open hold their own estimate of it, which the room's
+                // layout replaced here without an op.
+                let done = m.has_font(n);
+                if (w - n.width).abs() > 0.01 || (done && n.text_auto_resize == flexma_doc::TextAutoResize::WidthAndHeight) {
                     props.insert("width".into(), json!(w));
                 }
-                if (h - n.height).abs() > 0.01 {
+                if (h - n.height).abs() > 0.01 || (done && n.text_auto_resize != flexma_doc::TextAutoResize::None) {
                     props.insert("height".into(), json!(h));
                 }
-                if m.has_font(n) {
+                if done {
                     props.insert("needsMeasure".into(), json!(false));
                     if n.text_auto_resize == flexma_doc::TextAutoResize::Height {
                         props.insert("measuredWidth".into(), json!(n.width));
@@ -2037,5 +2041,40 @@ mod measure_tests {
         assert_eq!((n.width, n.needs_measure), (309.0, false));
         let m = doc.get("t:2").unwrap();
         assert!(m.needs_measure, "a browser still measures text in a font the server lacks");
+    }
+
+    /// An agent creates wrapping text before layout gives it a width, so it
+    /// starts with an estimate for no width: a letter a line. The room's own
+    /// layout re-estimates it before measuring, so the measurement may match
+    /// that; it still carries the height, since open editors apply the ops
+    /// without the room's layout step in between.
+    #[test]
+    fn measurement_carries_the_height() {
+        use flexma_doc::{LayoutMode, SizingMode, TextAutoResize};
+        let mut doc = Document::new_empty();
+        let mut f = Node::new("f:1", NodeType::Frame);
+        f.parent = Some("0:1".into());
+        (f.layout_mode, f.width, f.layout_sizing_vertical) = (LayoutMode::Vertical, 300.0, SizingMode::Hug);
+        let mut t = Node::new("t:1", NodeType::Text);
+        t.parent = Some("f:1".into());
+        (t.characters, t.font_size, t.width) = ("Crew".into(), 18.0, 0.0);
+        (t.text_auto_resize, t.layout_sizing_horizontal) = (TextAutoResize::Height, SizingMode::Fill);
+        flexma_doc::text::fit_box(&mut t);
+        assert!(t.height > 60.0, "estimated at no width: {}", t.height);
+        let mut tx = Tx::new(&mut doc);
+        tx.measurer = Some(TextMeasurer::new(crate::render::base_fontdb()));
+        tx.apply_all(vec![Op::Create { node: f }, Op::Create { node: t }]);
+        tx.relayout();
+        let ops = tx.applied.clone();
+        let room = doc.get("t:1").unwrap().clone();
+        assert!(!room.needs_measure && room.height < 30.0, "{} {}", room.needs_measure, room.height);
+        let mut editor = Document::new_empty();
+        let mut changed = Vec::new();
+        for op in &ops {
+            changed.extend(editor.apply(op).unwrap().changed);
+        }
+        layout::relayout(&mut editor, &changed);
+        let t = editor.get("t:1").unwrap();
+        assert_eq!((t.width, t.height), (room.width, room.height), "an open editor ends where the room does");
     }
 }

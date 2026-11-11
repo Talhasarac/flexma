@@ -639,10 +639,13 @@ impl Editor {
             }
             let (w, h) = self.text.as_mut().unwrap().measure_box(&n);
             let mut props = Map::new();
-            if (w - n.width).abs() > 0.5 {
+            // The whole box goes with the measurement: other replicas may
+            // hold another estimate for it, which their layout keeps once
+            // `measuredWidth` matches.
+            if (w - n.width).abs() > 0.5 || n.text_auto_resize == flexma_doc::TextAutoResize::WidthAndHeight {
                 props.insert("width".into(), json!(w));
             }
-            if (h - n.height).abs() > 0.5 {
+            if (h - n.height).abs() > 0.5 || n.text_auto_resize != flexma_doc::TextAutoResize::None {
                 props.insert("height".into(), json!(h));
             }
             if n.text_auto_resize == flexma_doc::TextAutoResize::Height {
@@ -665,13 +668,16 @@ impl Editor {
             let _ = probe.set_prop(k, v);
         }
         let (w, h) = self.text.as_mut().unwrap().measure_box(&probe);
-        if probe.text_auto_resize == flexma_doc::TextAutoResize::WidthAndHeight && (w - probe.width).abs() > 0.01 {
+        let remeasure = probe.text_auto_resize == flexma_doc::TextAutoResize::Height && probe.measured_width != Some(probe.width);
+        // Settling a measurement sends the whole box (see `process_measurements`).
+        let settles = remeasure || probe.needs_measure;
+        if probe.text_auto_resize == flexma_doc::TextAutoResize::WidthAndHeight && ((w - probe.width).abs() > 0.01 || settles) {
             out.insert("width".into(), json!(w));
         }
-        if probe.text_auto_resize != flexma_doc::TextAutoResize::None && (h - probe.height).abs() > 0.01 {
+        if probe.text_auto_resize != flexma_doc::TextAutoResize::None && ((h - probe.height).abs() > 0.01 || settles) {
             out.insert("height".into(), json!(h));
         }
-        if probe.text_auto_resize == flexma_doc::TextAutoResize::Height && probe.measured_width != Some(probe.width) {
+        if remeasure {
             out.insert("measuredWidth".into(), json!(probe.width));
         }
         if probe.needs_measure {
