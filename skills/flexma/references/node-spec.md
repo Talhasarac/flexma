@@ -19,7 +19,7 @@ to the canonical names. Unknown names return an error that lists the valid ones.
 | `fills` / `fill` / `background` | paint \| paint[] \| hex | type default | See Paints. `"none"` or `[]` removes all fills. |
 | `strokes` / `stroke` / `border` | paint \| paint[] \| hex | none | |
 | `strokeWeight` / `strokeWidth` / `borderWidth` | number | 1 | |
-| `strokeAlign` | `INSIDE` \| `CENTER` \| `OUTSIDE` | `CENTER` | |
+| `strokeAlign` | `INSIDE` \| `CENTER` \| `OUTSIDE` | `CENTER` | `CENTER` puts half the border outside the layer, where a clipping parent cuts it. Use `INSIDE` for UI borders (buttons, cards, inputs). |
 | `cornerRadius` / `radius` / `borderRadius` | number \| [tl,tr,br,bl] | 0 | An array sets `cornerRadii` (each corner separately). |
 | `effects` / `shadow` | effect[] \| shadow object | none | See Effects. |
 | `fillStyle`, `strokeStyle` | style name or id \| null | none | Link to a shared color style (see `list_styles`); null detaches. |
