@@ -569,19 +569,7 @@ impl Editor {
             return false;
         }
         self.ensure_scene();
-        // Target: selected container, else the parent of the selection, else the page.
-        let target = match self.selection.as_slice() {
-            [one] => {
-                let n = self.doc.get(one).unwrap();
-                if matches!(n.kind, NodeType::Frame | NodeType::Group | NodeType::Component) && !flexma_doc::node::is_derived_id(one) && !roots.contains(one) {
-                    one.clone()
-                } else {
-                    n.parent.clone().unwrap_or_else(|| self.scene.page.clone())
-                }
-            }
-            [first, ..] => self.doc.parent_of(first).map(str::to_string).unwrap_or_else(|| self.scene.page.clone()),
-            [] => self.scene.page.clone(),
-        };
+        let target = self.paste_target(&roots);
         let inv = self.doc.world_transform(&target).invert().unwrap_or_default();
         // Keep the original position if it's visible, otherwise center in view.
         let view = self.cam.visible_world(self.css_w, self.css_h);
@@ -635,7 +623,26 @@ impl Editor {
         true
     }
 
-    /// Insert an uploaded image as a rectangle with an image fill.
+    /// Where pasted layers go: into the selected frame, group or component,
+    /// next to another selected layer, or onto the page when nothing is
+    /// selected (never into a frame just because it is in view).
+    fn paste_target(&self, roots: &[NodeId]) -> NodeId {
+        match self.selection.as_slice() {
+            [one] => {
+                let n = self.doc.get(one).unwrap();
+                if matches!(n.kind, NodeType::Frame | NodeType::Group | NodeType::Component) && !flexma_doc::node::is_derived_id(one) && !roots.contains(one) {
+                    one.clone()
+                } else {
+                    n.parent.clone().unwrap_or_else(|| self.scene.page.clone())
+                }
+            }
+            [first, ..] => self.doc.parent_of(first).map(str::to_string).unwrap_or_else(|| self.scene.page.clone()),
+            [] => self.scene.page.clone(),
+        }
+    }
+
+    /// Insert an uploaded image as a rectangle with an image fill: dropped at
+    /// `at`, into the frame there; pasted (no `at`), where layers are pasted.
     pub fn insert_image(&mut self, asset: &str, w: f64, h: f64, at: Option<Vec2>) -> Option<NodeId> {
         if !self.can_edit {
             return None;
@@ -646,7 +653,10 @@ impl Editor {
         let s = (max / w.max(h).max(1.0)).min(1.0);
         let (w, h) = ((w * s).round().max(1.0), (h * s).round().max(1.0));
         let center = at.unwrap_or_else(|| view.center());
-        let target = self.frame_drop_target(center).unwrap_or_else(|| self.scene.page.clone());
+        let target = match at {
+            Some(p) => self.frame_drop_target(p).unwrap_or_else(|| self.scene.page.clone()),
+            None => self.paste_target(&[]),
+        };
         let inv = self.doc.world_transform(&target).invert().unwrap_or_default();
         let p = inv.apply(Vec2::new(center.x - w / 2.0, center.y - h / 2.0));
         let mut pr = Map::new();
@@ -1107,7 +1117,7 @@ impl Editor {
 #[cfg(test)]
 mod font_tests {
     use crate::editor::Editor;
-    use flexma_doc::{Document, Node, NodeType, Op};
+    use flexma_doc::{Document, Node, NodeType, Op, Vec2};
 
     fn editor() -> Editor {
         let mut doc = Document::new_empty();
@@ -1140,6 +1150,31 @@ mod font_tests {
         // Main component label, its instance copy, and the plain text layer.
         assert_eq!(poppins["count"], 3);
         assert_eq!(poppins["styles"], serde_json::json!([[400, false], [700, false]]));
+    }
+
+    /// A pasted image goes where pasted layers go: with nothing selected,
+    /// onto the page, even with a nested frame in the middle of the view.
+    #[test]
+    fn pasted_image_follows_the_selection() {
+        let mut doc = Document::new_empty();
+        let frame = |id: &str, parent: &str, w: f64| {
+            let mut n = Node::new(id, NodeType::Frame);
+            (n.parent, n.width, n.height) = (Some(parent.into()), w, w);
+            n
+        };
+        doc.apply(&Op::Create { node: frame("f:1", "0:1", 4000.0) }).unwrap();
+        doc.apply(&Op::Create { node: frame("f:2", "f:1", 3000.0) }).unwrap();
+        let mut ed = Editor::new(None, None);
+        ed.load(&doc.to_json(), "c1", true).unwrap();
+        let parent = |ed: &Editor, id: &str| ed.doc.get(id).unwrap().parent.clone().unwrap();
+        let img = ed.insert_image("a", 10.0, 10.0, None).unwrap();
+        assert_eq!(parent(&ed, &img), "0:1", "nothing selected: the page, not the frame in view");
+        ed.set_selection(vec!["f:2".into()]);
+        let img = ed.insert_image("a", 10.0, 10.0, None).unwrap();
+        assert_eq!(parent(&ed, &img), "f:2", "into the selected frame");
+        ed.set_selection(vec![]);
+        let img = ed.insert_image("a", 10.0, 10.0, Some(Vec2::new(5.0, 5.0))).unwrap();
+        assert_eq!(parent(&ed, &img), "f:2", "dropped on a frame: into it");
     }
 
     #[test]
