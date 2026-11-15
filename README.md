@@ -129,6 +129,14 @@ curl -fsSL https://<your domain>/agents/install.sh | sh
 irm https://<your domain>/agents/install.ps1 | iex
 ```
 
+An optional skill, `ui-alignment-audit`, audits the alignment, spacing and padding of any screenshot (Flexma's or not) and draws guide lines over it. It runs a Python script, so it needs Python 3 with numpy, OpenCV and Pillow. Its installer tells you if they're missing and installs the skill either way, and the main installer keeps it up to date:
+
+```bash
+curl -fsSL https://<your domain>/agents/install/ui-alignment-audit.sh | sh
+```
+
+On Windows: `irm https://<your domain>/agents/install/ui-alignment-audit.ps1 | iex`.
+
 The **AI Agents** page in the app shows these commands with your domain filled in.
 
 Then ask your agent things like:
@@ -254,7 +262,7 @@ cd web && npx tsc -b
 | `crates/flexma-engine` | The wasm editor engine and renderer |
 | `crates/flexma-server` | HTTP/WebSocket server, MCP, OAuth, SQLite, Unity export |
 | `web/` | React app (dashboard and editor UI) |
-| `skills/` | Agent skills: `flexma`, `flexma-to-unity`, `unity-ui-to-flexma` |
+| `skills/` | Agent skills: `flexma`, `ui-alignment-audit`, `flexma-to-unity`, `unity-ui-to-flexma` |
 | `docs/` | API reference, deployment guide, performance research |
 | `deploy/` | Caddyfile and systemd unit |
 

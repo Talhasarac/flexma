@@ -179,6 +179,12 @@ export function SkillSection({ setup, os, updates }: ConnectProps & { updates: S
         into Flexma and keeps them in sync.
       </p>
       <CopyField value={o.unitySkillInstallCommand} multiline toastMessage="Command copied" />
+      <p className="text-muted">
+        Design reviews: <code>ui-alignment-audit</code> checks any screenshot for near-miss alignment, uneven spacing and
+        lopsided padding, and draws guide lines over it. It needs Python 3 with numpy, OpenCV and Pillow; the installer
+        tells you if they're missing.
+      </p>
+      <CopyField value={o.alignSkillInstallCommand} multiline toastMessage="Command copied" />
     </div>
   );
 }

@@ -183,6 +183,8 @@ export interface AgentSetup {
   skillInstallCommand: string;
   /** Optional skill for Unity projects (also installs the flexma skill). */
   unitySkillInstallCommand: string;
+  /** Optional skill that audits screenshots' alignment (Python; also installs the flexma skill). */
+  alignSkillInstallCommand: string;
   /** OAuth (browser sign-in) variants — recommended. */
   claudeCommand: string;
   codexConfig: string;
@@ -200,6 +202,7 @@ export interface AgentSetup {
   windows?: {
     skillInstallCommand: string;
     unitySkillInstallCommand: string;
+    alignSkillInstallCommand: string;
     claudeCommand: string;
     codexCommand: string;
     opencodeCommand: string;

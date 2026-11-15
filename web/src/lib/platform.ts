@@ -41,6 +41,7 @@ export interface OsSnippets {
   opencodeCommand: string;
   skillInstallCommand: string;
   unitySkillInstallCommand: string;
+  alignSkillInstallCommand: string;
   /** Linux machines don't always have curl. */
   skillInstallFallback: string | null;
   claudeTokenCommand: string;
@@ -73,6 +74,7 @@ export function snippetsFor(s: AgentSetup, os: OS): OsSnippets {
     opencodeCommand: s.opencodeCommand,
     skillInstallCommand: s.skillInstallCommand,
     unitySkillInstallCommand: s.unitySkillInstallCommand,
+    alignSkillInstallCommand: s.alignSkillInstallCommand,
     skillInstallFallback: os === 'linux' ? s.skillInstallCommand.replace('curl -fsSL', 'wget -qO-') : null,
     claudeTokenCommand: s.claudeTokenCommand,
     codexTokenCommand: s.codexTokenCommand,

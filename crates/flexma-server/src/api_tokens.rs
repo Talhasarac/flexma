@@ -92,6 +92,8 @@ pub fn setup_snippets(base: &str) -> Value {
         "skillInstallCommand": format!("curl -fsSL {base}/agents/install.sh | sh"),
         // Optional: Unity projects (installs the flexma skill too).
         "unitySkillInstallCommand": format!("curl -fsSL {base}/agents/install/unity-ui-to-flexma.sh | sh"),
+        // Optional: alignment audits of screenshots (Python; installs the flexma skill too).
+        "alignSkillInstallCommand": format!("curl -fsSL {base}/agents/install/ui-alignment-audit.sh | sh"),
         // OAuth (recommended): the client opens a browser to sign in, like hosted MCP servers.
         "claudeCommand": format!("claude mcp add --scope user --transport http flexma {mcp}"),
         "codexCommand": format!("codex mcp add flexma --url {mcp} && codex mcp login flexma"),
@@ -115,6 +117,7 @@ pub fn setup_snippets(base: &str) -> Value {
         "windows": {
             "skillInstallCommand": format!("irm {base}/agents/install.ps1 | iex"),
             "unitySkillInstallCommand": format!("irm {base}/agents/install/unity-ui-to-flexma.ps1 | iex"),
+            "alignSkillInstallCommand": format!("irm {base}/agents/install/ui-alignment-audit.ps1 | iex"),
             "claudeCommand": format!("claude mcp add --scope user --transport http flexma {mcp}"),
             "codexCommand": format!("codex mcp add flexma --url {mcp}; codex mcp login flexma"),
             "claudeTokenCommand": format!(
@@ -151,6 +154,10 @@ pub struct Skill {
     pub name: &'static str,
     /// Path inside the skill folder, and the file's text.
     pub files: &'static [(&'static str, &'static str)],
+    /// Python modules its scripts import, and the pip packages that provide
+    /// them. Installers check for them and say what's missing; they never
+    /// fail over it.
+    pub python: Option<(&'static str, &'static str)>,
 }
 
 /// Everyone installs this one.
@@ -161,6 +168,18 @@ pub const FLEXMA_SKILL: Skill = Skill {
         ("references/node-spec.md", include_str!("../../../skills/flexma/references/node-spec.md")),
         ("references/recipes.md", include_str!("../../../skills/flexma/references/recipes.md")),
     ],
+    python: None,
+};
+
+/// Optional: audits a UI's alignment from any screenshot, Flexma's or not,
+/// with a Python script.
+pub const UI_ALIGN_SKILL: Skill = Skill {
+    name: "ui-alignment-audit",
+    files: &[
+        ("SKILL.md", include_str!("../../../skills/ui-alignment-audit/SKILL.md")),
+        ("scripts/ui_align.py", include_str!("../../../skills/ui-alignment-audit/scripts/ui_align.py")),
+    ],
+    python: Some(("numpy, cv2, PIL", "numpy opencv-python-headless pillow")),
 };
 
 /// Optional: exports a Unity project's uGUI and UI Toolkit screens into
@@ -175,6 +194,7 @@ pub const UNITY_SKILL: Skill = Skill {
         ("scripts/FlexmaClient.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaClient.cs")),
         ("scripts/FlexmaUIExporterWindow.cs", include_str!("../../../skills/unity-ui-to-flexma/scripts/FlexmaUIExporterWindow.cs")),
     ],
+    python: None,
 };
 
 /// Optional: builds Flexma frames into Unity uGUI prefabs that look the same
@@ -192,13 +212,17 @@ pub const FLEXMA_TO_UNITY_SKILL: Skill = Skill {
         ("scripts/Editor/FlexmaImportCheck.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImportCheck.cs")),
         ("scripts/Editor/FlexmaImportWindow.cs", include_str!("../../../skills/flexma-to-unity/scripts/Editor/FlexmaImportWindow.cs")),
     ],
+    python: None,
 };
 
-pub const SKILLS: &[&Skill] = &[&FLEXMA_SKILL, &UNITY_SKILL, &FLEXMA_TO_UNITY_SKILL];
+pub const SKILLS: &[&Skill] = &[&FLEXMA_SKILL, &UNITY_SKILL, &FLEXMA_TO_UNITY_SKILL, &UI_ALIGN_SKILL];
+
+/// What every installer installs (`/agents/install.sh|.ps1`).
+const DEFAULT_SKILLS: &[&Skill] = &[&FLEXMA_SKILL];
 
 /// Optional installers, `/agents/install/<name>.sh|.ps1`: each also installs
-/// (or updates) the `flexma` skill it builds on.
-const ADD_ONS: &[&Skill] = &[&UNITY_SKILL, &FLEXMA_TO_UNITY_SKILL];
+/// (or updates) the `flexma` skill.
+const ADD_ONS: &[&Skill] = &[&UNITY_SKILL, &FLEXMA_TO_UNITY_SKILL, &UI_ALIGN_SKILL];
 
 impl Skill {
     /// A hash of every file, so any edit is a new version. Installed copies
@@ -323,13 +347,13 @@ pub async fn skill_file(State(st): State<AppState>, headers: HeaderMap, Path((sk
 
 pub async fn install_script(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let base = st.base_url(&headers);
-    ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], install_sh(&base, &[&FLEXMA_SKILL])).into_response()
+    ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], install_sh(&base, DEFAULT_SKILLS)).into_response()
 }
 
 /// The same installer for Windows: `irm <base>/agents/install.ps1 | iex`.
 pub async fn install_script_ps1(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let base = st.base_url(&headers);
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], install_ps1(&base, &[&FLEXMA_SKILL])).into_response()
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], install_ps1(&base, DEFAULT_SKILLS)).into_response()
 }
 
 /// An optional skill's installer: `/agents/install/unity-ui-to-flexma.sh` (or `.ps1`).
@@ -337,10 +361,10 @@ pub async fn add_on_installer(State(st): State<AppState>, headers: HeaderMap, Pa
     let base = st.base_url(&headers);
     let find = |name: &str| ADD_ONS.iter().copied().find(|s| s.name == name);
     if let Some(skill) = file.strip_suffix(".sh").and_then(find) {
-        return ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], install_sh(&base, &[&FLEXMA_SKILL, skill])).into_response();
+        return ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], install_sh(&base, &[DEFAULT_SKILLS, &[skill]].concat())).into_response();
     }
     if let Some(skill) = file.strip_suffix(".ps1").and_then(find) {
-        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], install_ps1(&base, &[&FLEXMA_SKILL, skill])).into_response();
+        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], install_ps1(&base, &[DEFAULT_SKILLS, &[skill]].concat())).into_response();
     }
     (axum::http::StatusCode::NOT_FOUND, "not found").into_response()
 }
@@ -355,7 +379,8 @@ fn names(skills: &[&Skill]) -> String {
         [s] => format!("the {} skill ({})", s.name, s.version()),
         _ => {
             let n: Vec<String> = skills.iter().map(|s| format!("{} ({})", s.name, s.version())).collect();
-            format!("the {} skills", n.join(" and "))
+            let (last, rest) = n.split_last().unwrap();
+            format!("the {} and {last} skills", rest.join(", "))
         }
     }
 }
@@ -379,6 +404,7 @@ fn install_sh(base: &str, skills: &[&Skill]) -> String {
         updates.push_str(&format!("    echo \"  updated {} ({}) -> $ROOT\"\n  fi\n", a.name, a.version()));
     }
     let what = names(skills);
+    let python = python_note_sh(skills);
     format!(
         r#"#!/bin/sh
 # Flexma skill installer for Claude Code, Codex and OpenCode.
@@ -399,7 +425,7 @@ echo "Installing {what} from $BASE"
 install_to "$HOME/.claude/skills"
 install_to "$HOME/.codex/skills"
 install_to "${{XDG_CONFIG_HOME:-$HOME/.config}}/opencode/skills"
-echo ""
+{python}echo ""
 echo "Next, connect the Flexma MCP server (your agent will open a browser to sign in):"
 echo ""
 echo "  Claude Code:"
@@ -426,6 +452,7 @@ fn install_ps1(base: &str, skills: &[&Skill]) -> String {
         files.join(", ")
     };
     let what = names(skills);
+    let python = python_note_ps1(skills);
     format!(
         r#"# Flexma skill installer for Claude Code, Codex and OpenCode (Windows PowerShell).
 # Installs {what} into ~\.claude\skills, ~\.codex\skills and ~\.config\opencode\skills.
@@ -451,7 +478,7 @@ Write-Host "Installing {what} from $FlexmaBase"
 Install-FlexmaSkills (Join-Path $HOME '.claude\skills')
 Install-FlexmaSkills (Join-Path $HOME '.codex\skills')
 Install-FlexmaSkills (Join-Path $HOME '.config\opencode\skills')
-Write-Host ''
+{python}Write-Host ''
 Write-Host 'Next, connect the Flexma MCP server (your agent will open a browser to sign in):'
 Write-Host ''
 Write-Host '  Claude Code:'
@@ -475,6 +502,58 @@ Write-Host ''
     )
 }
 
+/// A note for each skill that runs Python, when it's installed (now, or from
+/// before and just updated) and Python or its packages are missing. Only a
+/// check: the skill is installed either way and works once they're added.
+fn python_note_sh(skills: &[&Skill]) -> String {
+    let mut out = String::new();
+    for s in skills.iter().copied().chain(add_ons_besides(skills)) {
+        let Some((imports, pip)) = s.python else { continue };
+        let name = s.name;
+        out.push_str(&format!(
+            "if [ -f \"$HOME/.claude/skills/{name}/SKILL.md\" ] || [ -f \"$HOME/.codex/skills/{name}/SKILL.md\" ] || \
+             [ -f \"${{XDG_CONFIG_HOME:-$HOME/.config}}/opencode/skills/{name}/SKILL.md\" ]; then\n\
+             \x20 if ! command -v python3 >/dev/null 2>&1; then\n\
+             \x20   echo \"Note: {name} needs Python 3, which isn't installed. Install Python 3, then: pip install {pip}\"\n\
+             \x20 elif ! python3 -c \"import {imports}\" >/dev/null 2>&1; then\n\
+             \x20   echo \"Note: {name} needs Python 3 with {list}. Install them with: pip install {pip}\"\n\
+             \x20 fi\nfi\n",
+            list = and_list(pip),
+        ));
+    }
+    out
+}
+
+/// `python_note_sh` for Windows. A command that fails here only prints, and
+/// the Microsoft Store's `python` stub doesn't count as Python.
+fn python_note_ps1(skills: &[&Skill]) -> String {
+    let mut out = String::new();
+    for s in skills.iter().copied().chain(add_ons_besides(skills)) {
+        let Some((imports, pip)) = s.python else { continue };
+        let name = s.name;
+        out.push_str(&format!(
+            "try {{\n  $ErrorActionPreference = 'Continue'\n  \
+             $Here = @('.claude\\skills', '.codex\\skills', '.config\\opencode\\skills') | Where-Object {{ Test-Path (Join-Path $HOME \"$_\\{name}\\SKILL.md\") }}\n  \
+             if ($Here) {{\n    \
+             $Py = Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue | Where-Object {{ $_.Source -notmatch 'WindowsApps' }} | Select-Object -First 1\n    \
+             if (-not $Py) {{ Write-Host \"Note: {name} needs Python 3, which isn't installed. Install Python 3, then: pip install {pip}\" }}\n    \
+             else {{ & $Py.Source -c \"import {imports}\" *> $null; if ($LASTEXITCODE -ne 0) {{ Write-Host \"Note: {name} needs Python 3 with {list}. Install them with: pip install {pip}\" }} }}\n  \
+             }}\n}} catch {{ }}\n",
+            list = and_list(pip),
+        ));
+    }
+    out
+}
+
+/// "a, b and c" from "a b c".
+fn and_list(words: &str) -> String {
+    let w: Vec<&str> = words.split_whitespace().collect();
+    match w.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => words.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod skill_tests {
     use super::*;
@@ -492,7 +571,35 @@ mod skill_tests {
         assert!(ps.contains("'unity-ui-to-flexma/scripts/FlexmaClient.cs'"));
         assert!(ps.contains("'unity-ui-to-flexma/scripts/FlexmaUIToolkitExport.cs'"));
         // The default installer installs only flexma (add-ons only where they already are).
-        assert!(!install_sh("https://f.example", &[&FLEXMA_SKILL]).contains("\n  fetch unity-ui-to-flexma"));
+        let default = install_sh("https://f.example", DEFAULT_SKILLS);
+        assert!(!default.contains("\n  fetch unity-ui-to-flexma"));
+        assert!(!default.contains("\n  fetch ui-alignment-audit"));
+        assert!(default.contains("    fetch ui-alignment-audit \"scripts/ui_align.py\""), "updated where it's installed");
+        let align = install_sh("https://f.example", &[&FLEXMA_SKILL, &UI_ALIGN_SKILL]);
+        assert!(align.contains("\n  fetch ui-alignment-audit \"scripts/ui_align.py\""));
+        assert!(install_ps1("https://f.example", &[&FLEXMA_SKILL, &UI_ALIGN_SKILL]).contains("'ui-alignment-audit/scripts/ui_align.py'"));
+    }
+
+    /// A skill that runs Python gets a note when Python or its packages are
+    /// missing, which must never stop the installer.
+    #[test]
+    fn python_is_only_checked() {
+        let sh = install_sh("https://f.example", &[&FLEXMA_SKILL, &UI_ALIGN_SKILL]);
+        assert!(sh.contains("if [ -f \"$HOME/.claude/skills/ui-alignment-audit/SKILL.md\" ]"));
+        assert!(sh.contains("  if ! command -v python3 >/dev/null 2>&1; then"));
+        assert!(sh.contains("  elif ! python3 -c \"import numpy, cv2, PIL\" >/dev/null 2>&1; then"));
+        assert!(sh.contains("Note: ui-alignment-audit needs Python 3 with numpy, opencv-python-headless and pillow. Install them with: pip install numpy opencv-python-headless pillow"));
+        // The default installer checks too, for copies it updates.
+        assert!(install_sh("https://f.example", DEFAULT_SKILLS).contains("ui-alignment-audit/SKILL.md\" ]; then"));
+        let ps = install_ps1("https://f.example", &[&FLEXMA_SKILL, &UI_ALIGN_SKILL]);
+        assert!(ps.contains("try {\n  $ErrorActionPreference = 'Continue'") && ps.contains("} catch { }"));
+        if cfg!(unix) {
+            let path = std::env::temp_dir().join(format!("flexma-install-{}.sh", std::process::id()));
+            std::fs::write(&path, &sh).unwrap();
+            let ok = std::process::Command::new("sh").arg("-n").arg(&path).status().unwrap().success();
+            let _ = std::fs::remove_file(&path);
+            assert!(ok, "install.sh parses");
+        }
     }
 
     #[test]
@@ -542,7 +649,8 @@ mod skill_tests {
         assert!(!sh.contains("$ROOT/unity-ui-to-flexma/SKILL.md\" ]"));
         let ps = install_ps1("https://f.example", &[&FLEXMA_SKILL]);
         assert!(ps.contains("$FlexmaAddOns = @('unity-ui-to-flexma/SKILL.md', "));
-        assert!(ps.contains("'flexma-to-unity/scripts/Editor/FlexmaImportWindow.cs')"));
+        assert!(ps.contains("'flexma-to-unity/scripts/Editor/FlexmaImportWindow.cs', "));
+        assert!(ps.contains("'ui-alignment-audit/scripts/ui_align.py')"));
         // The scripts still parse with versions in their messages.
         for sh in [install_sh("https://f.example", &[&FLEXMA_SKILL]), sh] {
             let dir = std::env::temp_dir().join(format!("flexma-install-{}.sh", new_id()));

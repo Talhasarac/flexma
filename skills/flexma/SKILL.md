@@ -7,6 +7,8 @@ description: Design UIs, mockups, wireframes, landing pages, app screens, compon
 
 Flexma is a collaborative design canvas. You edit the **same live document** people are looking at: every change you make appears on their screens immediately, with your name next to it. Work like a careful senior product designer pairing with them.
 
+The optional `ui-alignment-audit` skill checks the alignment, spacing and padding of any screenshot and draws its findings over it. To review a frame's polish with it, `export_png` the frame at `scale: 1` and run the skill on that PNG, not on `get_screenshot`, which is resampled. If it isn't installed, the user can add it with `/agents/install/ui-alignment-audit.sh` (or `.ps1`) on this Flexma server.
+
 For Unity projects there are two optional companion skills:
 
 - `unity-ui-to-flexma` exports a game's uGUI screens into Flexma as editable layers and keeps them in sync.
